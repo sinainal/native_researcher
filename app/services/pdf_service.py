@@ -1,0 +1,1653 @@
+"""PDF resolution and download service."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import re
+import tarfile
+import tempfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote, urljoin, urlparse
+
+import httpx
+
+from app.core.config import Settings
+from app.schemas.article import ArticleReference
+from app.schemas.pdf import (
+    PDFCandidate,
+    PDFDownloadRequest,
+    PDFDownloadResponse,
+    PDFDownloadResult,
+    PDFResolveResponse,
+    PDFTestAttempt,
+    PDFTestResult,
+)
+from app.utils.cache import TTLCache
+from app.utils.files import ensure_unique_path, sanitize_filename
+from app.utils.rate_limit import AsyncRateLimiter
+
+
+@dataclass
+class _ProbeOutcome:
+    candidate: PDFCandidate
+    status_code: int | None = None
+    content_type: str | None = None
+    mode: str | None = None
+    payload_bytes: bytes | None = None
+    content_kind: str | None = None
+    extension: str | None = None
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.status_code == 200 and self.payload_bytes is not None and self.error is None
+
+    def to_attempt(self) -> PDFTestAttempt:
+        return PDFTestAttempt(
+            source=self.candidate.source,
+            url=self.candidate.url,
+            status_code=self.status_code,
+            content_type=self.content_type,
+            mode=self.mode,
+            success=self.success,
+            error=self.error,
+        )
+
+
+class _BrowserFallbackRuntime:
+    def __init__(self, settings: Settings, playwright, browser, timeout_error_cls) -> None:  # noqa: ANN001
+        self.settings = settings
+        self._playwright = playwright
+        self._browser = browser
+        self._timeout_error_cls = timeout_error_cls
+        self._semaphore = asyncio.Semaphore(max(1, settings.pdf_browser_fallback_concurrency))
+
+    @classmethod
+    async def create(cls, settings: Settings) -> _BrowserFallbackRuntime | None:
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return None
+
+        playwright = await async_playwright().start()
+        try:
+            browser = await playwright.chromium.launch(headless=True)
+        except Exception:
+            await playwright.stop()
+            return None
+        return cls(settings, playwright, browser, PlaywrightTimeoutError)
+
+    async def close(self) -> None:
+        await self._browser.close()
+        await self._playwright.stop()
+
+    @staticmethod
+    async def _filter_route(route) -> None:  # noqa: ANN001
+        if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+            await route.abort()
+            return
+        await route.continue_()
+
+    async def download_article(
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        *,
+        mode: str,
+    ) -> PDFDownloadResult | None:
+        browser_targets = service._browser_target_pages(article, mode=mode)
+        if not browser_targets:
+            return None
+
+        async with self._semaphore:
+            context = await self._browser.new_context(
+                accept_downloads=True,
+                user_agent=service._download_headers()["User-Agent"],
+                viewport={"width": 1440, "height": 1024},
+            )
+            await context.route("**/*", self._filter_route)
+            try:
+                for source_hint, article_url in browser_targets:
+                    result = await self._download_from_page(
+                        service,
+                        article,
+                        target_dir,
+                        context,
+                        source_hint,
+                        article_url,
+                    )
+                    if result is not None:
+                        return result
+            except Exception:
+                return None
+            finally:
+                await context.close()
+
+        return None
+
+    async def _download_from_page(  # noqa: PLR0912
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        context,  # noqa: ANN001
+        source_hint: str,
+        article_url: str,
+    ) -> PDFDownloadResult | None:
+        page = await context.new_page()
+        probe_page = await context.new_page()
+        try:
+            response = await page.goto(article_url, wait_until="domcontentloaded", timeout=10_000)
+            direct_result = await self._save_navigation_pdf(
+                service,
+                article,
+                target_dir,
+                source_hint,
+                page.url,
+                response,
+            )
+            if direct_result is not None:
+                return direct_result
+
+            await page.wait_for_timeout(250)
+            raw_candidates = await page.evaluate(
+                """
+                () => {
+                  const seen = new Set();
+                  const values = [];
+                  const add = (value) => {
+                    if (!value || seen.has(value)) return;
+                    seen.add(value);
+                    values.push(value);
+                  };
+                  const hrefNodes = Array.from(document.querySelectorAll('a[href], link[href]'));
+                  for (const node of hrefNodes) {
+                    const href = node.href || node.getAttribute('href') || '';
+                    const text = (node.textContent || '').toLowerCase();
+                    const lower = href.toLowerCase();
+                    if (
+                      lower.includes('.pdf') ||
+                      lower.includes('/pdf') ||
+                      lower.includes('epdf') ||
+                      lower.includes('pdfdirect') ||
+                      lower.includes('downloadpdf') ||
+                      lower.includes('article-pdf') ||
+                      lower.includes('type=printable') ||
+                      text.includes('pdf')
+                    ) {
+                      add(href);
+                    }
+                  }
+                  const metaSelectors = [
+                    "meta[name='citation_pdf_url']",
+                    "meta[property='citation_pdf_url']",
+                    "meta[name='wkhealth_pdf_url']",
+                    "meta[name='citation_fulltext_html_url']",
+                  ];
+                  for (const selector of metaSelectors) {
+                    const node = document.querySelector(selector);
+                    if (node) add(node.getAttribute('content') || '');
+                  }
+                  const embeds = Array.from(document.querySelectorAll('iframe[src], embed[src], object[data]'));
+                  for (const node of embeds) {
+                    add(node.getAttribute('src') || node.getAttribute('data') || '');
+                  }
+                  return values.slice(0, 12);
+                }
+                """
+            )
+            pdf_links = service._expand_browser_pdf_candidates(raw_candidates, page.url, article)
+            for pdf_url in pdf_links:
+                result = await self._download_candidate_url(
+                    service,
+                    article,
+                    target_dir,
+                    context,
+                    probe_page,
+                    source_hint,
+                    article_url,
+                    pdf_url,
+                )
+                if result is not None:
+                    return result
+
+            return await self._click_pdf_actions(
+                service,
+                article,
+                target_dir,
+                page,
+                source_hint,
+            )
+        except Exception:
+            return None
+        finally:
+            await probe_page.close()
+            await page.close()
+
+    async def _download_candidate_url(
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        context,  # noqa: ANN001
+        probe_page,  # noqa: ANN001
+        source_hint: str,
+        referer: str,
+        pdf_url: str,
+    ) -> PDFDownloadResult | None:
+        try:
+            response = await context.request.get(
+                pdf_url,
+                headers={"Referer": referer, "Accept": "application/pdf,*/*"},
+                timeout=8_000,
+            )
+            content_type = (response.headers.get("content-type") or "").lower()
+            content = await response.body()
+            if response.status == 200 and service._is_pdf_payload(content_type, content):
+                return service._save_browser_pdf(article, target_dir, source_hint, pdf_url, content)
+        except Exception:
+            pass
+
+        try:
+            navigation = await probe_page.goto(pdf_url, wait_until="domcontentloaded", timeout=8_000)
+            direct_result = await self._save_navigation_pdf(
+                service,
+                article,
+                target_dir,
+                source_hint,
+                probe_page.url,
+                navigation,
+            )
+            if direct_result is not None:
+                return direct_result
+        except Exception:
+            pass
+
+        try:
+            async with probe_page.expect_download(timeout=6_000) as download_info:
+                await probe_page.goto(pdf_url, wait_until="domcontentloaded", timeout=8_000)
+            download = await download_info.value
+            return await self._save_download_file(service, article, target_dir, source_hint, pdf_url, download)
+        except self._timeout_error_cls:
+            return None
+        except Exception:
+            return None
+
+    async def _click_pdf_actions(
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        page,  # noqa: ANN001
+        source_hint: str,
+    ) -> PDFDownloadResult | None:
+        selectors = [
+            "a[href*='.pdf']",
+            "a[href*='/pdf/']",
+            "a[href*='epdf']",
+            "a[href*='pdfdirect']",
+            "a[href*='article-pdf']",
+            "a[href*='downloadpdf']",
+            "a:has-text('Download PDF')",
+            "a:has-text('View PDF')",
+            "a:has-text('PDF')",
+            "button:has-text('Download PDF')",
+            "button:has-text('PDF')",
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                async with page.expect_download(timeout=6_000) as download_info:
+                    await locator.click(timeout=2_500)
+                download = await download_info.value
+                return await self._save_download_file(
+                    service,
+                    article,
+                    target_dir,
+                    source_hint,
+                    page.url,
+                    download,
+                )
+            except self._timeout_error_cls:
+                continue
+            except Exception:
+                continue
+        return None
+
+    async def _save_navigation_pdf(
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        source_hint: str,
+        url: str,
+        response,  # noqa: ANN001
+    ) -> PDFDownloadResult | None:
+        if response is None:
+            return None
+        try:
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "pdf" not in content_type and "octet-stream" not in content_type:
+                return None
+            content = await response.body()
+        except Exception:
+            return None
+        if not service._is_pdf_payload(content_type, content):
+            return None
+        return service._save_browser_pdf(article, target_dir, source_hint, url, content)
+
+    async def _save_download_file(
+        self,
+        service: PDFService,
+        article: ArticleReference,
+        target_dir: Path,
+        source_hint: str,
+        url: str,
+        download,  # noqa: ANN001
+    ) -> PDFDownloadResult | None:
+        file_path = service._build_file_path(article, source_hint, target_dir)
+        await download.save_as(str(file_path))
+        file_bytes = file_path.read_bytes()
+        if file_bytes.startswith(b"%PDF"):
+            return PDFDownloadResult(
+                article=article,
+                success=True,
+                source=source_hint,
+                url=url,
+                file_path=str(file_path),
+                content_kind="pdf",
+                content_type="application/pdf",
+            )
+        file_path.unlink(missing_ok=True)
+        return None
+
+
+class PDFService:
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient,
+        settings: Settings,
+        candidate_cache: TTLCache[str, list[PDFCandidate]],
+    ) -> None:
+        self.http_client = http_client
+        self.settings = settings
+        self.candidate_cache = candidate_cache
+        self.resolve_rate_limiter = AsyncRateLimiter(settings.pdf_resolve_requests_per_second)
+
+    async def resolve(self, article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
+        cache_key = self._candidate_cache_key(article, mode)
+        cached = self.candidate_cache.get(cache_key)
+        if cached is not None:
+            return PDFResolveResponse(article=article, candidates=cached, cache_hit=True)
+
+        candidates = await self._build_candidates(article, mode=mode)
+        self.candidate_cache.set(cache_key, candidates)
+        return PDFResolveResponse(article=article, candidates=candidates, cache_hit=False)
+
+    async def download_articles(self, request: PDFDownloadRequest) -> PDFDownloadResponse:
+        target_dir = self._resolve_target_dir(request.download_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        articles = request.articles[: request.max_articles] if request.max_articles else request.articles
+        enable_browser = request.use_browser_fallback or request.mode == "balanced"
+        semaphore = asyncio.Semaphore(self._download_concurrency(request.mode))
+        browser_runtime = await self._prepare_browser_runtime(enable_browser)
+
+        async def run_single(article: ArticleReference) -> PDFDownloadResult:
+            async with semaphore:
+                return await self._download_single_article(
+                    article,
+                    target_dir,
+                    mode=request.mode,
+                    use_browser_fallback=enable_browser,
+                    browser_runtime=browser_runtime,
+                )
+
+        try:
+            results = await asyncio.gather(*(run_single(article) for article in articles))
+        finally:
+            if browser_runtime is not None:
+                await browser_runtime.close()
+        success_count = sum(1 for item in results if item.success)
+        return PDFDownloadResponse(
+            total=len(results),
+            success_count=success_count,
+            failed_count=len(results) - success_count,
+            results=results,
+        )
+
+    async def diagnose_articles(
+        self,
+        articles: list[ArticleReference],
+        *,
+        download_dir: str | None = None,
+        save_files: bool = True,
+        mode: str = "fast",
+        use_browser_fallback: bool = False,
+    ) -> list[PDFTestResult]:
+        temp_dir_context: tempfile.TemporaryDirectory[str] | None = None
+        if save_files:
+            target_dir = self._resolve_target_dir(download_dir)
+        elif use_browser_fallback or mode == "balanced":
+            temp_dir_context = tempfile.TemporaryDirectory()
+            target_dir = Path(temp_dir_context.name)
+        else:
+            target_dir = None
+        if target_dir is not None:
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        enable_browser = use_browser_fallback or mode == "balanced"
+        semaphore = asyncio.Semaphore(self._download_concurrency(mode))
+        browser_runtime = await self._prepare_browser_runtime(enable_browser)
+
+        async def run_single(article: ArticleReference) -> PDFTestResult:
+            async with semaphore:
+                return await self._diagnose_single_article(
+                    article,
+                    target_dir,
+                    mode=mode,
+                    use_browser_fallback=enable_browser,
+                    expose_file_path=save_files,
+                    browser_runtime=browser_runtime,
+                )
+
+        try:
+            return await asyncio.gather(*(run_single(article) for article in articles))
+        finally:
+            if browser_runtime is not None:
+                await browser_runtime.close()
+            if temp_dir_context is not None:
+                temp_dir_context.cleanup()
+
+    async def _download_single_article(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        *,
+        mode: str = "fast",
+        use_browser_fallback: bool = False,
+        browser_runtime: _BrowserFallbackRuntime | None = None,
+    ) -> PDFDownloadResult:
+        resolved = await self.resolve(article, mode=mode)
+        success_probe, _attempts = await self._probe_candidates(
+            resolved.candidates,
+            mode=mode,
+            stop_on_first_success=True,
+        )
+        if success_probe is not None and success_probe.payload_bytes is not None:
+            file_path = self._build_file_path(
+                article,
+                success_probe.candidate.source,
+                target_dir,
+                suffix=success_probe.extension or ".pdf",
+            )
+            file_path.write_bytes(success_probe.payload_bytes)
+            return PDFDownloadResult(
+                article=article,
+                success=True,
+                source=success_probe.candidate.source,
+                url=success_probe.candidate.url,
+                file_path=str(file_path),
+                content_kind=success_probe.content_kind,
+                content_type=success_probe.content_type,
+                candidate_count=len(resolved.candidates),
+            )
+
+        if use_browser_fallback:
+            browser_result = await self._download_with_browser_fallback(
+                article,
+                target_dir,
+                mode=mode,
+                browser_runtime=browser_runtime,
+            )
+            if browser_result is not None:
+                browser_result.candidate_count = len(resolved.candidates)
+                return browser_result
+
+        return PDFDownloadResult(
+            article=article,
+            success=False,
+            candidate_count=len(resolved.candidates),
+            error="No downloadable PDF candidate succeeded.",
+        )
+
+    async def _build_candidates(self, article: ArticleReference, *, mode: str) -> list[PDFCandidate]:
+        candidates: list[PDFCandidate] = []
+        seen: set[str] = set()
+
+        def add_candidate(source: str, url: str | None) -> None:
+            if not url or url in seen:
+                return
+            seen.add(url)
+            candidates.append(PDFCandidate(source=source, url=url))
+
+        pmc_task: asyncio.Task[list[str]] | None = None
+        europe_pmc_task: asyncio.Task[list[str]] | None = None
+        pmc = article.pmc_id.upper() if article.pmc_id else None
+        if article.pmc_id:
+            pmc_task = asyncio.create_task(self._pmc_oa_links(pmc))
+            if mode == "balanced":
+                europe_pmc_task = asyncio.create_task(self._europe_pmc_fulltext_links(pmc_id=pmc))
+                add_candidate("europepmc", f"https://europepmc.org/articles/{pmc}?pdf=render")
+                add_candidate("europe_pmc_article", f"https://europepmc.org/articles/{pmc}")
+                add_candidate("pmc_article_html", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/")
+            add_candidate("pmc_direct", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/pdf/")
+
+        pmc_links: list[str] = []
+        if pmc_task is not None:
+            pmc_links = await pmc_task
+            for url in pmc_links:
+                source = "pmc_oa_tgz" if url.endswith(".tar.gz") else "pmc_oa_pdf"
+                add_candidate(source, url)
+
+        if mode == "fast" and pmc is not None:
+            return candidates
+
+        doi_source_map: dict[str, list[str]] = {}
+        if article.doi:
+            doi_source_map = await self._doi_source_map(article.doi, mode=mode)
+            if mode == "balanced":
+                for url in doi_source_map.get("unpaywall", []):
+                    add_candidate("unpaywall", url)
+                for url in doi_source_map.get("europe_pmc", []):
+                    add_candidate("europe_pmc", url)
+            for url in doi_source_map.get("crossref", []):
+                add_candidate("crossref", url)
+            for url in doi_source_map.get("openalex", []):
+                add_candidate("openalex", url)
+            for url in doi_source_map.get("citation_pdf_url", []):
+                add_candidate("citation_pdf_url", url)
+            for url in doi_source_map.get("doi_page", []):
+                add_candidate("doi_page", url)
+            for url in doi_source_map.get("doi_landing", []):
+                add_candidate("doi_landing", url)
+            for url in doi_source_map.get("doi_guessed", []):
+                add_candidate("doi_guessed", url)
+
+        if europe_pmc_task is not None:
+            for url in await europe_pmc_task:
+                add_candidate("europe_pmc", url)
+
+        return candidates
+
+    async def _diagnose_single_article(
+        self,
+        article: ArticleReference,
+        target_dir: Path | None,
+        *,
+        mode: str = "fast",
+        use_browser_fallback: bool = False,
+        expose_file_path: bool = True,
+        browser_runtime: _BrowserFallbackRuntime | None = None,
+    ) -> PDFTestResult:
+        resolved = await self.resolve(article, mode=mode)
+        success_probe, probe_attempts = await self._probe_candidates(
+            resolved.candidates,
+            mode=mode,
+            stop_on_first_success=True,
+        )
+        attempts = [outcome.to_attempt() for outcome in probe_attempts]
+        if success_probe is not None and success_probe.payload_bytes is not None:
+            file_path: str | None = None
+            if target_dir is not None:
+                output_path = self._build_file_path(
+                    article,
+                    success_probe.candidate.source,
+                    target_dir,
+                    suffix=success_probe.extension or ".pdf",
+                )
+                output_path.write_bytes(success_probe.payload_bytes)
+                file_path = str(output_path)
+
+            return PDFTestResult(
+                article=article,
+                success=True,
+                reason="downloadable",
+                source=success_probe.candidate.source,
+                url=success_probe.candidate.url,
+                file_path=file_path,
+                content_kind=success_probe.content_kind,
+                content_type=success_probe.content_type,
+                candidate_count=len(resolved.candidates),
+                attempts=attempts,
+            )
+
+        if use_browser_fallback and target_dir is not None:
+            browser_result = await self._download_with_browser_fallback(
+                article,
+                target_dir,
+                mode=mode,
+                browser_runtime=browser_runtime,
+            )
+            if browser_result is not None:
+                attempts.append(
+                    PDFTestAttempt(
+                        source=browser_result.source or "browser_pmc",
+                        url=browser_result.url or f"https://pmc.ncbi.nlm.nih.gov/articles/{article.pmc_id or ''}/",
+                        status_code=200,
+                        content_type="application/pdf",
+                        mode="browser_download",
+                        success=True,
+                    )
+                )
+                return PDFTestResult(
+                    article=article,
+                    success=True,
+                    reason="downloadable",
+                    source=browser_result.source,
+                    url=browser_result.url,
+                    file_path=browser_result.file_path if expose_file_path else None,
+                    content_kind=browser_result.content_kind,
+                    content_type=browser_result.content_type,
+                    candidate_count=len(resolved.candidates),
+                    attempts=attempts,
+                )
+
+        return PDFTestResult(
+            article=article,
+            success=False,
+            reason=self._diagnostic_reason(attempts),
+            candidate_count=len(resolved.candidates),
+            attempts=attempts,
+        )
+
+    async def _prepare_browser_runtime(
+        self,
+        use_browser_fallback: bool,
+    ) -> _BrowserFallbackRuntime | None:
+        if (
+            not use_browser_fallback
+            or not self._can_use_shared_browser_runtime()
+            or self._uses_mock_transport()
+        ):
+            return None
+        return await _BrowserFallbackRuntime.create(self.settings)
+
+    async def _download_with_browser_fallback(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        *,
+        mode: str,
+        browser_runtime: _BrowserFallbackRuntime | None,
+    ) -> PDFDownloadResult | None:
+        if browser_runtime is not None:
+            return await browser_runtime.download_article(self, article, target_dir, mode=mode)
+        return self._browser_fallback_download_sync(article, target_dir, mode=mode)
+
+    def _can_use_shared_browser_runtime(self) -> bool:
+        return getattr(self._browser_fallback_download_sync, "__func__", None) is PDFService._browser_fallback_download_sync
+
+    def _uses_mock_transport(self) -> bool:
+        return isinstance(getattr(self.http_client, "_transport", None), httpx.MockTransport)
+
+    def _browser_fallback_download_sync(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        *,
+        mode: str = "balanced",
+    ) -> PDFDownloadResult | None:
+        browser_targets = self._browser_target_pages(article, mode=mode)
+        if not browser_targets:
+            return None
+
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                accept_downloads=True,
+                user_agent=self._download_headers()["User-Agent"],
+                viewport={"width": 1440, "height": 1024},
+            )
+            try:
+                for source_hint, article_url in browser_targets:
+                    page = context.new_page()
+                    probe_page = context.new_page()
+                    try:
+                        response = page.goto(article_url, wait_until="domcontentloaded", timeout=20_000)
+                        direct_result = self._save_navigation_pdf_sync(
+                            article,
+                            target_dir,
+                            source_hint,
+                            page.url,
+                            response,
+                        )
+                        if direct_result is not None:
+                            return direct_result
+
+                        page.wait_for_timeout(1_200)
+                        raw_candidates = page.evaluate(
+                            """
+                            () => {
+                              const seen = new Set();
+                              const values = [];
+                              const add = (value) => {
+                                if (!value || seen.has(value)) return;
+                                seen.add(value);
+                                values.push(value);
+                              };
+                              const hrefNodes = Array.from(document.querySelectorAll('a[href], link[href]'));
+                              for (const node of hrefNodes) {
+                                const href = node.href || node.getAttribute('href') || '';
+                                const text = (node.textContent || '').toLowerCase();
+                                const lower = href.toLowerCase();
+                                if (
+                                  lower.includes('.pdf') ||
+                                  lower.includes('/pdf') ||
+                                  lower.includes('epdf') ||
+                                  lower.includes('pdfdirect') ||
+                                  lower.includes('downloadpdf') ||
+                                  lower.includes('article-pdf') ||
+                                  lower.includes('type=printable') ||
+                                  text.includes('pdf')
+                                ) {
+                                  add(href);
+                                }
+                              }
+                              const metaSelectors = [
+                                "meta[name='citation_pdf_url']",
+                                "meta[property='citation_pdf_url']",
+                                "meta[name='wkhealth_pdf_url']",
+                                "meta[name='citation_fulltext_html_url']",
+                              ];
+                              for (const selector of metaSelectors) {
+                                const node = document.querySelector(selector);
+                                if (node) add(node.getAttribute('content') || '');
+                              }
+                              const embeds = Array.from(document.querySelectorAll('iframe[src], embed[src], object[data]'));
+                              for (const node of embeds) {
+                                add(node.getAttribute('src') || node.getAttribute('data') || '');
+                              }
+                              return values.slice(0, 24);
+                            }
+                            """
+                        )
+                        pdf_links = self._expand_browser_pdf_candidates(raw_candidates, page.url, article)
+                        for pdf_url in pdf_links:
+                            result = self._download_candidate_url_sync(
+                                article,
+                                target_dir,
+                                context,
+                                probe_page,
+                                source_hint,
+                                article_url,
+                                pdf_url,
+                            )
+                            if result is not None:
+                                return result
+
+                        result = self._click_pdf_actions_sync(
+                            article,
+                            target_dir,
+                            page,
+                            source_hint,
+                        )
+                        if result is not None:
+                            return result
+                    finally:
+                        probe_page.close()
+                        page.close()
+            except Exception:
+                return None
+            finally:
+                context.close()
+                browser.close()
+
+        return None
+
+    def _download_candidate_url_sync(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        context,  # noqa: ANN001
+        probe_page,  # noqa: ANN001
+        source_hint: str,
+        referer: str,
+        pdf_url: str,
+    ) -> PDFDownloadResult | None:
+        try:
+            response = context.request.get(
+                pdf_url,
+                headers={"Referer": referer, "Accept": "application/pdf,*/*"},
+                timeout=20_000,
+            )
+            content_type = (response.headers.get("content-type") or "").lower()
+            content = response.body()
+            if response.status == 200 and self._is_pdf_payload(content_type, content):
+                return self._save_browser_pdf(article, target_dir, source_hint, pdf_url, content)
+        except Exception:
+            pass
+
+        try:
+            navigation = probe_page.goto(pdf_url, wait_until="domcontentloaded", timeout=20_000)
+            direct_result = self._save_navigation_pdf_sync(
+                article,
+                target_dir,
+                source_hint,
+                probe_page.url,
+                navigation,
+            )
+            if direct_result is not None:
+                return direct_result
+        except Exception:
+            pass
+
+        try:
+            with probe_page.expect_download(timeout=10_000) as download_info:
+                probe_page.goto(pdf_url, wait_until="domcontentloaded", timeout=20_000)
+            download = download_info.value
+            return self._save_download_file_sync(article, target_dir, source_hint, pdf_url, download)
+        except Exception:
+            return None
+
+    def _click_pdf_actions_sync(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        page,  # noqa: ANN001
+        source_hint: str,
+    ) -> PDFDownloadResult | None:
+        selectors = [
+            "a[href*='.pdf']",
+            "a[href*='/pdf/']",
+            "a[href*='epdf']",
+            "a[href*='pdfdirect']",
+            "a[href*='article-pdf']",
+            "a[href*='downloadpdf']",
+            "a:has-text('Download PDF')",
+            "a:has-text('View PDF')",
+            "a:has-text('PDF')",
+            "button:has-text('Download PDF')",
+            "button:has-text('PDF')",
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.count() == 0:
+                    continue
+                with page.expect_download(timeout=10_000) as download_info:
+                    locator.click(timeout=4_000)
+                download = download_info.value
+                return self._save_download_file_sync(article, target_dir, source_hint, page.url, download)
+            except Exception:
+                continue
+        return None
+
+    async def _crossref_pdf_links(self, doi: str) -> list[str]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.crossref_base_url}/works/{quote(doi, safe='')}",
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            message = response.json().get("message", {})
+        except (httpx.HTTPError, ValueError):
+            return []
+        urls = []
+        for item in message.get("link", []):
+            url = item.get("URL")
+            if not url:
+                continue
+            content_type = (item.get("content-type") or "").lower()
+            if "pdf" in content_type or "pdf" in url.lower():
+                urls.append(url)
+        return urls
+
+    async def _doi_source_map(self, doi: str, *, mode: str) -> dict[str, list[str]]:
+        unpaywall_task = asyncio.create_task(self._unpaywall_pdf_links(doi)) if mode == "balanced" else None
+        europe_pmc_task = (
+            asyncio.create_task(self._europe_pmc_fulltext_links(doi=doi)) if mode == "balanced" else None
+        )
+        crossref_task = asyncio.create_task(self._crossref_pdf_links(doi))
+        openalex_task = asyncio.create_task(self._openalex_pdf_links(doi))
+        landing_task = asyncio.create_task(self._doi_landing_source_map(doi)) if mode == "balanced" else None
+        if mode == "balanced":
+            (
+                unpaywall_links,
+                europe_pmc_links,
+                crossref_links,
+                openalex_links,
+                landing_map,
+            ) = await asyncio.gather(
+                unpaywall_task,
+                europe_pmc_task,
+                crossref_task,
+                openalex_task,
+                landing_task,
+            )
+        else:
+            crossref_links, openalex_links = await asyncio.gather(crossref_task, openalex_task)
+            unpaywall_links = []
+            europe_pmc_links = []
+            landing_map = {"citation_pdf_url": [], "doi_page": [], "doi_landing": [], "doi_guessed": []}
+
+        return {
+            "unpaywall": unpaywall_links,
+            "europe_pmc": europe_pmc_links,
+            "crossref": crossref_links,
+            "openalex": openalex_links,
+            "citation_pdf_url": landing_map["citation_pdf_url"],
+            "doi_page": landing_map["doi_page"],
+            "doi_landing": landing_map["doi_landing"],
+            "doi_guessed": landing_map["doi_guessed"],
+        }
+
+    async def _doi_landing_source_map(self, doi: str) -> dict[str, list[str]]:
+        landing_page = await self._fetch_doi_landing_page(doi)
+        if landing_page is None:
+            return {"citation_pdf_url": [], "doi_page": [], "doi_landing": [], "doi_guessed": []}
+
+        html, base_url = landing_page
+        citation_urls = self._extract_meta_pdf_urls_from_html(html, base_url)
+        doi_page_urls = self._extract_pdf_urls_from_html(html, base_url, include_meta=False)
+        if citation_urls:
+            citation_set = set(citation_urls)
+            doi_page_urls = [url for url in doi_page_urls if url not in citation_set]
+
+        landing_urls = [base_url] if self._looks_like_fulltext(html) else []
+        guessed_urls = self._expand_http_pdf_candidates(base_url, doi)
+        return {
+            "citation_pdf_url": citation_urls,
+            "doi_page": doi_page_urls,
+            "doi_landing": landing_urls,
+            "doi_guessed": guessed_urls,
+        }
+
+    async def _pmc_oa_links(self, pmc_id: str) -> list[str]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                self.settings.pmc_oa_base_url,
+                params={"id": pmc_id},
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            root = ET.fromstring(response.text)
+        except (httpx.HTTPError, ET.ParseError, ValueError):
+            return []
+
+        urls: list[str] = []
+        for link in root.findall(".//record/link"):
+            href = link.attrib.get("href")
+            if not href:
+                continue
+            if href.startswith("ftp://"):
+                href = "https://" + href[len("ftp://") :]
+            urls.append(href)
+        return urls
+
+    async def _openalex_pdf_links(self, doi: str) -> list[str]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.openalex_base_url}/works",
+                params={
+                    "filter": f"doi:https://doi.org/{doi}",
+                    "select": "best_oa_location,primary_location",
+                },
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        except (httpx.HTTPError, ValueError):
+            return []
+
+        urls: list[str] = []
+        if not results:
+            return urls
+
+        for field in ("best_oa_location", "primary_location"):
+            location = results[0].get(field) or {}
+            pdf_url = location.get("pdf_url")
+            if pdf_url:
+                urls.append(pdf_url)
+        return urls
+
+    async def _unpaywall_pdf_links(self, doi: str) -> list[str]:
+        if not self.settings.unpaywall_email:
+            return []
+
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.unpaywall_base_url}/{quote(doi, safe='')}",
+                params={"email": self.settings.unpaywall_email},
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+            )
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+
+        locations: list[dict] = []
+        best = payload.get("best_oa_location")
+        if isinstance(best, dict):
+            locations.append(best)
+        for location in payload.get("oa_locations", []):
+            if isinstance(location, dict):
+                locations.append(location)
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for location in locations:
+            for key in ("url_for_pdf", "url"):
+                url = location.get(key)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                urls.append(url)
+        return urls
+
+    async def _europe_pmc_fulltext_links(
+        self,
+        *,
+        doi: str | None = None,
+        pmc_id: str | None = None,
+    ) -> list[str]:
+        query_parts: list[str] = []
+        if pmc_id:
+            query_parts.append(f"PMCID:{pmc_id}")
+        if doi:
+            query_parts.append(f'DOI:"{doi}"')
+        if not query_parts:
+            return []
+
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.europe_pmc_base_url}/search",
+                params={
+                    "query": " OR ".join(query_parts),
+                    "format": "json",
+                    "pageSize": "1",
+                    "resultType": "core",
+                },
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+
+        result_list = payload.get("resultList", {}) if isinstance(payload, dict) else {}
+        results = result_list.get("result", []) if isinstance(result_list, dict) else []
+        if not results:
+            return []
+
+        record = results[0] if isinstance(results[0], dict) else {}
+        fulltext_block = record.get("fullTextUrlList", {}) if isinstance(record, dict) else {}
+        fulltext_urls = fulltext_block.get("fullTextUrl", []) if isinstance(fulltext_block, dict) else []
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for item in fulltext_urls:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            document_style = str(item.get("documentStyle", "")).lower()
+            site = str(item.get("site", "")).lower()
+            if not url or url in seen:
+                continue
+            if "pdf" in document_style or url.lower().endswith(".pdf") or "pdf" in url.lower():
+                seen.add(url)
+                urls.append(url)
+                continue
+            if document_style in {"html", "fulltext-html", "xml", "fulltext-xml"} or any(
+                token in url.lower() for token in ("fulltext", "/article/", "xml", "html")
+            ):
+                seen.add(url)
+                urls.append(url)
+                continue
+            if "europe pmc" in site and pmc_id:
+                render_url = f"https://europepmc.org/articles/{pmc_id}?pdf=render"
+                if render_url not in seen:
+                    seen.add(render_url)
+                    urls.append(render_url)
+
+        if pmc_id:
+            render_url = f"https://europepmc.org/articles/{pmc_id}?pdf=render"
+            if render_url not in seen:
+                urls.append(render_url)
+        return urls
+
+    async def _citation_pdf_links(self, doi: str) -> list[str]:
+        landing_page = await self._fetch_doi_landing_page(doi)
+        if landing_page is None:
+            return []
+        html, base_url = landing_page
+        return self._extract_pdf_urls_from_html(html, base_url, include_meta=True)
+
+    async def _doi_page_pdf_links(self, doi: str) -> list[str]:
+        landing_page = await self._fetch_doi_landing_page(doi)
+        if landing_page is None:
+            return []
+        html, base_url = landing_page
+        return self._extract_pdf_urls_from_html(html, base_url, include_meta=False)
+
+    async def _fetch_doi_landing_page(self, doi: str) -> tuple[str, str] | None:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.doi_resolver_base_url}/{quote(doi, safe='')}",
+                headers={"User-Agent": self.settings.request_user_agent, "Accept": "text/html,*/*"},
+                follow_redirects=True,
+            )
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200 or "html" not in response.headers.get("content-type", "").lower():
+            return None
+
+        return response.text, str(response.url)
+
+    async def _probe_candidates(
+        self,
+        candidates: list[PDFCandidate],
+        *,
+        mode: str,
+        stop_on_first_success: bool,
+    ) -> tuple[_ProbeOutcome | None, list[_ProbeOutcome]]:
+        if not candidates:
+            return None, []
+
+        semaphore = asyncio.Semaphore(self._candidate_concurrency(mode))
+        tasks = [
+            asyncio.create_task(self._bounded_probe_candidate(candidate, semaphore, mode=mode))
+            for candidate in candidates
+        ]
+        outcomes: list[_ProbeOutcome] = []
+        success_outcome: _ProbeOutcome | None = None
+        try:
+            for completed in asyncio.as_completed(tasks):
+                outcome = await completed
+                outcomes.append(outcome)
+                if stop_on_first_success and outcome.success:
+                    success_outcome = outcome
+                    break
+        finally:
+            if stop_on_first_success and success_outcome is not None:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if success_outcome is None:
+            success_outcome = next((outcome for outcome in outcomes if outcome.success), None)
+        return success_outcome, outcomes
+
+    async def _bounded_probe_candidate(
+        self,
+        candidate: PDFCandidate,
+        semaphore: asyncio.Semaphore,
+        *,
+        mode: str,
+    ) -> _ProbeOutcome:
+        async with semaphore:
+            return await self._probe_candidate(candidate, mode=mode)
+
+    async def _probe_candidate(self, candidate: PDFCandidate, *, mode: str) -> _ProbeOutcome:
+        try:
+            response = await self.http_client.get(
+                candidate.url,
+                headers=self._download_headers(),
+                follow_redirects=True,
+                timeout=self._probe_timeout_seconds(mode, candidate.source),
+            )
+            content_type = response.headers.get("content-type", "").lower() or None
+            payload_bytes, payload_mode, content_kind, extension = self._extract_download_payload(
+                candidate.url,
+                content_type or "",
+                response.content,
+            )
+            if response.status_code != 200:
+                payload_bytes = None
+            return _ProbeOutcome(
+                candidate=candidate,
+                status_code=response.status_code,
+                content_type=content_type,
+                mode=payload_mode,
+                payload_bytes=payload_bytes,
+                content_kind=content_kind,
+                extension=extension,
+            )
+        except Exception as exc:
+            return _ProbeOutcome(
+                candidate=candidate,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _resolve_target_dir(self, download_dir: str | None) -> Path:
+        if download_dir:
+            return Path(download_dir).expanduser().resolve()
+        return self.settings.download_root.expanduser().resolve()
+
+    def _build_file_path(
+        self,
+        article: ArticleReference,
+        source: str,
+        target_dir: Path,
+        *,
+        suffix: str = ".pdf",
+    ) -> Path:
+        year_part = article.year or "unknown_year"
+        year_dir = target_dir / f"year_{year_part}"
+        year_dir.mkdir(parents=True, exist_ok=True)
+        title = article.title or article.pmid or article.doi or article.pmc_id or "article"
+        stem = sanitize_filename(title)
+        file_path = ensure_unique_path(year_dir / f"{stem}_{source}{suffix}")
+        return file_path
+
+    def _browser_target_pages(self, article: ArticleReference, *, mode: str = "balanced") -> list[tuple[str, str]]:
+        targets: list[tuple[str, str]] = []
+        if mode == "balanced" and article.pmc_id:
+            targets.append(("browser_pmc", f"https://pmc.ncbi.nlm.nih.gov/articles/{article.pmc_id}/"))
+        return targets
+
+    def _save_browser_pdf(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        source: str,
+        url: str,
+        content: bytes,
+    ) -> PDFDownloadResult:
+        file_path = self._build_file_path(article, source, target_dir)
+        file_path.write_bytes(content)
+        return PDFDownloadResult(
+            article=article,
+            success=True,
+            source=source,
+            url=url,
+            file_path=str(file_path),
+            content_kind="pdf",
+            content_type="application/pdf",
+        )
+
+    def _save_navigation_pdf_sync(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        source_hint: str,
+        url: str,
+        response,  # noqa: ANN001
+    ) -> PDFDownloadResult | None:
+        if response is None:
+            return None
+        try:
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "pdf" not in content_type and "octet-stream" not in content_type:
+                return None
+            content = response.body()
+        except Exception:
+            return None
+        if not self._is_pdf_payload(content_type, content):
+            return None
+        return self._save_browser_pdf(article, target_dir, source_hint, url, content)
+
+    def _save_download_file_sync(
+        self,
+        article: ArticleReference,
+        target_dir: Path,
+        source_hint: str,
+        url: str,
+        download,  # noqa: ANN001
+    ) -> PDFDownloadResult | None:
+        file_path = self._build_file_path(article, source_hint, target_dir)
+        download.save_as(str(file_path))
+        file_bytes = file_path.read_bytes()
+        if file_bytes.startswith(b"%PDF"):
+            return PDFDownloadResult(
+                article=article,
+                success=True,
+                source=source_hint,
+                url=url,
+                file_path=str(file_path),
+            )
+        file_path.unlink(missing_ok=True)
+        return None
+
+    @staticmethod
+    def _download_headers() -> dict[str, str]:
+        return {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/pdf,*/*",
+        }
+
+    @staticmethod
+    def _is_pdf_payload(content_type: str, content: bytes) -> bool:
+        if "pdf" in content_type or "octet-stream" in content_type:
+            return content.startswith(b"%PDF")
+        return content.startswith(b"%PDF")
+
+    @classmethod
+    def _extract_download_payload(
+        cls,
+        url: str,
+        content_type: str,
+        content: bytes,
+    ) -> tuple[bytes | None, str, str | None, str | None]:
+        if cls._is_pdf_payload(content_type, content):
+            return content, "pdf", "pdf", ".pdf"
+
+        if url.endswith(".tar.gz") or "gzip" in content_type or "x-gzip" in content_type:
+            pdf_bytes = cls._extract_pdf_from_tgz(content)
+            if pdf_bytes is not None:
+                return pdf_bytes, "tgz_with_pdf", "pdf", ".pdf"
+
+        if cls._is_fulltext_xml(content_type, content):
+            return content, "xml_fulltext", "xml_fulltext", ".xml"
+
+        if cls._is_fulltext_html(content_type, content):
+            return content, "html_fulltext", "html_fulltext", ".html"
+
+        if cls._is_plaintext_fulltext(content_type, content):
+            return content, "text_fulltext", "text_fulltext", ".txt"
+
+        return None, "not_fulltext", None, None
+
+    @staticmethod
+    def _extract_pdf_from_tgz(content: bytes) -> bytes | None:
+        try:
+            archive = tarfile.open(fileobj=io.BytesIO(content), mode="r:gz")
+        except tarfile.TarError:
+            return None
+
+        for member in archive.getmembers():
+            if not member.isfile() or not member.name.lower().endswith(".pdf"):
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            pdf_bytes = extracted.read()
+            if pdf_bytes.startswith(b"%PDF"):
+                return pdf_bytes
+        return None
+
+    @staticmethod
+    def _decode_text(content: bytes) -> str:
+        return content.decode("utf-8", errors="ignore")
+
+    @classmethod
+    def _is_fulltext_html(cls, content_type: str, content: bytes) -> bool:
+        if "html" not in content_type and b"<html" not in content[:500].lower():
+            return False
+        text = cls._decode_text(content)
+        return cls._looks_like_fulltext(text)
+
+    @classmethod
+    def _is_fulltext_xml(cls, content_type: str, content: bytes) -> bool:
+        lowered = content[:500].lower()
+        if "xml" not in content_type and b"<?xml" not in lowered:
+            return False
+        text = cls._decode_text(content)
+        return cls._looks_like_fulltext(text)
+
+    @classmethod
+    def _is_plaintext_fulltext(cls, content_type: str, content: bytes) -> bool:
+        if "text/plain" not in content_type:
+            return False
+        return cls._looks_like_fulltext(cls._decode_text(content))
+
+    @staticmethod
+    def _looks_like_fulltext(text: str) -> bool:
+        if PDFService._looks_like_elsevier_fulltext(text):
+            return True
+        cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", " ", text)
+        cleaned = re.sub(r"(?s)<[^>]+>", " ", cleaned)
+        cleaned = re.sub(r"&[A-Za-z#0-9]+;", " ", cleaned)
+        cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+        if len(cleaned) < 4000:
+            return False
+        word_count = len(cleaned.split())
+        if word_count < 700:
+            return False
+        heading_hits = sum(
+            1
+            for token in ("introduction", "methods", "results", "discussion", "conclusion", "references")
+            if token in cleaned.lower()
+        )
+        return heading_hits >= 2
+
+    @staticmethod
+    def _looks_like_elsevier_fulltext(text: str) -> bool:
+        lowered = text.lower()
+        if "sciencedirect" not in lowered and "elsevier" not in lowered:
+            return False
+        if "article preview" in lowered or "purchase pdf" in lowered:
+            return False
+        positive_hits = sum(
+            token in lowered
+            for token in (
+                "open archive",
+                "main text",
+                "introduction",
+                "results",
+                "discussion",
+                "references",
+            )
+        )
+        if positive_hits < 3:
+            return False
+        cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", " ", text)
+        cleaned = re.sub(r"(?s)<[^>]+>", " ", cleaned)
+        cleaned = re.sub(r"&[A-Za-z#0-9]+;", " ", cleaned)
+        cleaned = re.sub(r"\\s+", " ", cleaned).strip()
+        return len(cleaned) >= 2500 and len(cleaned.split()) >= 400
+
+    @staticmethod
+    def _extract_pdf_urls_from_html(
+        html: str,
+        base_url: str,
+        *,
+        include_meta: bool,
+    ) -> list[str]:
+        candidates: list[str] = []
+
+        if include_meta:
+            meta_patterns = [
+                r'citation_pdf_url[^>]+content=["\']([^"\']+)',
+                r'content=["\']([^"\']+type=printable[^"\']*)',
+            ]
+            for pattern in meta_patterns:
+                for match in re.finditer(pattern, html, re.IGNORECASE):
+                    candidates.append(urljoin(base_url, match.group(1)))
+
+        for match in re.finditer(r'href=["\']([^"\']+)["\']', html, re.IGNORECASE):
+            href = match.group(1)
+            href_lower = href.lower()
+            if ".pdf" not in href_lower and "/pdf" not in href_lower and "type=printable" not in href_lower:
+                continue
+            candidates.append(urljoin(base_url, href))
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in candidates:
+            if url in seen:
+                continue
+            seen.add(url)
+            unique.append(url)
+        return unique
+
+    @staticmethod
+    def _extract_meta_pdf_urls_from_html(html: str, base_url: str) -> list[str]:
+        candidates: list[str] = []
+        meta_patterns = [
+            r'citation_pdf_url[^>]+content=["\']([^"\']+)',
+            r'content=["\']([^"\']+type=printable[^"\']*)',
+        ]
+        for pattern in meta_patterns:
+            for match in re.finditer(pattern, html, re.IGNORECASE):
+                candidates.append(urljoin(base_url, match.group(1)))
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in candidates:
+            if url in seen:
+                continue
+            seen.add(url)
+            unique.append(url)
+        return unique
+
+    @staticmethod
+    def _expand_http_pdf_candidates(page_url: str, doi: str) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+
+        def add(url: str | None) -> None:
+            if not url:
+                return
+            absolute = urljoin(page_url, url)
+            if absolute in seen:
+                return
+            seen.add(absolute)
+            unique.append(absolute)
+
+        parsed = urlparse(page_url)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else page_url
+        host = parsed.netloc.lower()
+
+        if "wiley.com" in host:
+            add(f"{base}/doi/pdfdirect/{doi}")
+            add(f"{base}/doi/pdf/{doi}")
+            add(f"{base}/doi/epdf/{doi}")
+        if "pubs.acs.org" in host:
+            add(f"{base}/doi/pdf/{doi}")
+            add(f"{base}/doi/pdfplus/{doi}")
+        if "academic.oup.com" in host:
+            add(f"{base}/journals/downloadpdf/{doi}")
+        if "journals.lww.com" in host:
+            add(f"{base}/_layouts/15/oaks.journals/downloadpdf.aspx")
+
+        pii_match = re.search(r"/pii/([^/?#]+)", page_url, re.IGNORECASE)
+        if pii_match is not None:
+            pii = pii_match.group(1)
+            add(f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true")
+            add(f"https://www.sciencedirect.com/science/article/pii/{pii}/pdf")
+
+        return unique
+
+    @classmethod
+    def _expand_browser_pdf_candidates(
+        cls,
+        candidate_urls: list[str],
+        page_url: str,
+        article: ArticleReference,
+    ) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+
+        def add(url: str | None) -> None:
+            if not url:
+                return
+            absolute = urljoin(page_url, url)
+            if absolute in seen:
+                return
+            seen.add(absolute)
+            unique.append(absolute)
+
+        for candidate in candidate_urls:
+            add(candidate)
+
+        parsed = urlparse(page_url)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else page_url
+        host = parsed.netloc.lower()
+        doi = article.doi or ""
+
+        for candidate in list(unique):
+            lower = candidate.lower()
+            if "/doi/epdf/" in lower:
+                add(re.sub(r"/doi/epdf/", "/doi/pdfdirect/", candidate, flags=re.IGNORECASE))
+                add(re.sub(r"/doi/epdf/", "/doi/pdf/", candidate, flags=re.IGNORECASE))
+            if "/doi/pdfdirect/" in lower:
+                add(re.sub(r"/doi/pdfdirect/", "/doi/pdf/", candidate, flags=re.IGNORECASE))
+
+        if doi:
+            if "wiley.com" in host:
+                add(f"{base}/doi/pdfdirect/{doi}")
+                add(f"{base}/doi/pdf/{doi}")
+                add(f"{base}/doi/epdf/{doi}")
+            if "pubs.acs.org" in host:
+                add(f"{base}/doi/pdf/{doi}")
+                add(f"{base}/doi/pdfplus/{doi}")
+            if "academic.oup.com" in host:
+                add(f"{base}/journals/downloadpdf/{doi}")
+            if "journals.lww.com" in host:
+                add(f"{base}/_layouts/15/oaks.journals/downloadpdf.aspx")
+
+        pii_match = re.search(r"/pii/([^/?#]+)", page_url, re.IGNORECASE)
+        if pii_match is not None:
+            pii = pii_match.group(1)
+            add(f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true")
+            add(f"https://www.sciencedirect.com/science/article/pii/{pii}/pdf")
+
+        return unique
+
+    @staticmethod
+    def _diagnostic_reason(attempts: list[PDFTestAttempt]) -> str:
+        if not attempts:
+            return "no_candidates"
+
+        status_codes = [attempt.status_code for attempt in attempts if attempt.status_code is not None]
+        if any(code == 403 for code in status_codes):
+            return "blocked_403"
+        if any(code == 429 for code in status_codes):
+            return "rate_limited_429"
+        if any((attempt.content_type or "").startswith("text/html") for attempt in attempts):
+            return "html_not_pdf"
+        return "no_valid_pdf_payload"
+
+    @staticmethod
+    def _candidate_cache_key(article: ArticleReference, mode: str) -> str:
+        return "|".join(
+            [
+                mode,
+                article.doi or "",
+                article.pmc_id or "",
+                article.pmid or "",
+            ]
+        )
+
+    @staticmethod
+    def _download_concurrency(mode: str) -> int:
+        return 20 if mode == "fast" else 12
+
+    @staticmethod
+    def _candidate_concurrency(mode: str) -> int:
+        return 6 if mode == "fast" else 5
+
+    @staticmethod
+    def _probe_timeout_seconds(mode: str, source: str) -> float:
+        if source.startswith("pmc_oa"):
+            return 4.0 if mode == "fast" else 8.0
+        if source in {
+            "crossref",
+            "openalex",
+            "unpaywall",
+            "europe_pmc",
+            "europepmc",
+            "pmc_direct",
+            "citation_pdf_url",
+            "doi_page",
+            "doi_landing",
+        }:
+            return 2.5 if mode == "fast" else 5.0
+        return 2.0 if mode == "fast" else 4.0

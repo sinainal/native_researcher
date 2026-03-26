@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Researcher_2 — PubMed Research Console</title>
+  <meta name="description" content="Academic PubMed search, PDF retrieval and LLM analysis console.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+
+<body>
+
+  <!-- ══════════════════════════════════════════════════════════
+     APP SHELL
+══════════════════════════════════════════════════════════ -->
+  <div class="shell">
+
+    <!-- ① TOPBAR ─────────────────────────────────────────────── -->
+    <header class="topbar">
+
+      <div class="topbar-left">
+        <div class="logo">
+          <!-- simple beaker / flask icon drawn in SVG -->
+          <svg class="logo-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11 4v10.5L4.5 24A3 3 0 0 0 7 29h18a3 3 0 0 0 2.5-4.5L21 14.5V4" stroke="currentColor"
+              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            <line x1="9" y1="4" x2="23" y2="4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+            <circle cx="12" cy="22" r="1.5" fill="currentColor" opacity=".5" />
+            <circle cx="20" cy="24.5" r="1" fill="currentColor" opacity=".5" />
+          </svg>
+          <div class="logo-text">
+            <span class="logo-title">Researcher<em>_2</em> <span class="badge badge-final">Final</span></span>
+            <span class="logo-sub">PubMed Full-Text Console</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="topbar-center">
+        <!-- quick stats inline in header -->
+        <div class="header-stat">
+          <span class="hs-num" id="articleCount">0</span>
+          <span class="hs-lbl">Makale</span>
+        </div>
+        <div class="header-divider"></div>
+        <div class="header-stat">
+          <span class="hs-num" id="selectedCount">0</span>
+          <span class="hs-lbl">Seçili</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div class="health-pill" id="healthPill">
+          <span class="hp-dot"></span>
+          <span id="healthStatus">Kontrol…</span>
+        </div>
+        <a class="btn btn-ghost btn-sm" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+        <button id="runAllBtn" class="btn btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          Tümünü Çalıştır
+        </button>
+      </div>
+    </header>
+
+    <!-- ② WORKSPACE ───────────────────────────────────────────── -->
+    <div class="workspace">
+
+      <!-- ── SIDEBAR ───────────────────────────────────────────── -->
+      <aside class="sidebar">
+
+        <!-- PubMed Search ──────── -->
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-head-main">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <span>PubMed Arama</span>
+            </div>
+            <div class="pane-head-actions">
+              <button id="loadJsonBtn" class="btn btn-ghost btn-xs">Yükle</button>
+              <button id="saveJsonBtn" class="btn btn-ghost btn-xs" disabled>Kaydet</button>
+              <button id="searchBtn" class="btn btn-primary btn-xs">Çek</button>
+            </div>
+          </div><!-- /pane-head -->
+
+          <div class="pane-body">
+            <div class="field">
+              <label>Sorgu</label>
+              <textarea id="query" class="query-input" rows="2">(NDM OR KPC) AND inhibitor* AND (virtual screening OR docking) AND free full text[sb]</textarea>
+            </div>
+
+            <div class="row-2">
+              <div class="field">
+                <label>Başlangıç</label>
+                <input id="yearStart" type="number" placeholder="2020">
+              </div>
+              <div class="field">
+                <label>Bitiş</label>
+                <input id="yearEnd" type="number" placeholder="2025">
+              </div>
+            </div>
+
+            <div class="row-2">
+              <div class="field">
+                <label>Maks. Makale</label>
+                <input id="maxResults" type="number" value="20" min="1" max="5000">
+              </div>
+              <div class="field">
+                <label>Batch</label>
+                <input id="batchSize" type="number" value="50" min="1" max="250">
+              </div>
+            </div>
+
+            <details class="collapsible">
+              <summary>Filtreler</summary>
+              <div class="collapsible-body">
+                <div class="row-2">
+                  <div class="field">
+                    <label>Min Cite</label>
+                    <input id="minCite" type="number" min="0" placeholder="0">
+                  </div>
+                  <div class="field">
+                    <label>Article Type</label>
+                    <select id="articleTypeFilter">
+                      <option value="">Tümü</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div><!-- /pane -->
+
+        <!-- PDF ──────────────────── -->
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-head-main">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="9" y1="13" x2="15" y2="13" />
+                <line x1="9" y1="17" x2="13" y2="17" />
+              </svg>
+              <span>PDF İndirme</span>
+            </div>
+            <div class="pane-head-actions">
+              <button id="resolvePdfBtn" class="btn btn-ghost btn-xs" disabled>Aday</button>
+              <button id="downloadArticlesBtn" class="btn btn-primary btn-xs" disabled>İndir</button>
+            </div>
+          </div>
+          <div class="pane-body">
+            <div class="field">
+              <label>Çıktı Klasörü</label>
+              <input id="downloadDir" type="text" value="./output/ui_downloads">
+            </div>
+            <div class="field">
+              <label>Maks. PDF</label>
+              <input id="maxDownload" type="number" value="20" min="1">
+            </div>
+            <div class="info-box">
+              Final sürüm akışı aktif: sistem önce doğrulanmış tam metni bulmaya çalışır. PDF varsa onu indirir, yoksa erişilebilir kaynak linkini görünür bırakır.
+            </div>
+          </div>
+        </div><!-- /pane -->
+
+        <!-- LLM ──────────────────── -->
+        <div class="pane">
+          <div class="pane-head">
+            <div class="pane-head-main">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a5 5 0 0 1 5 5c0 2.4-1.6 4.4-3.8 4.9L13 22H11l-.2-10.1C8.6 11.4 7 9.4 7 7a5 5 0 0 1 5-5z" />
+              </svg>
+              <span>LLM Analizi</span>
+              <span class="badge badge-warn">Beta</span>
+            </div>
+            <div class="pane-head-actions">
+              <button id="processBtn" class="btn btn-secondary btn-xs">İşle</button>
+              <button id="saveProcessedBtn" class="btn btn-ghost btn-xs" disabled>Kaydet</button>
+            </div>
+          </div>
+          <div class="pane-body">
+            <div class="field">
+              <label>API Anahtarı</label>
+              <div class="input-suffix">
+                <input id="apiKey" type="password" placeholder="Google API Key…">
+                <button id="saveKeyBtn" class="btn btn-secondary btn-xs">Kaydet</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Model</label>
+              <select id="modelSelect">
+                <option>Gemini 3.1 Pro</option>
+                <option selected>Gemini 3 Flash</option>
+                <option>Gemini 3.1 Flash Lite</option>
+                <option>Gemini 2.5 Pro</option>
+                <option>Gemini 2.5 Flash</option>
+                <option>Gemini 2.5 Flash Lite</option>
+              </select>
+            </div>
+
+            <div class="info-box" id="modelInfo"></div>
+
+            <details class="collapsible">
+              <summary>Toplu İşlem Ayarları</summary>
+              <div class="collapsible-body">
+                <div class="row-3">
+                  <div class="field">
+                    <label>Max Token</label>
+                    <input id="maxTokens" type="number" value="750" min="50">
+                  </div>
+                  <div class="field">
+                    <label>LLM Batch</label>
+                    <input id="llmBatch" type="number" value="20" min="1">
+                  </div>
+                  <div class="field">
+                    <label>Retry</label>
+                    <input id="retryCount" type="number" value="5" min="0">
+                  </div>
+                </div>
+                <label class="check-row">
+                  <input id="dynamicBatch" type="checkbox">
+                  <span>Dinamik Batch</span>
+                </label>
+              </div>
+            </details>
+
+            <div class="field">
+              <label>Analiz Prompt'u</label>
+              <textarea id="promptBox" rows="3">Aşağıdaki makale abstractlerindeki inhibitor moleküllerin isimlerini belirle.
+Her bir makale için JSON listesi formatında dön.
+Format: [{"id": X, "potential_inhibitors": "İnhibitör(ler)"}]</textarea>
+            </div>
+
+            <div class="token-row">
+              <span id="tokenInfo">Token: —</span>
+              <span id="batchInfo">Batch: —</span>
+            </div>
+          </div>
+        </div><!-- /pane -->
+
+      </aside><!-- /sidebar -->
+
+      <!-- ── MAIN CONTENT ─────────────────────────────────────── -->
+      <main class="main">
+        <section class="view-panel">
+
+        <!-- Results ─── -->
+        <section class="content-card results-card">
+          <div class="card-toolbar">
+            <div class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              Makale Sonuçları
+            </div>
+            <div class="toolbar-actions">
+              <button id="selectAllBtn" class="btn btn-ghost btn-sm" disabled>Tümünü Seç</button>
+              <button id="clearSelectionBtn" class="btn btn-ghost btn-sm" disabled>Seçimi Temizle</button>
+            </div>
+          </div>
+
+          <div id="metaStrip" class="meta-strip"></div>
+
+          <div class="table-scroll">
+            <table class="data-table">
+              <colgroup>
+                <col style="width: 40px;">
+                <col style="width: 56px;">
+                <col style="width: 112px;">
+                <col style="width: 72px;">
+                <col style="width: 150px;">
+                <col style="width: 92px;">
+                <col>
+                <col style="width: 80px;">
+                <col style="width: 156px;">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Seç</th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="id">
+                      <span>ID</span>
+                      <span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="pmid">
+                      <span>PMID</span>
+                      <span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="year">
+                      <span>Yıl</span>
+                      <span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="article_type">
+                      <span>Makale Tipi</span>
+                      <span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="citation_count">
+                      <span>Atıf</span>
+                      <span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>Başlık</th>
+                  <th>Link</th>
+                  <th>İndirme</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr>
+                  <td colspan="9" class="empty-cell">Henüz arama yapılmadı.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Bottom row: log + json ─── -->
+        <div class="bottom-row">
+
+          <section class="content-card log-card">
+            <div class="card-toolbar">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="4 17 10 11 4 5" />
+                  <line x1="12" y1="19" x2="20" y2="19" />
+                </svg>
+                İşlem Günlüğü
+              </div>
+            </div>
+            <div id="logBox" class="mono-box log-mono"></div>
+          </section>
+
+          <section class="content-card json-card">
+            <div class="card-toolbar">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+                Ham Çıktı
+              </div>
+            </div>
+            <pre id="jsonBox" class="mono-box json-mono">{}</pre>
+          </section>
+
+        </div><!-- /bottom-row -->
+
+        </section>
+      </main><!-- /main -->
+
+    </div><!-- /workspace -->
+  </div><!-- /shell -->
+
+  <!-- AI LAUNCHER FAB -->
+  <button id="assistantLauncher" class="assistant-launcher" type="button" aria-label="AI Assistant">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  </button>
+
+  <!-- AI OVERLAY (no blur — just subtle dim) -->
+  <div id="assistantOverlay" class="assistant-overlay" hidden></div>
+
+  <!-- AI PANEL (centered modal) -->
+  <section id="assistantPanel" class="assistant-panel" hidden>
+    <!-- Messages -->
+    <div id="assistantMessages" class="assistant-messages"></div>
+
+    <!-- Composer -->
+    <div class="assistant-composer">
+      <div class="assistant-composer-shell">
+        <textarea id="assistantInput" rows="1" placeholder="Researcher AI'ya sor…"></textarea>
+        <div class="assistant-composer-footer">
+          <div class="assistant-composer-tools">
+            <div class="assistant-toolbar-group">
+              <div class="assistant-mode-switch assistant-mode-switch-plain" role="tablist" aria-label="Assistant mode">
+                <button id="assistantModeFast" class="assistant-mode-btn is-active" type="button" data-mode="fast" aria-pressed="true">Fast</button>
+                <button id="assistantModeAgent" class="assistant-mode-btn" type="button" data-mode="agent" aria-pressed="false">Agent</button>
+              </div>
+              <span class="assistant-toolbar-divider" aria-hidden="true"></span>
+              <div class="assistant-model-picker" id="assistantModelWrap">
+                <button id="assistantModelBtn" class="assistant-toolbar-btn assistant-model-btn" type="button" aria-haspopup="menu" aria-expanded="false">
+                  <span id="assistantModelLabel">3 Flash</span>
+                  <svg class="assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                    <polyline points="6 9 12 15 18 9"/>
+                  </svg>
+                </button>
+                <div id="assistantModelMenu" class="assistant-toolbar-menu assistant-model-menu" hidden>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3.1 Pro">Gemini 3.1 Pro</button>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3 Flash">Gemini 3 Flash</button>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3.1 Flash Lite">Gemini 3.1 Flash Lite</button>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Pro">Gemini 2.5 Pro</button>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Flash">Gemini 2.5 Flash</button>
+                  <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Flash Lite">Gemini 2.5 Flash Lite</button>
+                </div>
+              </div>
+              <span class="assistant-toolbar-divider" aria-hidden="true"></span>
+              <div class="think-toggle" id="thinkToggleWrap">
+                <button id="thinkToggleBtn" class="think-toggle-btn assistant-toolbar-btn" type="button" aria-expanded="false">
+                  <span id="thinkLabel">Think: Off</span>
+                  <svg class="think-chevron assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div id="thinkMenu" class="think-menu assistant-toolbar-menu" hidden>
+                  <button class="think-menu-item assistant-toolbar-menu-item" data-level="off">
+                    <span class="tmi-dot off"></span>Off <span class="tmi-desc">– Hızlı yanıt</span>
+                  </button>
+                  <button class="think-menu-item assistant-toolbar-menu-item" data-level="low">
+                    <span class="tmi-dot low"></span>Low <span class="tmi-desc">– Kısa düşünme</span>
+                  </button>
+                  <button class="think-menu-item assistant-toolbar-menu-item" data-level="max">
+                    <span class="tmi-dot max"></span>Max <span class="tmi-desc">– Derin analiz</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <button id="assistantSendBtn" class="btn-send btn-send-minimal" type="button" aria-label="Gönder">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="detailPopupOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="detailPopup" class="detail-popup" hidden role="dialog" aria-modal="true" aria-labelledby="detailPopupTitle">
+    <div class="detail-popup-head">
+      <div class="detail-popup-headcopy">
+        <div id="detailPopupEyebrow" class="detail-popup-eyebrow"></div>
+        <h3 id="detailPopupTitle" class="detail-popup-title"></h3>
+        <div id="detailPopupMeta" class="detail-popup-meta"></div>
+      </div>
+      <button id="detailPopupClose" class="detail-popup-close" type="button" aria-label="Kapat" title="Kapat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div id="detailPopupBody" class="detail-popup-body"></div>
+  </section>
+
+  <input id="jsonFileInput" type="file" accept=".json,application/json" hidden>
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

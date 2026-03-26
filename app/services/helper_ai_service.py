@@ -1,0 +1,1316 @@
+"""Gemini-backed helper chat service."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Any
+from uuid import uuid4
+
+from app.genai import create_genai_client, load_genai_sdk, resolve_helper_model_name
+from app.schemas.article import Article
+from app.schemas.helper import (
+    HelperArticle,
+    HelperChatRequest,
+    HelperChatResponse,
+    HelperExecutedAction,
+)
+from app.schemas.pubmed import PubMedSearchRequest, PubMedSearchResponse
+from app.services.helper_log_service import HelperLogService
+from app.services.pubmed_service import PubMedService
+from app.utils.cache import TTLCache
+
+FAST_MODE_SYSTEM_INSTRUCTION = (
+    "You are the fast research assistant inside Researcher_2. "
+    "At the beginning of each turn you only receive a lightweight catalog summary, not the full article content. "
+    "Ground every answer in the catalog, PubMed search results, and tool outputs. "
+    "Never invent article-level details from titles, memory, or general knowledge. "
+    "When you call `search_pubmed`, the `query` argument must be an executable PubMed query, not a plain topic phrase. "
+    "For PubMed, write the broadest high-recall Boolean query you reasonably can on the first attempt. "
+    "Expand every core biomedical concept with close in-scope synonyms, common term variants, spelling variants, singular/plural variants, and standard abbreviations when useful. "
+    "Use grouped OR clauses for near-synonyms and AND between distinct concept groups. "
+    "Prefer MeSH terms plus Title/Abstract coverage when helpful. "
+    "Bias toward broader recall rather than a narrow wording match, but do not add unrelated concepts. "
+    "Do not pass a natural-language sentence or plain keyword list into `search_pubmed`. "
+    "If the user asks for the abstract, methods, results, findings, mechanism, limitations, authors, journal, DOI, PMID, "
+    "or any detailed claim about specific articles, you must call `get_article_details` for the relevant article IDs before answering. "
+    "If detailed evidence is unavailable, say so clearly instead of guessing. "
+    "Use at most 3 tool calls. "
+    "You may use year range, article type, and minimum citation filters in the PubMed search tool only when they are helpful and justified by the request. "
+    "If a PubMed search still returns zero articles after one broader retry, explicitly say that no relevant articles were found. "
+    "Always answer in Turkish. "
+    "End the answer with a single `Kaynak ID:` line that contains only numeric article IDs from the catalog or the latest PubMed search. "
+    "Do not write PMID or DOI in that line."
+)
+PUBMED_QUERY_WRITER_PROMPT = (
+    "You are an expert biomedical literature researcher. "
+    "Create one maximally broad but still in-scope PubMed query for the following topic: \"{topic}\". "
+    "Prioritize recall on the first search. "
+    "Identify the core biomedical concepts and expand each concept with close in-scope synonyms, spelling variants, singular/plural variants, standard abbreviations, and common term variants when helpful. "
+    "Group near-synonyms with OR, combine distinct concept groups with AND, and make the query meaningfully broader and richer than the user's wording while staying in scope. "
+    "Prefer MeSH terms plus Title/Abstract coverage when helpful, especially for multi-concept biomedical topics. "
+    "Do not be overly literal or conservative; fully expand the core concepts before returning the query. "
+    "Do not return a plain keyword phrase or natural-language sentence. Return a real PubMed Boolean query with grouped OR clauses. "
+    "Do not add publication type, date/year, language, species, or other filters unless explicitly requested. "
+    "Return only the PubMed query text."
+)
+PUBMED_QUERY_BROADENER_PROMPT = (
+    "You are broadening a PubMed query that returned zero results.\n"
+    "Original topic: \"{topic}\"\n"
+    "Current PubMed query: \"{query}\"\n"
+    "Rewrite it so it is much broader but still in-scope. Relax overly narrow phrases, keep the main concepts, "
+    "add additional close in-scope synonyms, biomedical variants, and common term variants with OR where useful, and preserve clear Boolean structure. "
+    "Favor recall over precision on this retry. "
+    "Do not add unrelated concepts. Do not add new publication type, language, species, or date filters unless they were already explicitly requested. "
+    "Return only the PubMed query text."
+)
+MAX_FAST_TOOL_CALLS = 3
+MAX_DETAIL_TOOL_TOKENS = 50_000
+
+
+@dataclass
+class HelperThreadState:
+    history: list[dict[str, str]] = field(default_factory=list)
+
+
+class HelperAIService:
+    def __init__(
+        self,
+        *,
+        thread_cache: TTLCache[str, HelperThreadState],
+        pubmed_service: PubMedService | None = None,
+        log_service: HelperLogService | None = None,
+    ) -> None:
+        self.thread_cache = thread_cache
+        self.pubmed_service = pubmed_service
+        self.log_service = log_service
+
+    def recent_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self.log_service is None:
+            return []
+        return self.log_service.tail(limit=limit)
+
+    def log_event(self, event: str, **payload: Any) -> None:
+        self._log(event, **payload)
+
+    def _log(self, event: str, **payload: Any) -> None:
+        if self.log_service is None:
+            return
+        self.log_service.log(event, **payload)
+
+    async def chat(self, payload: HelperChatRequest) -> HelperChatResponse:
+        model_name = resolve_helper_model_name(payload.model)
+        thread_id = payload.thread_id or f"thread_{uuid4().hex[:16]}"
+        thread_state = self.thread_cache.get(thread_id) or HelperThreadState()
+        self._log(
+            "assistant_chat_start",
+            thread_id=thread_id,
+            mode=payload.mode,
+            model=model_name,
+            message=payload.message,
+            selected_ids=payload.selected_ids,
+            article_count=len(payload.articles),
+            thinking_level=payload.thinking_level,
+        )
+
+        if payload.mode != "fast":
+            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            self._append_history(thread_state, payload.message, answer)
+            self.thread_cache.set(thread_id, thread_state)
+            self._log(
+                "assistant_chat_final",
+                thread_id=thread_id,
+                mode=payload.mode,
+                model=model_name,
+                answer=answer,
+                used_article_ids=[],
+                executed_actions=[],
+            )
+            return HelperChatResponse(
+                thread_id=thread_id,
+                answer=answer,
+                model=model_name,
+                mode=payload.mode,
+                history_size=len(thread_state.history),
+            )
+
+        _genai, types = load_genai_sdk()
+        article_index = {article.id: article for article in payload.articles}
+        last_search_index: dict[int, HelperArticle] = {}
+        selected_set = set(payload.selected_ids)
+        used_article_ids: set[int] = set()
+        executed_actions: list[HelperExecutedAction] = []
+        step_notes: list[str] = []
+
+        contents: list[Any] = [
+            types.Content(role=item["role"], parts=[types.Part(text=item["text"])])
+            for item in thread_state.history
+        ]
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part(text=self._build_fast_prompt(payload, today_stamp=date.today().isoformat()))],
+            )
+        )
+
+        remaining_tool_calls = MAX_FAST_TOOL_CALLS
+        answer = "Yanit uretilemedi."
+        finalizer_needed = False
+        terminal_answer: str | None = None
+        while True:
+            response = await asyncio.to_thread(
+                self._generate_model_response,
+                payload.api_key,
+                model_name,
+                contents,
+                remaining_tool_calls > 0,
+            )
+            model_content = response.candidates[0].content
+            function_calls = [
+                part.function_call for part in model_content.parts if getattr(part, "function_call", None)
+            ]
+            if function_calls and remaining_tool_calls > 0:
+                contents.append(model_content)
+                response_parts: list[Any] = []
+                for function_call in function_calls:
+                    if remaining_tool_calls <= 0:
+                        break
+                    result, action = await self._execute_tool_call(
+                        function_call.name,
+                        dict(function_call.args or {}),
+                        api_key=payload.api_key,
+                        model_name=model_name,
+                        article_index=article_index,
+                        last_search_index=last_search_index,
+                        selected_set=selected_set,
+                        used_article_ids=used_article_ids,
+                    )
+                    executed_actions.append(action)
+                    step_notes.append(self._step_note_from_action(action))
+                    self._log(
+                        "assistant_tool_result",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        action=action.model_dump(),
+                    )
+                    if self._is_terminal_empty_search_action(action):
+                        terminal_answer = self._build_no_results_answer(action)
+                        break
+                    response_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=getattr(function_call, "id", None),
+                                name=function_call.name,
+                                response={"result": result},
+                            )
+                        )
+                    )
+                    remaining_tool_calls -= 1
+                if terminal_answer is not None:
+                    answer = terminal_answer
+                    break
+                if response_parts:
+                    contents.append(types.Content(role="user", parts=response_parts))
+                    continue
+
+            answer = self._extract_text_response(response).strip()
+            if not answer and executed_actions:
+                finalizer_needed = True
+            answer = answer or "Yanit uretilemedi."
+            break
+
+        if finalizer_needed:
+            answer = await self._run_finalizer(
+                api_key=payload.api_key,
+                model_name=model_name,
+                contents=contents,
+                fallback_answer=answer,
+            )
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_chat_final",
+            thread_id=thread_id,
+            mode="fast",
+            model=model_name,
+            answer=answer,
+            used_article_ids=sorted(used_article_ids),
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+
+        return HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode="fast",
+            used_article_ids=sorted(used_article_ids),
+            history_size=len(thread_state.history),
+            thinking=self._build_thinking_summary(
+                payload.thinking_level,
+                total_articles=len(payload.articles),
+                selected_count=len(selected_set),
+                steps=step_notes,
+                used_article_ids=sorted(used_article_ids),
+            ),
+            executed_actions=executed_actions,
+        )
+
+    async def chat_stream(self, payload: HelperChatRequest) -> AsyncIterator[dict[str, Any]]:
+        model_name = resolve_helper_model_name(payload.model)
+        thread_id = payload.thread_id or f"thread_{uuid4().hex[:16]}"
+        thread_state = self.thread_cache.get(thread_id) or HelperThreadState()
+        self._log(
+            "assistant_stream_start",
+            thread_id=thread_id,
+            mode=payload.mode,
+            model=model_name,
+            message=payload.message,
+            selected_ids=payload.selected_ids,
+            article_count=len(payload.articles),
+            thinking_level=payload.thinking_level,
+        )
+
+        if payload.mode != "fast":
+            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            self._append_history(thread_state, payload.message, answer)
+            self.thread_cache.set(thread_id, thread_state)
+            self._log(
+                "assistant_stream_final",
+                thread_id=thread_id,
+                mode=payload.mode,
+                model=model_name,
+                answer=answer,
+                used_article_ids=[],
+                executed_actions=[],
+            )
+            response = HelperChatResponse(
+                thread_id=thread_id,
+                answer=answer,
+                model=model_name,
+                mode=payload.mode,
+                history_size=len(thread_state.history),
+            )
+            yield {
+                "type": "start",
+                "thread_id": thread_id,
+                "model": model_name,
+                "mode": payload.mode,
+            }
+            yield {"type": "final", "response": response.model_dump()}
+            return
+
+        client = create_genai_client(payload.api_key)
+        _genai, types = load_genai_sdk()
+        article_index = {article.id: article for article in payload.articles}
+        last_search_index: dict[int, HelperArticle] = {}
+        selected_set = set(payload.selected_ids)
+        used_article_ids: set[int] = set()
+        executed_actions: list[HelperExecutedAction] = []
+        step_notes: list[str] = []
+        streamed_thoughts: list[str] = []
+
+        contents: list[Any] = [
+            types.Content(role=item["role"], parts=[types.Part(text=item["text"])])
+            for item in thread_state.history
+        ]
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part(text=self._build_fast_prompt(payload, today_stamp=date.today().isoformat()))],
+            )
+        )
+
+        yield {
+            "type": "start",
+            "thread_id": thread_id,
+            "model": model_name,
+            "mode": "fast",
+        }
+        yield {"type": "status", "text": "İstek analiz ediliyor."}
+
+        remaining_tool_calls = MAX_FAST_TOOL_CALLS
+        answer = "Yanit uretilemedi."
+        finalizer_needed = False
+        terminal_answer: str | None = None
+
+        while True:
+            stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=self._build_generate_config(
+                    types,
+                    allow_tools=remaining_tool_calls > 0,
+                    thinking_level=payload.thinking_level,
+                    include_thoughts=payload.thinking_level != "off",
+                ),
+            )
+            collected_parts: list[Any] = []
+            function_calls: list[Any] = []
+            seen_function_calls: set[str] = set()
+            answer_chunks: list[str] = []
+
+            async for chunk in stream:
+                for candidate in getattr(chunk, "candidates", []) or []:
+                    content = getattr(candidate, "content", None)
+                    if content is None:
+                        continue
+                    for part in getattr(content, "parts", None) or []:
+                        if self._should_store_stream_part(part):
+                            collected_parts.append(part)
+
+                        function_call = getattr(part, "function_call", None)
+                        if function_call is not None:
+                            call_key = self._function_call_key(function_call)
+                            if call_key not in seen_function_calls:
+                                seen_function_calls.add(call_key)
+                                function_calls.append(function_call)
+                            continue
+
+                        if getattr(part, "thought", None):
+                            thought_text = (getattr(part, "text", None) or "").strip()
+                            if thought_text:
+                                streamed_thoughts.append(thought_text)
+                                yield {"type": "thinking_delta", "text": thought_text}
+                            continue
+
+                        text_value = getattr(part, "text", None) or ""
+                        if text_value:
+                            answer_chunks.append(text_value)
+                            yield {"type": "answer_delta", "text": text_value}
+
+            model_content = types.Content(role="model", parts=collected_parts)
+            if function_calls and remaining_tool_calls > 0:
+                contents.append(model_content)
+                response_parts: list[Any] = []
+                for function_call in function_calls:
+                    if remaining_tool_calls <= 0:
+                        break
+
+                    call_id = getattr(function_call, "id", None) or f"call_{uuid4().hex[:8]}"
+                    self._log(
+                        "assistant_tool_call",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        call_id=call_id,
+                        name=function_call.name,
+                        args=dict(function_call.args or {}),
+                    )
+                    yield {
+                        "type": "tool_call",
+                        "call_id": call_id,
+                        "action": {
+                            "type": "tool_call",
+                            "name": function_call.name,
+                            "title": self._tool_pending_title(function_call.name),
+                            "status": "running",
+                            "details": dict(function_call.args or {}),
+                        },
+                    }
+                    result, action = await self._execute_tool_call(
+                        function_call.name,
+                        dict(function_call.args or {}),
+                        api_key=payload.api_key,
+                        model_name=model_name,
+                        article_index=article_index,
+                        last_search_index=last_search_index,
+                        selected_set=selected_set,
+                        used_article_ids=used_article_ids,
+                    )
+                    executed_actions.append(action)
+                    step_notes.append(self._step_note_from_action(action))
+                    self._log(
+                        "assistant_tool_result",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        call_id=call_id,
+                        action=action.model_dump(),
+                    )
+                    yield {
+                        "type": "tool_result",
+                        "call_id": call_id,
+                        "action": action.model_dump(),
+                    }
+                    if self._is_terminal_empty_search_action(action):
+                        terminal_answer = self._build_no_results_answer(action)
+                        yield {"type": "answer_delta", "text": terminal_answer}
+                        break
+                    response_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=getattr(function_call, "id", None),
+                                name=function_call.name,
+                                response={"result": result},
+                            )
+                        )
+                    )
+                    remaining_tool_calls -= 1
+                if terminal_answer is not None:
+                    answer = terminal_answer
+                    break
+                if response_parts:
+                    contents.append(types.Content(role="user", parts=response_parts))
+                    continue
+
+            answer = "".join(answer_chunks).strip()
+            if not answer and executed_actions:
+                finalizer_needed = True
+            answer = answer or "Yanit uretilemedi."
+            break
+
+        if finalizer_needed:
+            yield {"type": "status", "text": "Araç çıktıları birleştiriliyor."}
+            final_contents = [
+                *contents,
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            text=(
+                                "Arac kullanimi tamamlandi. Artik yeni tool kullanmadan sadece final yanitini ver. "
+                                "Cevabi Turkce yaz ve en sonda sadece article id degerleriyle Kaynak ID satiri ekle."
+                            )
+                        )
+                    ],
+                ),
+            ]
+            stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=final_contents,
+                config=self._build_generate_config(
+                    types,
+                    allow_tools=False,
+                    thinking_level=payload.thinking_level,
+                    include_thoughts=payload.thinking_level != "off",
+                ),
+            )
+            answer_chunks = []
+            async for chunk in stream:
+                for candidate in getattr(chunk, "candidates", []) or []:
+                    content = getattr(candidate, "content", None)
+                    if content is None:
+                        continue
+                    for part in getattr(content, "parts", None) or []:
+                        if getattr(part, "thought", None):
+                            thought_text = (getattr(part, "text", None) or "").strip()
+                            if thought_text:
+                                streamed_thoughts.append(thought_text)
+                                yield {"type": "thinking_delta", "text": thought_text}
+                            continue
+                        text_value = getattr(part, "text", None) or ""
+                        if text_value:
+                            answer_chunks.append(text_value)
+                            yield {"type": "answer_delta", "text": text_value}
+            answer = "".join(answer_chunks).strip() or answer
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_stream_final",
+            thread_id=thread_id,
+            mode="fast",
+            model=model_name,
+            answer=answer,
+            used_article_ids=sorted(used_article_ids),
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode="fast",
+            used_article_ids=sorted(used_article_ids),
+            history_size=len(thread_state.history),
+            thinking=(
+                "\n\n".join(streamed_thoughts).strip()
+                if streamed_thoughts
+                else self._build_thinking_summary(
+                    payload.thinking_level,
+                    total_articles=len(payload.articles),
+                    selected_count=len(selected_set),
+                    steps=step_notes,
+                    used_article_ids=sorted(used_article_ids),
+                )
+            ),
+            executed_actions=executed_actions,
+        )
+        yield {"type": "final", "response": response.model_dump()}
+
+    def reset(self, thread_id: str) -> None:
+        self.thread_cache.delete(thread_id)
+
+    @staticmethod
+    def _append_history(
+        thread_state: HelperThreadState,
+        user_message: str,
+        answer: str,
+    ) -> None:
+        thread_state.history.extend(
+            [
+                {"role": "user", "text": user_message},
+                {"role": "model", "text": answer},
+            ]
+        )
+        thread_state.history = thread_state.history[-12:]
+
+    def _generate_model_response(
+        self,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+        allow_tools: bool,
+    ):
+        client = create_genai_client(api_key)
+        _genai, types = load_genai_sdk()
+        return client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=self._build_generate_config(types, allow_tools=allow_tools),
+        )
+
+    def _generate_final_response(
+        self,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+    ):
+        client = create_genai_client(api_key)
+        _genai, types = load_genai_sdk()
+        final_contents = [
+            *contents,
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        text=(
+                            "Arac kullanimi tamamlandi. Artik yeni tool kullanmadan sadece final yanitini ver. "
+                            "Cevabi Turkce yaz ve en sonda sadece article id degerleriyle Kaynak ID satiri ekle."
+                        )
+                    )
+                ],
+            ),
+        ]
+        return client.models.generate_content(
+            model=model_name,
+            contents=final_contents,
+            config=self._build_generate_config(types, allow_tools=False),
+        )
+
+    @staticmethod
+    def _build_generate_config(
+        types: Any,
+        *,
+        allow_tools: bool,
+        thinking_level: str = "off",
+        include_thoughts: bool = False,
+    ):
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": FAST_MODE_SYSTEM_INSTRUCTION,
+        }
+        thinking_config = HelperAIService._build_thinking_config(
+            types,
+            thinking_level=thinking_level,
+            include_thoughts=include_thoughts,
+        )
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
+        if allow_tools:
+            config_kwargs["tools"] = [HelperAIService._build_fast_toolset(types)]
+            config_kwargs["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO
+                )
+            )
+        return types.GenerateContentConfig(**config_kwargs)
+
+    @staticmethod
+    def _build_thinking_config(
+        types: Any,
+        *,
+        thinking_level: str,
+        include_thoughts: bool,
+    ):
+        if not include_thoughts:
+            return None
+        level = (thinking_level or "off").strip().lower()
+        level_map = {
+            "low": types.ThinkingLevel.LOW,
+            "max": types.ThinkingLevel.HIGH,
+        }
+        config_kwargs: dict[str, Any] = {"include_thoughts": True}
+        if level in level_map:
+            config_kwargs["thinking_level"] = level_map[level]
+        return types.ThinkingConfig(**config_kwargs)
+
+    @staticmethod
+    def _should_store_stream_part(part: Any) -> bool:
+        if getattr(part, "function_call", None) is not None:
+            return True
+        if getattr(part, "thought_signature", None) is not None:
+            return True
+        return bool(getattr(part, "text", None))
+
+    @staticmethod
+    def _function_call_key(function_call: Any) -> str:
+        call_id = getattr(function_call, "id", None)
+        if call_id:
+            return str(call_id)
+        return f"{getattr(function_call, 'name', '-')}-{json.dumps(dict(getattr(function_call, 'args', None) or {}), sort_keys=True)}"
+
+    @staticmethod
+    def _tool_pending_title(name: str) -> str:
+        titles = {
+            "list_catalog_articles": "Katalog taramasi yapiliyor",
+            "search_pubmed": "PubMed aramasi yapiliyor",
+            "get_article_details": "Makale detaylari okunuyor",
+        }
+        return titles.get(name, name)
+
+    @staticmethod
+    def _build_fast_toolset(types: Any):
+        return types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="list_catalog_articles",
+                    description=(
+                        "Quickly scans the loaded catalog using title, article type, and MeSH metadata."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Free-text filter for title and MeSH fields.",
+                            },
+                            "article_type": {
+                                "type": "string",
+                                "description": "Optional article type filter.",
+                            },
+                            "selected_only": {
+                                "type": "boolean",
+                                "description": "Limit the scan to selected articles only.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum result count, between 1 and 20.",
+                            },
+                        },
+                    },
+                ),
+                types.FunctionDeclaration(
+                    name="search_pubmed",
+                    description=(
+                        "Runs a new PubMed search. Use this when the loaded catalog is insufficient or empty. "
+                        "Convert the request into one executable, broad high-recall PubMed query with Boolean logic before calling this tool. "
+                        "Results can later be read in detail with `get_article_details` using `source=last_search`."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Executable broad high-recall PubMed query string with Boolean logic, not a plain topic sentence.",
+                            },
+                            "year_start": {
+                                "type": "integer",
+                                "description": "Optional start year.",
+                            },
+                            "year_end": {
+                                "type": "integer",
+                                "description": "Optional end year.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of articles to fetch, between 1 and 250. Defaults to 250 when omitted.",
+                            },
+                            "article_type": {
+                                "type": "string",
+                                "description": "Optional article type filter, for example Review, Clinical Trial, or Meta-Analysis.",
+                            },
+                            "min_cite": {
+                                "type": "integer",
+                                "description": "Optional minimum citation-count threshold applied after retrieval.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                types.FunctionDeclaration(
+                    name="get_article_details",
+                    description=(
+                        "Reads abstracts and detailed metadata for specific article IDs. "
+                        "You must use this tool before answering abstract-level or detailed article questions. "
+                        "Default source is `loaded`; use `last_search` after a new PubMed search."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "enum": ["loaded", "last_search"],
+                                "description": "Source to read details from.",
+                            },
+                            "ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "List of numeric article IDs.",
+                            },
+                        },
+                        "required": ["ids"],
+                    },
+                ),
+            ]
+        )
+
+    async def _execute_tool_call(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        api_key: str,
+        model_name: str,
+        article_index: dict[int, HelperArticle],
+        last_search_index: dict[int, HelperArticle],
+        selected_set: set[int],
+        used_article_ids: set[int],
+    ) -> tuple[dict[str, Any], HelperExecutedAction]:
+        if name == "list_catalog_articles":
+            return self._tool_list_catalog_articles(
+                args,
+                article_index=article_index,
+                selected_set=selected_set,
+                used_article_ids=used_article_ids,
+            )
+        if name == "search_pubmed":
+            return await self._tool_search_pubmed(
+                args,
+                api_key=api_key,
+                model_name=model_name,
+                last_search_index=last_search_index,
+                used_article_ids=used_article_ids,
+            )
+        if name == "get_article_details":
+            return self._tool_get_article_details(
+                args,
+                article_index=article_index,
+                last_search_index=last_search_index,
+                used_article_ids=used_article_ids,
+            )
+        raise ValueError(f"Bilinmeyen tool cagrisi: {name}")
+
+    def _tool_list_catalog_articles(
+        self,
+        args: dict[str, Any],
+        *,
+        article_index: dict[int, HelperArticle],
+        selected_set: set[int],
+        used_article_ids: set[int],
+    ) -> tuple[dict[str, Any], HelperExecutedAction]:
+        query = str(args.get("query") or "").strip().lower()
+        article_type = str(args.get("article_type") or "").strip().lower()
+        selected_only = bool(args.get("selected_only"))
+        limit = parse_bounded_int(args.get("limit"), default=8, minimum=1, maximum=20)
+
+        source = list(article_index.values())
+        if selected_only and selected_set:
+            source = [article for article in source if article.id in selected_set]
+
+        matches: list[HelperArticle] = []
+        for article in source:
+            haystacks = [
+                article.title,
+                article.article_type or "",
+                " ".join(article.mesh_terms),
+            ]
+            matches_query = not query or any(query in value.lower() for value in haystacks)
+            matches_type = not article_type or article_type in (article.article_type or "").lower()
+            if matches_query and matches_type:
+                matches.append(article)
+
+        resolved = matches[:limit]
+        used_article_ids.update(article.id for article in resolved)
+        result = {
+            "count": len(resolved),
+            "articles": [
+                {
+                    "id": article.id,
+                    "title": article.title,
+                    "year": article.year,
+                    "article_type": article.article_type,
+                    "citation_count": article.citation_count,
+                    "mesh_terms": article.mesh_terms[:8],
+                }
+                for article in resolved
+            ],
+        }
+        action = HelperExecutedAction(
+            type="tool_call",
+            name="list_catalog_articles",
+            title="Katalog tarandi",
+            status="success",
+            details={
+                "query": query or None,
+                "article_type": article_type or None,
+                "selected_only": selected_only,
+                "returned_ids": [article["id"] for article in result["articles"]],
+            },
+        )
+        return result, action
+
+    async def _tool_search_pubmed(
+        self,
+        args: dict[str, Any],
+        *,
+        api_key: str,
+        model_name: str,
+        last_search_index: dict[int, HelperArticle],
+        used_article_ids: set[int],
+    ) -> tuple[dict[str, Any], HelperExecutedAction]:
+        raw_query = str(args.get("query") or "").strip()
+        if not raw_query:
+            raise ValueError("search_pubmed icin query zorunlu.")
+        query = raw_query
+        query_rewritten = False
+        if not self._looks_like_pubmed_query(raw_query):
+            query = await self._rewrite_pubmed_query(
+                topic=raw_query,
+                api_key=api_key,
+                model_name=model_name,
+            )
+            query_rewritten = bool(query and query != raw_query)
+        query = self._sanitize_pubmed_query_text(query) or raw_query
+
+        year_start = parse_optional_int(args.get("year_start"))
+        year_end = parse_optional_int(args.get("year_end"))
+        max_results = parse_bounded_int(args.get("max_results"), default=250, minimum=1, maximum=250)
+        article_type = str(args.get("article_type") or "").strip() or None
+        min_cite = parse_optional_int(args.get("min_cite"))
+        if min_cite is not None:
+            min_cite = max(0, min(min_cite, 1_000_000))
+
+        response = await self._search_pubmed(
+            query=query,
+            year_start=year_start,
+            year_end=year_end,
+            max_results=max_results,
+            article_type=article_type,
+            min_cite=min_cite,
+        )
+        initial_query = query
+        retry_used = False
+        retry_query: str | None = None
+        if not response.articles:
+            broader_query = await self._broaden_pubmed_query(
+                topic=raw_query,
+                query=query,
+                api_key=api_key,
+                model_name=model_name,
+            )
+            broader_query = self._sanitize_pubmed_query_text(broader_query)
+            if broader_query and broader_query != query:
+                retry_used = True
+                retry_query = broader_query
+                query = broader_query
+                response = await self._search_pubmed(
+                    query=query,
+                    year_start=year_start,
+                    year_end=year_end,
+                    max_results=max_results,
+                    article_type=article_type,
+                    min_cite=min_cite,
+                )
+        last_search_index.clear()
+        for article in response.articles:
+            helper_article = self._helper_article_from_article(article)
+            last_search_index[helper_article.id] = helper_article
+
+        used_article_ids.update(last_search_index.keys())
+        result = {
+            "query": query,
+            "input_query": raw_query,
+            "initial_query": initial_query,
+            "query_rewritten": query_rewritten,
+            "retry_used": retry_used,
+            "retry_query": retry_query,
+            "meta": response.meta.model_dump(),
+            "count": len(response.articles),
+            "article_type": article_type,
+            "min_cite": min_cite,
+            "articles": [
+                {
+                    "id": article.id,
+                    "title": article.title,
+                    "year": article.year,
+                    "article_type": article.article_type,
+                    "citation_count": article.citation_count,
+                    "pmid": article.pmid,
+                }
+                for article in response.articles
+            ],
+        }
+        action = HelperExecutedAction(
+            type="tool_call",
+            name="search_pubmed",
+            title="PubMed aramasi yapildi",
+            status="success",
+            details={
+                "query": query,
+                "input_query": raw_query,
+                "initial_query": initial_query,
+                "query_rewritten": query_rewritten,
+                "retry_used": retry_used,
+                "retry_query": retry_query,
+                "year_start": year_start,
+                "year_end": year_end,
+                "max_results": max_results,
+                "article_type": article_type,
+                "min_cite": min_cite,
+                "meta": response.meta.model_dump(),
+                "articles": [article.model_dump() for article in response.articles],
+            },
+        )
+        return result, action
+
+    @staticmethod
+    def _looks_like_pubmed_query(query: str) -> bool:
+        normalized = query.strip()
+        if not normalized:
+            return False
+        field_tags = {
+            tag.strip().lower()
+            for tag in re.findall(r"\[([A-Za-z0-9 /-]+)\]", normalized)
+        }
+        non_date_tags = field_tags.difference({"pdat", "dp", "edat", "mdat", "crdt"})
+        has_field_tag = bool(non_date_tags)
+        has_or_group = bool(re.search(r"\bOR\b", normalized, flags=re.IGNORECASE))
+        has_parentheses = "(" in normalized and ")" in normalized
+        has_mesh_label = "mesh" in normalized.lower()
+        return has_field_tag or has_mesh_label or (has_parentheses and has_or_group)
+
+    @staticmethod
+    def _sanitize_pubmed_query_text(text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+        if "```" in cleaned:
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines() if not line.strip().startswith("```")
+            ).strip()
+        cleaned = re.sub(r"^\s*PubMed\s+query\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.strip().strip("`").strip()
+        if (
+            len(cleaned) >= 2
+            and cleaned[0] == cleaned[-1]
+            and cleaned[0] in {'"', "'"}
+        ):
+            cleaned = cleaned[1:-1].strip()
+        return re.sub(r"\s+", " ", cleaned)
+
+    async def _rewrite_pubmed_query(
+        self,
+        *,
+        topic: str,
+        api_key: str,
+        model_name: str,
+    ) -> str:
+        client = create_genai_client(api_key)
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=PUBMED_QUERY_WRITER_PROMPT.format(topic=topic),
+        )
+        return self._sanitize_pubmed_query_text(self._extract_text_response(response)) or topic
+
+    async def _broaden_pubmed_query(
+        self,
+        *,
+        topic: str,
+        query: str,
+        api_key: str,
+        model_name: str,
+    ) -> str:
+        client = create_genai_client(api_key)
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=PUBMED_QUERY_BROADENER_PROMPT.format(topic=topic, query=query),
+        )
+        return self._sanitize_pubmed_query_text(self._extract_text_response(response)) or query
+
+    def _tool_get_article_details(
+        self,
+        args: dict[str, Any],
+        *,
+        article_index: dict[int, HelperArticle],
+        last_search_index: dict[int, HelperArticle],
+        used_article_ids: set[int],
+    ) -> tuple[dict[str, Any], HelperExecutedAction]:
+        source_name = str(args.get("source") or "loaded").strip().lower()
+        source_index = last_search_index if source_name == "last_search" else article_index
+        raw_ids = args.get("ids") or []
+        resolved_ids: list[int] = []
+        for value in raw_ids:
+            try:
+                article_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if article_id in source_index and article_id not in resolved_ids:
+                resolved_ids.append(article_id)
+
+        details: list[dict[str, Any]] = []
+        omitted_ids: list[int] = []
+        token_budget = 0
+        for article_id in resolved_ids:
+            article = source_index[article_id]
+            payload = {
+                "id": article.id,
+                "title": article.title,
+                "year": article.year,
+                "journal": article.journal,
+                "article_type": article.article_type,
+                "citation_count": article.citation_count,
+                "pmid": article.pmid,
+                "doi": article.doi,
+                "mesh_terms": article.mesh_terms[:12],
+                "abstract": article.abstract,
+            }
+            article_tokens = estimate_token_count(json.dumps(payload, ensure_ascii=False))
+            if details and token_budget + article_tokens > MAX_DETAIL_TOOL_TOKENS:
+                omitted_ids.append(article_id)
+                continue
+            token_budget += article_tokens
+            details.append(payload)
+            used_article_ids.add(article_id)
+
+        result = {
+            "count": len(details),
+            "estimated_tokens": token_budget,
+            "articles": details,
+            "omitted_ids": omitted_ids,
+            "source": source_name,
+        }
+        action = HelperExecutedAction(
+            type="tool_call",
+            name="get_article_details",
+            title="Makale detaylari okundu",
+            status="success",
+            details={
+                "source": source_name,
+                "requested_ids": resolved_ids,
+                "returned_ids": [article["id"] for article in details],
+                "omitted_ids": omitted_ids,
+                "estimated_tokens": token_budget,
+            },
+        )
+        return result, action
+
+    async def _search_pubmed(
+        self,
+        *,
+        query: str,
+        year_start: int | None,
+        year_end: int | None,
+        max_results: int,
+        article_type: str | None,
+        min_cite: int | None,
+    ) -> PubMedSearchResponse:
+        if self.pubmed_service is None:
+            raise RuntimeError("PubMed service bagli degil.")
+        request = PubMedSearchRequest(
+            query=query,
+            year_start=year_start,
+            year_end=year_end,
+            max_results=max_results,
+            article_type=article_type,
+            min_cite=min_cite,
+            use_cache=True,
+        )
+        return await self.pubmed_service.search(request)
+
+    @staticmethod
+    def _helper_article_from_article(article: Article) -> HelperArticle:
+        article_type = article.article_type or (article.article_types[0] if article.article_types else None)
+        return HelperArticle(
+            id=article.id,
+            title=article.title,
+            year=article.year,
+            article_type=article_type,
+            citation_count=article.citation_count,
+            mesh_terms=list(article.mesh_terms or []),
+            abstract=article.abstract or "",
+            pmid=article.pmid or None,
+            doi=article.doi,
+            journal=article.journal,
+        )
+
+    async def _run_finalizer(
+        self,
+        *,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+        fallback_answer: str,
+    ) -> str:
+        response = await asyncio.to_thread(
+            self._generate_final_response,
+            api_key,
+            model_name,
+            contents,
+        )
+        return self._extract_text_response(response).strip() or fallback_answer
+
+    @staticmethod
+    def _build_fast_prompt(payload: HelperChatRequest, today_stamp: str) -> str:
+        catalog_lines = []
+        for article in payload.articles:
+            catalog_lines.append(
+                f"[{article.id}] {article.title} | yil={article.year or '-'} | "
+                f"type={article.article_type or '-'} | "
+                f"cite={article.citation_count if article.citation_count is not None else '-'}"
+            )
+
+        selected_text = (
+            ", ".join(str(item) for item in payload.selected_ids)
+            if payload.selected_ids
+            else "yok"
+        )
+        thinking_note = {
+            "off": "Avoid tool use unless it is truly needed.",
+            "low": "Use the minimum number of tools needed for a quick verification.",
+            "max": "Use tools when uncertainty is important, but never exceed 2 calls.",
+        }.get(payload.thinking_level, "Avoid tool use unless it is truly needed.")
+        return (
+            "Fast mode is active.\n"
+            f"Today: {today_stamp}\n"
+            f"Loaded article count: {len(payload.articles)}\n"
+            f"Selected article IDs: {selected_text}\n"
+            f"Thinking level: {payload.thinking_level}\n"
+            f"Working note: {thinking_note}\n"
+            "Critical rule: if the user asks for abstract-level evidence or any detailed article claim, "
+            "read the relevant articles with `get_article_details` first.\n"
+            "Tool note: if the loaded catalog is insufficient, you may run a new PubMed search. "
+            "When using `search_pubmed`, pass one broad high-recall executable PubMed query with Boolean logic instead of a plain topic phrase. "
+            "If that search returns zero articles, the system may retry once with a broader query automatically. "
+            "This tool accepts query, year_start, year_end, article_type, and min_cite. "
+            "Use today's date for open-ended date requests.\n\n"
+            "Catalog:\n"
+            + ("\n".join(catalog_lines) if catalog_lines else "Catalog is empty.")
+            + f"\n\nUser request:\n{payload.message}"
+        )
+
+    @staticmethod
+    def _extract_text_response(response: Any) -> str:
+        text = (getattr(response, "text", None) or "").strip()
+        if text:
+            return text
+        for candidate in getattr(response, "candidates", []) or []:
+            content = getattr(candidate, "content", None)
+            if content is None:
+                continue
+            parts = getattr(content, "parts", None) or []
+            lines = [part.text for part in parts if getattr(part, "text", None)]
+            if lines:
+                return "\n".join(lines).strip()
+        return ""
+
+    @staticmethod
+    def _step_note_from_action(action: HelperExecutedAction) -> str:
+        if action.name == "list_catalog_articles":
+            ids = action.details.get("returned_ids") or []
+            return f"Katalog taramasi yapildi, eslesen ID'ler: {', '.join(map(str, ids)) or '-'}."
+        if action.name == "search_pubmed":
+            query = action.details.get("query") or "-"
+            article_count = len(action.details.get("articles") or [])
+            retry_used = bool(action.details.get("retry_used"))
+            if retry_used and article_count == 0:
+                return f"PubMed aramasi iki kez denendi, sonuc bulunamadi. Son sorgu: `{query}`."
+            if retry_used:
+                return f"PubMed aramasi daha genis sorguyla tekrarlandi, son sorgu `{query}`, donen makale sayisi: {article_count}."
+            return f"PubMed aramasi yapildi, sorgu `{query}`, donen makale sayisi: {article_count}."
+        if action.name == "get_article_details":
+            ids = action.details.get("returned_ids") or []
+            source = action.details.get("source") or "loaded"
+            return (
+                f"Makale detaylari okundu ({source}), getirilen ID'ler: "
+                f"{', '.join(map(str, ids)) or '-'}."
+            )
+        return action.title
+
+    @staticmethod
+    def _build_thinking_summary(
+        thinking_level: str,
+        *,
+        total_articles: int,
+        selected_count: int,
+        steps: list[str],
+        used_article_ids: list[int],
+    ) -> str | None:
+        if thinking_level == "off":
+            return None
+        lines = [
+            f"Katalog boyutu: {total_articles}",
+            f"Secili makale sayisi: {selected_count}",
+        ]
+        if steps:
+            lines.extend(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+        if thinking_level == "max":
+            lines.append(
+                "Not: Fast mode en fazla 3 tool cagrisi ile ve o anki katalog/PubMed sonucuna dayanarak calisti."
+            )
+        if used_article_ids:
+            lines.append(f"Kullanilan ID'ler: {', '.join(map(str, used_article_ids))}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _is_terminal_empty_search_action(action: HelperExecutedAction) -> bool:
+        if action.name != "search_pubmed":
+            return False
+        return not (action.details.get("articles") or [])
+
+    @staticmethod
+    def _build_no_results_answer(action: HelperExecutedAction) -> str:
+        retry_used = bool(action.details.get("retry_used"))
+        if retry_used:
+            return (
+                "Bu istek icin PubMed'de ilgili makale bulamadim. "
+                "Sorgu bir kez daha kapsamli hale getirilerek yeniden denendi ancak sonuc cikmadi.\n"
+                "Kaynak ID:"
+            )
+        return "Bu istek icin PubMed'de ilgili makale bulamadim.\nKaynak ID:"
+
+
+def estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 4 + 1)
+
+
+def parse_optional_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_bounded_int(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(parsed, maximum))

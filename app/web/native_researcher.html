@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Native Researcher — Searcher AI</title>
+  <meta name="description" content="Search-first autonomous literature workspace.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+
+<body class="native-body">
+  <div class="native-layout">
+    <aside id="chatSidebar" class="native-sidebar-shell is-open" aria-label="Workspace panel">
+      <div class="native-rail">
+        <button id="sidebarToggleBtn" class="native-rail-btn" type="button" aria-label="Toggle panel" title="Toggle panel">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+            <line x1="4" y1="7" x2="20" y2="7" />
+            <line x1="4" y1="12" x2="16" y2="12" />
+            <line x1="4" y1="17" x2="20" y2="17" />
+          </svg>
+        </button>
+        <button class="native-rail-btn native-rail-btn-static" type="button" aria-label="Explorer" title="Explorer">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7.5 12 3l9 4.5-9 4.5L3 7.5Z" />
+            <path d="M3 12.5 12 17l9-4.5" />
+            <path d="M3 17.5 12 22l9-4.5" />
+          </svg>
+        </button>
+        <a class="native-rail-btn native-rail-link" href="/researcher_2" title="Legacy Console" aria-label="Legacy Console">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3h12A2.5 2.5 0 0 1 20 5.5v13.75" />
+            <path d="M8 7h8" />
+            <path d="M8 11h8" />
+            <path d="M8 15h5" />
+          </svg>
+        </a>
+        <div class="native-rail-spacer"></div>
+        <button class="native-rail-btn native-rail-btn-static" type="button" aria-label="Status" title="Status">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="native-sidebar-drawer">
+        <div class="native-sidebar-drawer-head">
+          <div class="native-sidebar-kicker">Explorer</div>
+          <div class="native-sidebar-title">Workspace</div>
+        </div>
+        <div class="native-sidebar-placeholder">
+          <div class="native-sidebar-placeholder-icon" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7.5 12 3l9 4.5-9 4.5L3 7.5Z" />
+              <path d="M3 12.5 12 17l9-4.5" />
+              <path d="M3 17.5 12 22l9-4.5" />
+            </svg>
+          </div>
+          <div class="native-sidebar-placeholder-title">Left panel ready</div>
+          <div class="native-sidebar-placeholder-copy">
+            Space is reserved for upcoming features. The AI workspace on the right is active for now.
+          </div>
+        </div>
+        <span id="healthStatus" class="native-visually-hidden">Checking…</span>
+      </div>
+    </aside>
+
+    <div class="native-workspace">
+      <main class="native-main">
+        <section class="content-card results-card native-results-card">
+          <div class="card-toolbar native-results-toolbar">
+            <div class="card-title native-results-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              Article Results
+            </div>
+            <div class="toolbar-actions native-toolbar-actions">
+              <div class="native-inline-stats">
+                <span class="native-inline-stat"><strong id="articleCount">0</strong> articles</span>
+                <span class="native-inline-stat"><strong id="selectedCount">0</strong> selected</span>
+              </div>
+              <button id="clearSelectionBtn" class="btn btn-ghost btn-sm" disabled>Clear Selection</button>
+              <button id="selectAllBtn" class="btn btn-ghost btn-sm" disabled>Select All</button>
+            </div>
+          </div>
+
+          <div id="metaStrip" class="meta-strip"></div>
+
+          <div class="table-scroll">
+            <table class="data-table">
+              <colgroup>
+                <col style="width: 40px;">
+                <col style="width: 56px;">
+                <col style="width: 112px;">
+                <col style="width: 72px;">
+                <col style="width: 150px;">
+                <col style="width: 92px;">
+                <col>
+                <col style="width: 80px;">
+                <col style="width: 112px;">
+                <col style="width: 128px;">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Select</th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="id">
+                      <span>ID</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="pmid">
+                      <span>PMID</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="year">
+                      <span>Year</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="article_type">
+                      <span>Article Type</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="citation_count">
+                      <span>Citations</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>Title</th>
+                  <th>Link</th>
+                  <th>Source</th>
+                  <th>Download</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr>
+                  <td colspan="10" class="empty-cell">
+                    <div class="native-empty-state">
+                      <div class="native-empty-state-title">No search yet</div>
+                      <div class="native-empty-state-copy">Start with a topic.</div>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <aside id="assistantPanel" class="assistant-panel native-assistant-panel">
+      <div class="native-assistant-head">
+        <button id="assistantHistoryToggleBtn" class="native-assistant-nav-btn" type="button" aria-label="Open chat history" title="Chat history">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 18 9 12l6-6" />
+          </svg>
+        </button>
+        <div id="assistantHeaderTitle" class="native-assistant-heading">New chat</div>
+      </div>
+
+      <div id="assistantHistoryPanel" class="native-assistant-history-shell" hidden>
+        <div class="native-chat-section-label native-chat-section-label-assistant">Chats</div>
+        <div id="chatHistoryList" class="native-chat-history native-chat-history-assistant" aria-live="polite"></div>
+      </div>
+
+      <div id="assistantThreadShell" class="native-assistant-thread-shell">
+        <div id="assistantMessages" class="assistant-messages"></div>
+
+        <div class="assistant-composer">
+          <div class="assistant-composer-shell">
+            <textarea id="assistantInput" rows="1" placeholder="Ask Searcher AI..."></textarea>
+            <div class="assistant-composer-footer">
+              <button id="assistantDraftBtn" class="native-compose-plus new-chat-trigger" type="button" aria-label="Start new chat" title="Start new chat">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+              </button>
+              <div class="assistant-composer-tools">
+                <div class="assistant-toolbar-group">
+                  <div class="assistant-mode-switch assistant-mode-switch-plain native-static-badge" role="presentation">
+                    <span class="assistant-static-label">Searcher AI</span>
+                  </div>
+                  <span class="assistant-toolbar-divider" aria-hidden="true"></span>
+                  <div class="assistant-model-picker" id="assistantModelWrap">
+                    <button id="assistantModelBtn" class="assistant-toolbar-btn assistant-model-btn" type="button" aria-haspopup="menu" aria-expanded="false">
+                      <span id="assistantModelLabel">Gemini 3 Flash</span>
+                      <svg class="assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </button>
+                    <div id="assistantModelMenu" class="assistant-toolbar-menu assistant-model-menu" hidden>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3.1 Pro">Gemini 3.1 Pro</button>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3 Flash">Gemini 3 Flash</button>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 3.1 Flash Lite">Gemini 3.1 Flash Lite</button>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Pro">Gemini 2.5 Pro</button>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Flash">Gemini 2.5 Flash</button>
+                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="Gemini 2.5 Flash Lite">Gemini 2.5 Flash Lite</button>
+                    </div>
+                  </div>
+                  <span class="assistant-toolbar-divider" aria-hidden="true"></span>
+                  <div class="think-toggle" id="thinkToggleWrap">
+                    <button id="thinkToggleBtn" class="think-toggle-btn assistant-toolbar-btn" type="button" aria-expanded="false">
+                      <span id="thinkLabel">Think: Off</span>
+                      <svg class="think-chevron assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </button>
+                    <div id="thinkMenu" class="think-menu assistant-toolbar-menu" hidden>
+                      <button class="think-menu-item assistant-toolbar-menu-item" data-level="off">
+                        <span class="tmi-dot off"></span>Off <span class="tmi-desc">- Fast response</span>
+                      </button>
+                      <button class="think-menu-item assistant-toolbar-menu-item" data-level="low">
+                        <span class="tmi-dot low"></span>Low <span class="tmi-desc">- Brief reasoning</span>
+                      </button>
+                      <button class="think-menu-item assistant-toolbar-menu-item" data-level="max">
+                        <span class="tmi-dot max"></span>Max <span class="tmi-desc">- Deep analysis</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <button id="assistantSendBtn" class="btn-send btn-send-minimal" type="button" aria-label="Send">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 19V7" />
+                  <path d="m7 11 5-5 5 5" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="native-hidden-controls" hidden aria-hidden="true">
+    <textarea id="query" rows="2"></textarea>
+    <input id="yearStart" type="number">
+    <input id="yearEnd" type="number">
+    <input id="maxResults" type="number" value="50" min="1" max="250">
+    <button id="searchBtn" type="button">Search</button>
+  </div>
+  <div id="detailPopupOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="detailPopup" class="detail-popup" hidden role="dialog" aria-modal="true" aria-labelledby="detailPopupTitle">
+    <div class="detail-popup-head">
+      <div class="detail-popup-headcopy">
+        <div id="detailPopupEyebrow" class="detail-popup-eyebrow"></div>
+        <h3 id="detailPopupTitle" class="detail-popup-title"></h3>
+        <div id="detailPopupMeta" class="detail-popup-meta"></div>
+      </div>
+      <button id="detailPopupClose" class="detail-popup-close" type="button" aria-label="Kapat" title="Kapat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+    <div id="detailPopupBody" class="detail-popup-body"></div>
+  </section>
+
+  <script src="/static/native_researcher.js"></script>
+</body>
+
+</html>

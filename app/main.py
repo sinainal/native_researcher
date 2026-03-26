@@ -9,6 +9,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.api.routes.app_events import router as app_events_router
 from app.api.routes.health import router as health_router
 from app.api.routes.helper import router as helper_router
 from app.api.routes.llm import router as llm_router
@@ -18,6 +19,7 @@ from app.api.routes.projects import router as projects_router
 from app.api.routes.pubmed import router as pubmed_router
 from app.clients.ncbi import NcbiClient
 from app.core.config import Settings, get_settings
+from app.services.app_event_log_service import AppEventLogService
 from app.services.batch_llm_service import BatchLLMService
 from app.services.helper_ai_service import HelperAIService
 from app.services.helper_log_service import HelperLogService
@@ -57,6 +59,7 @@ def create_app(
             app.state.pdf_service = injected_pdf_service
             app.state.helper_service = injected_helper_service
             app.state.batch_llm_service = injected_batch_llm_service
+            app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
             app.state.native_helper_service = NativeResearcherService(
                 thread_cache=TTLCache(
                     ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -106,6 +109,7 @@ def create_app(
             pubmed_service=app.state.pubmed_service,
             log_service=HelperLogService(resolved_settings.helper_log_path),
         )
+        app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -136,6 +140,7 @@ def create_app(
         app.state.pdf_service = injected_pdf_service
         app.state.helper_service = injected_helper_service
         app.state.batch_llm_service = injected_batch_llm_service
+        app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -145,6 +150,7 @@ def create_app(
             log_service=HelperLogService(resolved_settings.helper_log_path),
         )
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    app.include_router(app_events_router)
     app.include_router(health_router)
     app.include_router(helper_router)
     app.include_router(llm_router)

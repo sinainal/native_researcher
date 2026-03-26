@@ -17,6 +17,10 @@ def get_helper_service(request: Request) -> HelperAIService:
     return request.app.state.helper_service
 
 
+def log_compact_event(request: Request, level: str, event: str, message: str, **context: object) -> None:
+    request.app.state.app_event_log_service.log(level, event, message, context=context)
+
+
 @router.post("/chat", response_model=HelperChatResponse)
 async def helper_chat(payload: HelperChatRequest, request: Request) -> HelperChatResponse:
     service = get_helper_service(request)
@@ -31,6 +35,15 @@ async def helper_chat(payload: HelperChatRequest, request: Request) -> HelperCha
             message=payload.message,
             error=str(exc),
         )
+        log_compact_event(
+            request,
+            "error",
+            "assistant_chat_error",
+            str(exc),
+            thread_id=payload.thread_id or "",
+            model=payload.model or "",
+            mode=payload.mode,
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         service.log_event(
@@ -40,6 +53,15 @@ async def helper_chat(payload: HelperChatRequest, request: Request) -> HelperCha
             model=payload.model,
             message=payload.message,
             error=str(exc),
+        )
+        log_compact_event(
+            request,
+            "error",
+            "assistant_chat_error",
+            str(exc),
+            thread_id=payload.thread_id or "",
+            model=payload.model or "",
+            mode=payload.mode,
         )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -61,6 +83,15 @@ async def helper_chat_stream(payload: HelperChatRequest, request: Request) -> St
                 message=payload.message,
                 error=str(exc),
             )
+            log_compact_event(
+                request,
+                "error",
+                "assistant_stream_error",
+                str(exc),
+                thread_id=payload.thread_id or "",
+                model=payload.model or "",
+                mode=payload.mode,
+            )
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
         except Exception as exc:
             service.log_event(
@@ -70,6 +101,15 @@ async def helper_chat_stream(payload: HelperChatRequest, request: Request) -> St
                 model=payload.model,
                 message=payload.message,
                 error=str(exc),
+            )
+            log_compact_event(
+                request,
+                "error",
+                "assistant_stream_error",
+                str(exc),
+                thread_id=payload.thread_id or "",
+                model=payload.model or "",
+                mode=payload.mode,
             )
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 

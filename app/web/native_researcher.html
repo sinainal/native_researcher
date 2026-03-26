@@ -54,17 +54,16 @@
           <div class="native-sidebar-kicker">Explorer</div>
           <div class="native-sidebar-title">Workspace</div>
         </div>
-        <div class="native-sidebar-placeholder">
-          <div class="native-sidebar-placeholder-icon" aria-hidden="true">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 7.5 12 3l9 4.5-9 4.5L3 7.5Z" />
-              <path d="M3 12.5 12 17l9-4.5" />
-              <path d="M3 17.5 12 22l9-4.5" />
-            </svg>
+        <div class="native-workspace-library">
+          <div class="native-workspace-library-head">
+            <div class="native-workspace-library-label">Downloads</div>
+            <div id="workspaceDownloadCount" class="native-workspace-library-count">0</div>
           </div>
-          <div class="native-sidebar-placeholder-title">Left panel ready</div>
-          <div class="native-sidebar-placeholder-copy">
-            Space is reserved for upcoming features. The AI workspace on the right is active for now.
+          <div id="workspaceDownloadList" class="native-workspace-library-list">
+            <div class="native-workspace-library-empty">
+              <div class="native-workspace-library-empty-title">No papers yet</div>
+              <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+            </div>
           </div>
         </div>
         <span id="healthStatus" class="native-visually-hidden">Checking…</span>
@@ -73,6 +72,31 @@
 
     <div class="native-workspace">
       <main class="native-main">
+        <section class="native-project-bar" aria-label="Project header">
+          <div class="native-project-bar-copy">
+            <div class="native-project-bar-kicker">Project</div>
+            <button
+              id="projectNameDisplay"
+              class="native-project-name-display"
+              type="button"
+              title="Double-click to rename"
+              aria-label="Project name"
+            >
+              Project
+            </button>
+            <input
+              id="projectNameInput"
+              class="native-project-name-input"
+              type="text"
+              maxlength="200"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Rename project"
+              hidden
+            >
+          </div>
+        </section>
+
         <section class="content-card results-card native-results-card">
           <div class="card-toolbar native-results-toolbar">
             <div class="card-title native-results-title">
@@ -88,6 +112,8 @@
                 <span class="native-inline-stat"><strong id="articleCount">0</strong> articles</span>
                 <span class="native-inline-stat"><strong id="selectedCount">0</strong> selected</span>
               </div>
+              <button id="quickDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Quick</button>
+              <button id="deepDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Deep</button>
               <button id="clearSelectionBtn" class="btn btn-ghost btn-sm" disabled>Clear Selection</button>
               <button id="selectAllBtn" class="btn btn-ghost btn-sm" disabled>Select All</button>
             </div>
@@ -106,7 +132,6 @@
                 <col style="width: 92px;">
                 <col>
                 <col style="width: 80px;">
-                <col style="width: 112px;">
                 <col style="width: 128px;">
               </colgroup>
               <thead>
@@ -139,13 +164,12 @@
                   </th>
                   <th>Title</th>
                   <th>Link</th>
-                  <th>Source</th>
                   <th>Download</th>
                 </tr>
               </thead>
               <tbody id="resultsBody">
                 <tr>
-                  <td colspan="10" class="empty-cell">
+                  <td colspan="9" class="empty-cell">
                     <div class="native-empty-state">
                       <div class="native-empty-state-title">No search yet</div>
                       <div class="native-empty-state-copy">Start with a topic.</div>

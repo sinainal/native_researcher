@@ -15,110 +15,13 @@
 </head>
 
 <body class="landing-body">
-  <div class="landing-shell">
-    <aside class="landing-rail" aria-label="Application navigation">
-      <div class="landing-rail-brand">
-        <div class="landing-brand-glyph">NR</div>
-      </div>
-      <button class="landing-rail-btn is-active" type="button" aria-label="Projects" title="Projects">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 7.5 12 3l9 4.5-9 4.5L3 7.5Z" />
-          <path d="M3 12.5 12 17l9-4.5" />
-          <path d="M3 17.5 12 22l9-4.5" />
-        </svg>
-      </button>
-      <a class="landing-rail-btn" href="/native_researcher" aria-label="Open workspace" title="Open workspace">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="2" />
-          <path d="M9 4v16" />
-        </svg>
-      </a>
-      <a class="landing-rail-btn" href="/researcher_2" aria-label="Legacy console" title="Legacy console">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3h12A2.5 2.5 0 0 1 20 5.5v13.75" />
-          <path d="M8 7h8" />
-          <path d="M8 11h8" />
-          <path d="M8 15h5" />
-        </svg>
-      </a>
-      <div class="landing-rail-spacer"></div>
-      <div class="landing-rail-status">
-        <span class="landing-status-dot"></span>
-      </div>
-    </aside>
-
-    <div class="landing-main">
-      <header class="landing-topbar">
-        <div>
-          <div class="landing-eyebrow">Native Researcher</div>
-          <h1 class="landing-title">Choose a project workspace</h1>
-        </div>
-        <div class="landing-topbar-actions">
-          <a class="landing-link-btn" href="/native_researcher">Open current workspace</a>
-          <a class="landing-link-btn" href="/researcher_2">Legacy console</a>
-        </div>
-      </header>
-
-      <section class="landing-stage">
-        <div class="landing-hero-panel">
-          <div class="landing-panel-head">
-            <div>
-              <div class="landing-panel-kicker">Phase 1 Foundation</div>
-              <h2 class="landing-panel-title">Project-first research workflow</h2>
-            </div>
-            <div class="landing-panel-badge">Workspace ready</div>
-          </div>
-          <p class="landing-panel-copy">
-            Start each literature workflow inside its own project. Downloaded PDFs, derived files, search traces, and future
-            evidence indexes will live under one workspace boundary.
-          </p>
-          <div class="landing-feature-grid">
-            <div class="landing-feature-card">
-              <div class="landing-feature-label">Project storage</div>
-              <div class="landing-feature-text">Each project gets dedicated folders for PDFs, derived artifacts, indexes, and exports.</div>
-            </div>
-            <div class="landing-feature-card">
-              <div class="landing-feature-label">Next step</div>
-              <div class="landing-feature-text">This launcher will feed the PDF library, parser, viewer, and evidence engine in later phases.</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="landing-sidebar-panel">
-          <div class="landing-panel-head">
-            <div>
-              <div class="landing-panel-kicker">Create Project</div>
-              <h2 class="landing-panel-title">New workspace</h2>
-            </div>
-          </div>
-          <form id="projectCreateForm" class="landing-project-form">
-            <label class="landing-field">
-              <span class="landing-field-label">Project name</span>
-              <input id="projectNameInput" name="name" type="text" maxlength="200" placeholder="Neuro evidence map" required>
-            </label>
-            <label class="landing-field">
-              <span class="landing-field-label">Description</span>
-              <textarea id="projectDescriptionInput" name="description" rows="4" maxlength="800" placeholder="Scope, topic, or study question."></textarea>
-            </label>
-            <div class="landing-form-actions">
-              <button id="createProjectBtn" class="landing-primary-btn" type="submit">Create project</button>
-            </div>
-          </form>
-          <div id="projectCreateStatus" class="landing-inline-status" aria-live="polite"></div>
-        </div>
-      </section>
-
-      <section class="landing-projects-panel">
-        <div class="landing-panel-head">
-          <div>
-            <div class="landing-panel-kicker">Recent Projects</div>
-            <h2 class="landing-panel-title">Workspace launcher</h2>
-          </div>
-        </div>
-        <div id="projectList" class="landing-project-list" aria-live="polite"></div>
-      </section>
-    </div>
-  </div>
+  <main class="landing-minimal-shell">
+    <section class="landing-minimal-panel" aria-label="Recent projects">
+      <div class="landing-minimal-kicker">Native Researcher</div>
+      <h1 class="landing-minimal-title">Recent projects</h1>
+      <div id="projectList" class="landing-minimal-list" aria-live="polite"></div>
+    </section>
+  </main>
 
   <script src="/static/landing.js"></script>
 </body>

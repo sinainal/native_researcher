@@ -20,7 +20,21 @@ class ProjectListResponse(BaseModel):
     projects: list[ProjectSummary] = Field(default_factory=list)
 
 
+class ProjectDownloadItem(BaseModel):
+    name: str = Field(..., min_length=1, max_length=260)
+    path: str = Field(..., min_length=1)
+    size_bytes: int = Field(default=0, ge=0)
+    modified_at: str = Field(..., min_length=1, max_length=64)
+
+
+class ProjectDownloadListResponse(BaseModel):
+    items: list[ProjectDownloadItem] = Field(default_factory=list)
+
+
 class ProjectCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
+    name: str = Field(default="", max_length=200)
     description: str = Field(default="", max_length=800)
 
+
+class ProjectUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)

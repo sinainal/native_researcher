@@ -159,6 +159,8 @@ def test_api_endpoints() -> None:
             settings = Settings(
                 download_root=temp_root / "downloads",
                 workspace_root=temp_root / "workspace",
+                helper_log_path=temp_root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=temp_root / "logs" / "app_events.jsonl",
             )
             app = create_app(
                 settings=settings,
@@ -171,13 +173,12 @@ def test_api_endpoints() -> None:
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
                 root = await client.get("/")
                 assert root.status_code == 200
-                assert "Choose a project workspace" in root.text
-                assert "Create project" in root.text
-                assert "Legacy console" in root.text
+                assert "Recent projects" in root.text
+                assert 'id="projectList"' in root.text
 
                 landing = await client.get("/landing")
                 assert landing.status_code == 200
-                assert "Workspace launcher" in landing.text
+                assert "Recent projects" in landing.text
 
                 native = await client.get("/native_researcher")
                 assert native.status_code == 200
@@ -215,10 +216,64 @@ def test_api_endpoints() -> None:
                 assert create_project.json()["id"] == "neuro-evidence-map"
                 assert create_project.json()["pdf_count"] == 0
 
+                create_default_project = await client.post("/app/projects", json={})
+                assert create_default_project.status_code == 200
+                assert create_default_project.json()["id"] == "project-1"
+                assert create_default_project.json()["name"] == "Project 1"
+
+                create_second_default_project = await client.post("/app/projects", json={})
+                assert create_second_default_project.status_code == 200
+                assert create_second_default_project.json()["id"] == "project-2"
+                assert create_second_default_project.json()["name"] == "Project 2"
+
+                project_pdf_dir = settings.workspace_root / "projects" / "project-1" / "pdfs"
+                project_pdf_dir.mkdir(parents=True, exist_ok=True)
+                sample_pdf = project_pdf_dir / "sample-paper.pdf"
+                sample_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200
-                assert len(projects.json()["projects"]) == 1
-                assert projects.json()["projects"][0]["name"] == "Neuro Evidence Map"
+                assert len(projects.json()["projects"]) == 3
+                assert {item["name"] for item in projects.json()["projects"]} == {
+                    "Neuro Evidence Map",
+                    "Project 1",
+                    "Project 2",
+                }
+
+                project = await client.get("/app/projects/project-1")
+                assert project.status_code == 200
+                assert project.json()["name"] == "Project 1"
+
+                project_downloads = await client.get("/app/projects/project-1/downloads")
+                assert project_downloads.status_code == 200
+                assert project_downloads.json()["items"][0]["name"] == "sample-paper.pdf"
+
+                touched_project = await client.post("/app/projects/project-1/touch")
+                assert touched_project.status_code == 200
+                assert touched_project.json()["id"] == "project-1"
+
+                renamed_project = await client.patch(
+                    "/app/projects/project-1",
+                    json={"name": "Docking Review"},
+                )
+                assert renamed_project.status_code == 200
+                assert renamed_project.json()["name"] == "Docking Review"
+
+                project_list_after_rename = await client.get("/app/projects")
+                assert project_list_after_rename.status_code == 200
+                assert any(
+                    item["name"] == "Docking Review"
+                    for item in project_list_after_rename.json()["projects"]
+                )
+
+                app_event = await client.post(
+                    "/app/events",
+                    json={"level": "error", "event": "ui_error", "message": "Test event"},
+                )
+                assert app_event.status_code == 200
+                assert app_event.json() == {"ok": True}
+                assert settings.app_event_log_path.exists()
+                assert "ui_error" in settings.app_event_log_path.read_text(encoding="utf-8")
 
                 search = await client.post("/pubmed/search", json={"query": "ndm inhibitor", "max_results": 1})
                 assert search.status_code == 200

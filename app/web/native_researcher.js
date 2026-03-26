@@ -1,7 +1,14 @@
 const state = {
   allArticles: [],
   articles: [],
+  projectId: null,
+  projectPath: null,
+  projectName: "Project",
+  projectRenaming: false,
+  projectRenameSaving: false,
+  projectDownloads: [],
   downloadabilityById: {},
+  citationRunId: 0,
   selectedIds: new Set(),
   sortKey: null,
   sortDirection: "asc",
@@ -22,6 +29,8 @@ const state = {
 
 const els = {
   healthStatus: document.getElementById("healthStatus"),
+  projectNameDisplay: document.getElementById("projectNameDisplay"),
+  projectNameInput: document.getElementById("projectNameInput"),
   articleCount: document.getElementById("articleCount"),
   selectedCount: document.getElementById("selectedCount"),
   query: document.getElementById("query"),
@@ -33,8 +42,12 @@ const els = {
   sidebarToggleBtn: document.getElementById("sidebarToggleBtn"),
   chatHistoryList: document.getElementById("chatHistoryList"),
   newChatTriggers: document.querySelectorAll(".new-chat-trigger"),
+  workspaceDownloadCount: document.getElementById("workspaceDownloadCount"),
+  workspaceDownloadList: document.getElementById("workspaceDownloadList"),
   clearSelectionBtn: document.getElementById("clearSelectionBtn"),
   selectAllBtn: document.getElementById("selectAllBtn"),
+  quickDownloadSelectedBtn: document.getElementById("quickDownloadSelectedBtn"),
+  deepDownloadSelectedBtn: document.getElementById("deepDownloadSelectedBtn"),
   metaStrip: document.getElementById("metaStrip"),
   resultsBody: document.getElementById("resultsBody"),
   sortButtons: document.querySelectorAll(".table-sort-btn"),
@@ -86,15 +99,20 @@ const assistantModelStorageKey = "native_researcher_model";
 const assistantSessionStorageKey = "native_researcher_chat_sessions";
 const assistantCurrentSessionStorageKey = "native_researcher_chat_session_id";
 const assistantSidebarStorageKey = "native_researcher_sidebar_open";
+const activeProjectStorageKey = "native_researcher_active_project";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
 let resultsRenderScheduled = false;
 let downloadabilityResolveRun = 0;
+let appErrorLoggingBound = false;
 
 const downloadabilityLabels = {
-  loading: "Checking",
-  ready: "Ready",
+  loading: "Downloading",
+  high: "Ready",
+  medium: "Ready",
+  low: "Ready",
+  blocked: "No PDF",
   unavailable: "No PDF",
   downloaded: "Downloaded",
   failed: "Error",
@@ -134,6 +152,237 @@ function fetchJson(url, options = {}) {
     }
     return payload;
   });
+}
+
+function trackAppEvent(level, event, message, context = {}) {
+  const payload = {
+    level,
+    event,
+    message: String(message || "").slice(0, 240),
+    context,
+  };
+  fetch("/app/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function bindAppErrorLogging() {
+  if (appErrorLoggingBound || typeof window === "undefined") return;
+  appErrorLoggingBound = true;
+  window.addEventListener("error", (event) => {
+    trackAppEvent("error", "window_error", event.message || "Unhandled window error.", {
+      filename: event.filename || "",
+      lineno: event.lineno || 0,
+      colno: event.colno || 0,
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    const message = typeof reason === "string"
+      ? reason
+      : reason?.message || "Unhandled promise rejection.";
+    trackAppEvent("error", "unhandled_rejection", message, {
+      project_id: state.projectId || "",
+    });
+  });
+}
+
+function currentProjectParam() {
+  return new URLSearchParams(window.location.search).get("project")?.trim() || "";
+}
+
+function projectOpenUrl(projectId) {
+  return `/native_researcher?project=${encodeURIComponent(projectId)}`;
+}
+
+function projectDownloadDir() {
+  return state.projectPath ? `${state.projectPath}/pdfs` : null;
+}
+
+function formatFileSize(sizeBytes) {
+  const size = Number(sizeBytes || 0);
+  if (!Number.isFinite(size) || size <= 0) return "0 KB";
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function formatRelativeTime(value) {
+  if (!value) return "new";
+  const target = new Date(value);
+  if (Number.isNaN(target.getTime())) return "new";
+  const diffMs = Date.now() - target.getTime();
+  const diffMinutes = Math.max(1, Math.round(diffMs / 60000));
+  if (diffMinutes < 60) return `${diffMinutes}m`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h`;
+  const diffDays = Math.round(diffHours / 24);
+  if (diffDays < 30) return `${diffDays}d`;
+  const diffMonths = Math.round(diffDays / 30);
+  return `${diffMonths}mo`;
+}
+
+function renderProjectDownloads() {
+  if (!els.workspaceDownloadList || !els.workspaceDownloadCount) return;
+  const items = Array.isArray(state.projectDownloads) ? state.projectDownloads : [];
+  els.workspaceDownloadCount.textContent = String(items.length);
+  if (!items.length) {
+    els.workspaceDownloadList.innerHTML = `
+      <div class="native-workspace-library-empty">
+        <div class="native-workspace-library-empty-title">No papers yet</div>
+        <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+      </div>
+    `;
+    return;
+  }
+  els.workspaceDownloadList.innerHTML = items
+    .map((item) => `
+      <a class="native-workspace-download-item" href="${buildFileOpenUrl(item.path)}" target="_blank" rel="noreferrer">
+        <span class="native-workspace-download-name">${escapeHtml(item.name)}</span>
+        <span class="native-workspace-download-meta">${escapeHtml(formatFileSize(item.size_bytes))} · ${escapeHtml(formatRelativeTime(item.modified_at))}</span>
+      </a>
+    `)
+    .join("");
+}
+
+async function loadProjectDownloads() {
+  if (!state.projectId) {
+    state.projectDownloads = [];
+    renderProjectDownloads();
+    return;
+  }
+  try {
+    const payload = await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}/downloads`);
+    state.projectDownloads = Array.isArray(payload.items) ? payload.items : [];
+    renderProjectDownloads();
+  } catch (error) {
+    state.projectDownloads = [];
+    renderProjectDownloads();
+    trackAppEvent("error", "project_download_list_failed", error.message || "Project downloads could not be loaded.", {
+      project_id: state.projectId || "",
+    });
+  }
+}
+
+async function touchProjectActivity() {
+  if (!state.projectId) return;
+  try {
+    await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}/touch`, {
+      method: "POST",
+    });
+  } catch (_error) {
+    return;
+  }
+}
+
+function updateProjectUI() {
+  const projectName = state.projectName || "Project";
+  if (els.projectNameDisplay) {
+    els.projectNameDisplay.textContent = projectName;
+    els.projectNameDisplay.title = `${projectName} · Double-click to rename`;
+  }
+  if (els.projectNameInput && !state.projectRenaming) {
+    els.projectNameInput.value = projectName;
+  }
+  document.title = `${projectName} — Native Researcher`;
+}
+
+function applyActiveProject(project) {
+  if (!project?.id) return;
+  state.projectId = project.id;
+  state.projectPath = project.project_path || null;
+  state.projectName = project.name || "Project";
+  localStorage.setItem(activeProjectStorageKey, state.projectId);
+  updateProjectUI();
+  void loadProjectDownloads();
+  if (currentProjectParam() !== state.projectId) {
+    window.history.replaceState({}, "", projectOpenUrl(state.projectId));
+  }
+}
+
+async function createDefaultProject() {
+  return fetchJson("/app/projects", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+async function loadProject(projectId) {
+  return fetchJson(`/app/projects/${encodeURIComponent(projectId)}`);
+}
+
+async function ensureActiveProject() {
+  const candidates = [currentProjectParam(), localStorage.getItem(activeProjectStorageKey) || ""].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const project = await loadProject(candidate);
+      applyActiveProject(project);
+      return;
+    } catch (_error) {
+      if (candidate === localStorage.getItem(activeProjectStorageKey)) {
+        localStorage.removeItem(activeProjectStorageKey);
+      }
+    }
+  }
+
+  const project = await createDefaultProject();
+  applyActiveProject(project);
+}
+
+function setProjectRenaming(next) {
+  state.projectRenaming = Boolean(next);
+  if (!els.projectNameDisplay || !els.projectNameInput) return;
+  els.projectNameDisplay.hidden = state.projectRenaming;
+  els.projectNameInput.hidden = !state.projectRenaming;
+  if (!state.projectRenaming) {
+    els.projectNameInput.value = state.projectName || "Project";
+  }
+}
+
+function startProjectRename() {
+  if (!state.projectId || state.projectRenameSaving || !els.projectNameInput) return;
+  setProjectRenaming(true);
+  els.projectNameInput.focus();
+  els.projectNameInput.select();
+}
+
+function cancelProjectRename() {
+  if (state.projectRenameSaving) return;
+  setProjectRenaming(false);
+}
+
+async function saveProjectRename() {
+  if (!state.projectId || !state.projectRenaming || state.projectRenameSaving || !els.projectNameInput) return;
+  const nextName = els.projectNameInput.value.trim();
+  if (!nextName || nextName === state.projectName) {
+    cancelProjectRename();
+    return;
+  }
+
+  state.projectRenameSaving = true;
+  els.projectNameInput.disabled = true;
+  try {
+    const project = await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: nextName }),
+    });
+    applyActiveProject(project);
+    trackAppEvent("info", "project_renamed_ui", project.name || nextName, {
+      project_id: project.id || state.projectId,
+    });
+  } catch (error) {
+    console.error("Project rename failed.", error);
+    trackAppEvent("error", "project_rename_failed", error.message || "Project rename failed.", {
+      project_id: state.projectId,
+      attempted_name: nextName,
+    });
+  } finally {
+    state.projectRenameSaving = false;
+    els.projectNameInput.disabled = false;
+    setProjectRenaming(false);
+  }
 }
 
 function scheduleResultsRender() {
@@ -573,13 +822,6 @@ function bestArticleLink(article) {
   return links.pmc || links.doi || links.pubmed || null;
 }
 
-function articleSourceLabel(article) {
-  if (article.pmc_id) return "PMC";
-  if (article.doi) return "DOI";
-  if (article.pmid) return "PubMed";
-  return "-";
-}
-
 function articleReference(article) {
   return {
     title: article.title || null,
@@ -595,18 +837,18 @@ function buildFileOpenUrl(filePath) {
 }
 
 function isDownloadReadyStatus(status) {
-  return ["ready", "downloaded"].includes(status);
+  return ["high", "medium", "low", "downloaded"].includes(status);
 }
 
 function canAttemptDownload(info) {
-  return isDownloadReadyStatus(info.status) || (info.status === "failed" && Number(info.candidateCount) > 0);
+  return isDownloadReadyStatus(info.status) || info.status === "downloaded";
 }
 
 function getDownloadability(articleId) {
   return state.downloadabilityById[articleId] || {
-    status: "loading",
-    label: downloadabilityLabels.loading,
-    detail: "Checking for downloadable PDF sources.",
+    status: "unavailable",
+    label: downloadabilityLabels.unavailable,
+    detail: "No PMC signal.",
     openUrl: null,
     candidateCount: 0,
   };
@@ -621,7 +863,7 @@ function downloadabilityDisplay(articleId) {
     return { tone: "ready", text: downloadabilityLabels.downloaded };
   }
   if (isDownloadReadyStatus(info.status)) {
-    return { tone: "ready", text: downloadabilityLabels.ready };
+    return { tone: "ready", text: downloadabilityLabels.high };
   }
   return { tone: "blocked", text: info.label || downloadabilityLabels.unavailable };
 }
@@ -629,13 +871,11 @@ function downloadabilityDisplay(articleId) {
 function downloadControlMarkup(article) {
   const info = getDownloadability(article.id);
   const display = downloadabilityDisplay(article.id);
-  if (info.openUrl) {
-    return `<a class="btn btn-primary btn-xs file-open-btn" href="${info.openUrl}" target="_blank" rel="noreferrer">PDF</a>`;
-  }
-  if (canAttemptDownload(info)) {
-    return `<button type="button" class="btn btn-secondary btn-xs row-download-btn" data-id="${article.id}">Download</button>`;
-  }
-  return `<span class="native-download-state">${escapeHtml(display.text)}</span>`;
+  const canOpen = Boolean(info.openUrl);
+  const disabled = display.tone !== "ready" ? "disabled" : "";
+  return canOpen
+    ? `<a class="btn btn-primary btn-xs file-open-btn" href="${info.openUrl}" target="_blank" rel="noreferrer">PDF</a>`
+    : `<button type="button" class="btn btn-secondary btn-xs row-download-btn" data-id="${article.id}" ${disabled}>Download</button>`;
 }
 
 function renderDownloadabilityCell(article) {
@@ -658,11 +898,11 @@ function seedDownloadability(articles) {
     source.map((article) => [
       article.id,
       {
-        status: "loading",
-        label: downloadabilityLabels.loading,
-        detail: "Checking for downloadable PDF sources.",
+        status: article.pmc_id ? "high" : "unavailable",
+        label: article.pmc_id ? downloadabilityLabels.high : downloadabilityLabels.unavailable,
+        detail: article.pmc_id ? "PMC signal found. Direct download can be tried." : "No PMC signal.",
         openUrl: null,
-        candidateCount: 0,
+        candidateCount: article.pmc_id ? 1 : 0,
       },
     ]),
   );
@@ -694,8 +934,8 @@ async function resolveArticleDownloadabilityInBackground(articles) {
         const primarySource = candidates[0]?.source || null;
         state.downloadabilityById[article.id] = candidates.length
           ? {
-              status: "ready",
-              label: downloadabilityLabels.ready,
+              status: "high",
+              label: downloadabilityLabels.high,
               detail: primarySource
                 ? `Downloadable PDF found via ${primarySource}.`
                 : "Downloadable PDF source found.",
@@ -727,16 +967,16 @@ async function resolveArticleDownloadabilityInBackground(articles) {
 }
 
 async function downloadSingleArticle(articleId) {
-  const article = state.allArticles.find((item) => item.id === articleId) || state.articles.find((item) => item.id === articleId);
+  const article = state.articles.find((item) => item.id === articleId);
   if (!article) return;
   const current = getDownloadability(article.id);
-  if (!canAttemptDownload(current)) return;
+  if (!isDownloadReadyStatus(current.status) && current.status !== "downloaded") return;
 
   state.downloadabilityById[article.id] = {
-    ...current,
     status: "loading",
     label: downloadabilityLabels.loading,
-    detail: "Downloading PDF.",
+    detail: "Saving file.",
+    openUrl: current.openUrl || null,
   };
   scheduleResultsRender();
 
@@ -745,6 +985,7 @@ async function downloadSingleArticle(articleId) {
       method: "POST",
       body: JSON.stringify({
         articles: [articleReference(article)],
+        download_dir: projectDownloadDir(),
         max_articles: 1,
         mode: "fast",
       }),
@@ -758,7 +999,12 @@ async function downloadSingleArticle(articleId) {
         openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
         candidateCount: Math.max(1, current.candidateCount || result.candidate_count || 1),
       };
+      await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
     } else {
+      trackAppEvent("error", "pdf_download_failed", result?.error || "PDF download failed.", {
+        pmid: article.pmid || "",
+        article_id: article.id,
+      });
       state.downloadabilityById[article.id] = {
         status: "failed",
         label: downloadabilityLabels.failed,
@@ -768,6 +1014,10 @@ async function downloadSingleArticle(articleId) {
       };
     }
   } catch (error) {
+    trackAppEvent("error", "pdf_download_failed", error.message || "PDF download failed.", {
+      pmid: article.pmid || "",
+      article_id: article.id,
+    });
     state.downloadabilityById[article.id] = {
       status: "failed",
       label: downloadabilityLabels.failed,
@@ -778,6 +1028,86 @@ async function downloadSingleArticle(articleId) {
   }
 
   scheduleResultsRender();
+}
+
+function selectedArticles() {
+  return state.allArticles.filter((article) => state.selectedIds.has(article.id));
+}
+
+function articleIdentityKey(article) {
+  return article?.pmid || article?.doi || article?.pmc_id || article?.title || "";
+}
+
+function applyBatchDownloadResults(chosen, results) {
+  const chosenByKey = new Map(chosen.map((article) => [articleIdentityKey(article), article]));
+  (Array.isArray(results) ? results : []).forEach((result) => {
+    const article = chosenByKey.get(articleIdentityKey(result.article));
+    if (!article) return;
+    if (result.success) {
+      state.downloadabilityById[article.id] = {
+        status: "downloaded",
+        label: downloadabilityLabels.downloaded,
+        detail: result.file_path ? "PDF downloaded. Open it with the PDF button." : "PDF downloaded.",
+        openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
+        candidateCount: Math.max(1, result.candidate_count || 1),
+      };
+      return;
+    }
+    state.downloadabilityById[article.id] = {
+      status: "failed",
+      label: downloadabilityLabels.failed,
+      detail: result.error || "PDF download failed.",
+      openUrl: null,
+      candidateCount: 0,
+    };
+  });
+  scheduleResultsRender();
+}
+
+async function downloadSelectedArticles(mode = "fast") {
+  const chosen = selectedArticles();
+  if (!chosen.length) return;
+
+  chosen.forEach((article) => {
+    state.downloadabilityById[article.id] = {
+      ...(getDownloadability(article.id) || {}),
+      status: "loading",
+      label: downloadabilityLabels.loading,
+      detail: mode === "fast" ? "Saving file." : "Deep download in progress.",
+      openUrl: getDownloadability(article.id).openUrl || null,
+    };
+  });
+  scheduleResultsRender();
+
+  try {
+    const data = await fetchJson("/pdf/download", {
+      method: "POST",
+      body: JSON.stringify({
+        articles: chosen.map(articleReference),
+        download_dir: projectDownloadDir(),
+        max_articles: chosen.length,
+        mode,
+      }),
+    });
+    applyBatchDownloadResults(chosen, data.results || []);
+    await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
+  } catch (error) {
+    chosen.forEach((article) => {
+      state.downloadabilityById[article.id] = {
+        status: "failed",
+        label: downloadabilityLabels.failed,
+        detail: error.message || "PDF download failed.",
+        openUrl: null,
+        candidateCount: 0,
+      };
+    });
+    trackAppEvent("error", "pdf_batch_download_failed", error.message || "Batch PDF download failed.", {
+      project_id: state.projectId || "",
+      mode,
+      selected_count: chosen.length,
+    });
+    scheduleResultsRender();
+  }
 }
 
 function compactList(items, limit = 8) {
@@ -909,7 +1239,7 @@ function detailRowMarkup(article) {
   const downloadDisplay = downloadabilityDisplay(article.id);
   return `
     <tr class="detail-row">
-      <td colspan="10">
+      <td colspan="9">
         <div class="inline-detail">
           <div class="inline-detail-top">
             <div>
@@ -1046,6 +1376,50 @@ function updateCounters() {
   els.selectedCount.textContent = String(state.selectedIds.size);
   els.selectAllBtn.disabled = state.articles.length === 0;
   els.clearSelectionBtn.disabled = state.selectedIds.size === 0;
+  if (els.quickDownloadSelectedBtn) {
+    els.quickDownloadSelectedBtn.disabled = state.selectedIds.size === 0;
+  }
+  if (els.deepDownloadSelectedBtn) {
+    els.deepDownloadSelectedBtn.disabled = state.selectedIds.size === 0;
+  }
+}
+
+async function enrichCitationsInBackground() {
+  if (!state.allArticles.length) return;
+  const runId = Date.now();
+  state.citationRunId = runId;
+  const queue = [...state.allArticles];
+  const chunkSize = 10;
+
+  for (let index = 0; index < queue.length; index += chunkSize) {
+    if (state.citationRunId !== runId) return;
+    const chunk = queue.slice(index, index + chunkSize);
+    try {
+      const data = await fetchJson("/pubmed/citations", {
+        method: "POST",
+        body: JSON.stringify({
+          articles: chunk.map(articleReference),
+        }),
+      });
+      if (state.citationRunId !== runId) return;
+      const byKey = new Map(
+        (data.items || []).map((item) => [item.pmid || item.doi, item.citation_count]),
+      );
+      state.allArticles = state.allArticles.map((article) => {
+        const key = article.pmid || article.doi;
+        if (!key || !byKey.has(key)) return article;
+        return {
+          ...article,
+          citation_count: byKey.get(key),
+        };
+      });
+      state.articles = [...state.allArticles];
+      applyArticleSort();
+      renderResults();
+    } catch (_error) {
+      return;
+    }
+  }
 }
 
 function applyArticleDataset(data) {
@@ -1066,7 +1440,7 @@ function applyArticleDataset(data) {
   renderMeta(data.meta || null);
   applyArticleSort();
   renderResults();
-  void resolveArticleDownloadabilityInBackground(state.allArticles);
+  void enrichCitationsInBackground();
 }
 
 function renderResults() {
@@ -1076,7 +1450,7 @@ function renderResults() {
   if (!state.articles.length) {
     els.resultsBody.innerHTML = `
       <tr>
-        <td colspan="10" class="empty-cell">
+        <td colspan="9" class="empty-cell">
           <div class="native-empty-state">
             <div class="native-empty-state-title">No search yet</div>
             <div class="native-empty-state-copy">Start with a topic in Searcher AI.</div>
@@ -1101,7 +1475,6 @@ function renderResults() {
           <td class="count-cell">${escapeHtml(citationLabel(article))}</td>
           <td class="title-cell">${escapeHtml(article.title || "-")}</td>
           <td>${link ? `<a class="table-link" href="${link}" target="_blank" rel="noreferrer">Link</a>` : "-"}</td>
-          <td><span class="native-source-chip">${escapeHtml(articleSourceLabel(article))}</span></td>
           <td>${renderDownloadabilityCell(article)}</td>
         </tr>
         ${detailRow}
@@ -1229,14 +1602,50 @@ function updateThinkingLabel() {
 }
 
 function assistantActionLabel(action) {
-  if (action.status === "running") return "Searching PubMed";
-  if (action.status === "error") return "PubMed search failed";
-  return "Searched PubMed";
+  const details = action.details || {};
+  const running = {
+    search_pubmed: "Searching PubMed",
+    get_article_details: "Reading article details",
+    list_catalog_articles: "Scanning catalog",
+  };
+  const success = {
+    search_pubmed: details.retry_used ? "Broadened PubMed search" : "Searched PubMed",
+    get_article_details: "Read article details",
+    list_catalog_articles: "Scanned catalog",
+  };
+  const error = {
+    search_pubmed: "PubMed search failed",
+    get_article_details: "Article detail read failed",
+    list_catalog_articles: "Catalog scan failed",
+  };
+  if (action.status === "running") return running[action.name] || "Running tool";
+  if (action.status === "error") return error[action.name] || "Tool failed";
+  return success[action.name] || "Tool completed";
 }
 
 function assistantActionDetail(action) {
   const details = action.details || {};
-  return details.query || "PubMed query";
+  if (action.name === "search_pubmed") {
+    if (details.retry_used && details.retry_query) return details.retry_query;
+    return details.query || "Building PubMed query";
+  }
+  if (action.name === "get_article_details") {
+    const ids = details.requested_ids || details.returned_ids || details.ids || [];
+    return ids.length ? `ID ${ids.join(", ")}` : "Opening article details";
+  }
+  if (action.name === "list_catalog_articles") {
+    return details.query || "Scanning loaded catalog";
+  }
+  return action.name || "Tool";
+}
+
+function assistantActionKindLabel(action) {
+  const map = {
+    search_pubmed: "PubMed",
+    get_article_details: "Evidence",
+    list_catalog_articles: "Catalog",
+  };
+  return map[action.name] || "Tool";
 }
 
 function upsertAssistantAction(actions, action, callId) {
@@ -1287,7 +1696,7 @@ function assistantActionsMarkup(item) {
     ? `<div class="ai-action-list">${item.actions.map((act) => `
         <div class="ai-action-row ${act.status || "success"}">
           <span class="ai-action-row-status ${act.status || "success"}">${act.status === "error" ? "!" : act.status === "success" ? "✓" : ""}</span>
-          <span class="ai-action-row-kind">PubMed</span>
+          <span class="ai-action-row-kind">${escapeHtml(assistantActionKindLabel(act))}</span>
           <span class="ai-action-row-text">${escapeHtml(assistantActionLabel(act))}</span>
           <span class="ai-action-row-sep">·</span>
           <span class="ai-action-row-detail" title="${escapeHtml(assistantActionDetail(act))}">${escapeHtml(assistantActionDetail(act))}</span>
@@ -1405,6 +1814,9 @@ async function sendAssistantMessage() {
   const message = els.assistantInput.value.trim();
   if (!message) return;
   if (!runtime.apiKey) {
+    trackAppEvent("error", "assistant_missing_api_key", "Assistant API key not found.", {
+      project_id: state.projectId || "",
+    });
     pushAssistantMessage({
       role: "assistant",
       text: "Assistant error: API key not found.",
@@ -1440,7 +1852,7 @@ async function sendAssistantMessage() {
 
   try {
     await streamJsonEvents(
-      "/native-assistant/chat/stream",
+      "/assistant/chat/stream",
       {
         method: "POST",
         signal: controller.signal,
@@ -1448,6 +1860,7 @@ async function sendAssistantMessage() {
           api_key: runtime.apiKey,
           message,
           model: runtime.assistantModel,
+          mode: "fast",
           thread_id: state.assistantThreadId,
           thinking_level: effectiveThinkingLevel(),
           articles: state.allArticles.map((article) => ({
@@ -1512,9 +1925,10 @@ async function sendAssistantMessage() {
           pendingMessage.text = event.response?.answer || pendingMessage.text || "";
           pendingMessage.thinking = event.response?.thinking || pendingMessage.liveThinking || "";
           pendingMessage.meta = event.response?.used_article_ids?.length
-            ? `Source IDs: ${event.response.used_article_ids.join(", ")}`
+            ? `Article IDs: ${event.response.used_article_ids.join(", ")}`
             : "";
           pendingMessage.actions = event.response?.executed_actions || pendingMessage.actions;
+          applyAssistantActions(event.response?.executed_actions || []);
           scheduleAssistantMessageUpdate(pendingMessage);
           syncCurrentSession();
           return;
@@ -1522,6 +1936,10 @@ async function sendAssistantMessage() {
         if (event.type === "error") {
           pendingMessage.pending = false;
           pendingMessage.text = `Assistant error: ${event.message || "Unknown error."}`;
+          trackAppEvent("error", "assistant_stream_failed", event.message || "Unknown assistant error.", {
+            project_id: state.projectId || "",
+            model: runtime.assistantModel,
+          });
           scheduleAssistantMessageUpdate(pendingMessage);
           syncCurrentSession();
         }
@@ -1530,6 +1948,10 @@ async function sendAssistantMessage() {
   } catch (error) {
     pendingMessage.pending = false;
     pendingMessage.text = `Assistant error: ${error.message || "Unknown error."}`;
+    trackAppEvent("error", "assistant_stream_failed", error.message || "Unknown assistant error.", {
+      project_id: state.projectId || "",
+      model: runtime.assistantModel,
+    });
     scheduleAssistantMessageUpdate(pendingMessage);
     syncCurrentSession();
   } finally {
@@ -1563,6 +1985,9 @@ function bindEvents() {
     try {
       await runSearch();
     } catch (error) {
+      trackAppEvent("error", "pubmed_search_failed", error.message || "PubMed search failed.", {
+        project_id: state.projectId || "",
+      });
       pushAssistantMessage({ role: "assistant", text: `Search error: ${error.message}` });
     }
   });
@@ -1579,6 +2004,24 @@ function bindEvents() {
     void sendAssistantMessage();
   });
 
+  els.projectNameDisplay?.addEventListener("dblclick", () => {
+    startProjectRename();
+  });
+  els.projectNameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveProjectRename();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelProjectRename();
+    }
+  });
+  els.projectNameInput?.addEventListener("blur", () => {
+    void saveProjectRename();
+  });
+
   els.sortButtons.forEach((button) => {
     button.addEventListener("click", () => toggleArticleSort(button.dataset.sortKey));
   });
@@ -1591,6 +2034,13 @@ function bindEvents() {
   els.clearSelectionBtn.addEventListener("click", () => {
     state.selectedIds.clear();
     renderResults();
+  });
+
+  els.quickDownloadSelectedBtn?.addEventListener("click", () => {
+    void downloadSelectedArticles("fast");
+  });
+  els.deepDownloadSelectedBtn?.addEventListener("click", () => {
+    void downloadSelectedArticles("balanced");
   });
 
   els.sidebarToggleBtn?.addEventListener("click", () => {
@@ -1654,7 +2104,10 @@ function bindEvents() {
 }
 
 async function init() {
+  bindAppErrorLogging();
   loadStoredAssistantSessions();
+  updateProjectUI();
+  renderProjectDownloads();
   updateAssistantModelUI();
   updateThinkingLabel();
   autoResizeTextarea(els.query);
@@ -1671,7 +2124,7 @@ async function init() {
   }
   setAssistantOpen(true);
   setChatHistoryOpen(false);
-  await Promise.all([loadHealth(), loadBootstrap()]);
+  await Promise.all([loadHealth(), loadBootstrap(), ensureActiveProject()]);
 }
 
 void init();

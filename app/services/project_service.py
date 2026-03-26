@@ -6,8 +6,14 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from app.schemas.project import ProjectCreateRequest, ProjectSummary
+from app.schemas.project import (
+    ProjectCreateRequest,
+    ProjectDownloadItem,
+    ProjectSummary,
+    ProjectUpdateRequest,
+)
 
 
 class ProjectService:
@@ -21,31 +27,17 @@ class ProjectService:
         for directory in sorted(self.projects_root.iterdir()):
             if not directory.is_dir():
                 continue
-            metadata_path = directory / "project.json"
-            if not metadata_path.exists():
+            payload = self._read_metadata(directory)
+            if payload is None:
                 continue
-            try:
-                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            projects.append(
-                ProjectSummary(
-                    id=str(payload.get("id") or directory.name),
-                    name=str(payload.get("name") or directory.name),
-                    description=str(payload.get("description") or ""),
-                    created_at=str(payload.get("created_at") or ""),
-                    updated_at=str(payload.get("updated_at") or ""),
-                    pdf_count=self._count_files(directory / "pdfs", ".pdf"),
-                    note_count=self._count_files(directory / "notes", ".md"),
-                    project_path=str(directory),
-                )
-            )
+            projects.append(self._project_summary(directory, payload))
         projects.sort(key=lambda item: item.updated_at, reverse=True)
         return projects
 
     def create_project(self, payload: ProjectCreateRequest) -> ProjectSummary:
         self.projects_root.mkdir(parents=True, exist_ok=True)
-        project_id = self._unique_project_id(payload.name)
+        resolved_name = payload.name.strip() or self._next_default_project_name()
+        project_id = self._unique_project_id(resolved_name)
         project_dir = self.projects_root / project_id
         for relative in ("pdfs", "derived", "indexes", "exports", "notes"):
             (project_dir / relative).mkdir(parents=True, exist_ok=True)
@@ -53,7 +45,7 @@ class ProjectService:
         timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
         metadata = {
             "id": project_id,
-            "name": payload.name.strip(),
+            "name": resolved_name,
             "description": payload.description.strip(),
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -73,6 +65,69 @@ class ProjectService:
             project_path=str(project_dir),
         )
 
+    def get_project(self, project_id: str) -> ProjectSummary | None:
+        directory = self.projects_root / project_id
+        payload = self._read_metadata(directory)
+        if payload is None:
+            return None
+        return self._project_summary(directory, payload)
+
+    def list_project_downloads(self, project_id: str) -> list[ProjectDownloadItem] | None:
+        directory = self.projects_root / project_id
+        payload = self._read_metadata(directory)
+        if payload is None:
+            return None
+        download_dir = directory / "pdfs"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        items: list[ProjectDownloadItem] = []
+        for entry in sorted(
+            download_dir.iterdir(),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ):
+            if not entry.is_file() or entry.suffix.lower() != ".pdf":
+                continue
+            stat = entry.stat()
+            items.append(
+                ProjectDownloadItem(
+                    name=entry.name,
+                    path=str(entry),
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).replace(microsecond=0).isoformat(),
+                )
+            )
+        return items
+
+    def update_project(self, project_id: str, payload: ProjectUpdateRequest) -> ProjectSummary | None:
+        directory = self.projects_root / project_id
+        current = self._read_metadata(directory)
+        if current is None:
+            return None
+
+        next_name = payload.name.strip()
+        if not next_name:
+            return None
+
+        current["name"] = next_name
+        current["updated_at"] = datetime.now(UTC).replace(microsecond=0).isoformat()
+        (directory / "project.json").write_text(
+            json.dumps(current, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        return self._project_summary(directory, current)
+
+    def touch_project(self, project_id: str) -> ProjectSummary | None:
+        directory = self.projects_root / project_id
+        current = self._read_metadata(directory)
+        if current is None:
+            return None
+        current["updated_at"] = datetime.now(UTC).replace(microsecond=0).isoformat()
+        (directory / "project.json").write_text(
+            json.dumps(current, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        return self._project_summary(directory, current)
+
     def _unique_project_id(self, name: str) -> str:
         base = self._slugify(name) or "project"
         candidate = base
@@ -81,6 +136,37 @@ class ProjectService:
             candidate = f"{base}-{suffix}"
             suffix += 1
         return candidate
+
+    def _next_default_project_name(self) -> str:
+        pattern = re.compile(r"^project\s+(\d+)$", re.IGNORECASE)
+        highest = 0
+        for project in self.list_projects():
+            match = pattern.match(project.name.strip())
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"Project {highest + 1}"
+
+    def _project_summary(self, directory: Path, payload: dict[str, Any]) -> ProjectSummary:
+        return ProjectSummary(
+            id=str(payload.get("id") or directory.name),
+            name=str(payload.get("name") or directory.name),
+            description=str(payload.get("description") or ""),
+            created_at=str(payload.get("created_at") or ""),
+            updated_at=str(payload.get("updated_at") or ""),
+            pdf_count=self._count_files(directory / "pdfs", ".pdf"),
+            note_count=self._count_files(directory / "notes", ".md"),
+            project_path=str(directory),
+        )
+
+    @staticmethod
+    def _read_metadata(directory: Path) -> dict[str, Any] | None:
+        metadata_path = directory / "project.json"
+        if not directory.exists() or not directory.is_dir() or not metadata_path.exists():
+            return None
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
     @staticmethod
     def _slugify(value: str) -> str:
@@ -92,4 +178,3 @@ class ProjectService:
         if not directory.exists():
             return 0
         return sum(1 for item in directory.iterdir() if item.is_file() and item.suffix.lower() == suffix)
-

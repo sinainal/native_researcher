@@ -32,6 +32,7 @@ class Settings:
     helper_cache_ttl_seconds: int = 7200
     helper_cache_max_entries: int = 64
     helper_log_path: Path = Path("logs/helper_ai_history.jsonl")
+    app_event_log_path: Path = Path("logs/app_events.jsonl")
     pdf_cache_ttl_seconds: int = 1800
     pdf_cache_max_entries: int = 256
     pdf_download_concurrency: int = 12
@@ -74,6 +75,7 @@ class Settings:
             helper_cache_ttl_seconds=int(os.getenv("HELPER_CACHE_TTL_SECONDS", "7200")),
             helper_cache_max_entries=int(os.getenv("HELPER_CACHE_MAX_ENTRIES", "64")),
             helper_log_path=Path(os.getenv("HELPER_LOG_PATH", "logs/helper_ai_history.jsonl")),
+            app_event_log_path=Path(os.getenv("APP_EVENT_LOG_PATH", "logs/app_events.jsonl")),
             pdf_cache_ttl_seconds=int(os.getenv("PDF_CACHE_TTL_SECONDS", "1800")),
             pdf_cache_max_entries=int(os.getenv("PDF_CACHE_MAX_ENTRIES", "256")),
             pdf_download_concurrency=int(os.getenv("PDF_DOWNLOAD_CONCURRENCY", "12")),

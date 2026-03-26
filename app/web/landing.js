@@ -1,11 +1,9 @@
 const landingEls = {
   projectList: document.getElementById("projectList"),
-  projectCreateForm: document.getElementById("projectCreateForm"),
-  projectNameInput: document.getElementById("projectNameInput"),
-  projectDescriptionInput: document.getElementById("projectDescriptionInput"),
-  projectCreateStatus: document.getElementById("projectCreateStatus"),
-  createProjectBtn: document.getElementById("createProjectBtn"),
 };
+
+const activeProjectStorageKey = "native_researcher_active_project";
+let landingErrorLoggingBound = false;
 
 async function landingFetchJson(url, options = {}) {
   const response = await fetch(url, {
@@ -18,6 +16,48 @@ async function landingFetchJson(url, options = {}) {
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return payload;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function trackLandingEvent(level, event, message, context = {}) {
+  fetch("/app/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      level,
+      event,
+      message: String(message || "").slice(0, 240),
+      context,
+    }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function bindLandingErrorLogging() {
+  if (landingErrorLoggingBound || typeof window === "undefined") return;
+  landingErrorLoggingBound = true;
+  window.addEventListener("error", (event) => {
+    trackLandingEvent("error", "landing_window_error", event.message || "Unhandled landing error.", {
+      filename: event.filename || "",
+      lineno: event.lineno || 0,
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    trackLandingEvent(
+      "error",
+      "landing_unhandled_rejection",
+      typeof reason === "string" ? reason : reason?.message || "Unhandled promise rejection.",
+    );
+  });
 }
 
 function formatRelativeTime(value) {
@@ -39,30 +79,35 @@ function projectOpenUrl(projectId) {
   return `/native_researcher?project=${encodeURIComponent(projectId)}`;
 }
 
+async function createProjectAndOpen() {
+  try {
+    const project = await landingFetchJson("/app/projects", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (!project?.id) return;
+    localStorage.setItem(activeProjectStorageKey, project.id);
+    window.location.href = projectOpenUrl(project.id);
+  } catch (error) {
+    trackLandingEvent("error", "project_create_failed", error.message || "Project creation failed.");
+    throw error;
+  }
+}
+
 function projectCardMarkup(project) {
-  const description = project.description?.trim() || "Project workspace is ready for PDFs, derived notes, and future indexes.";
   return `
-    <button class="landing-project-card" type="button" data-project-id="${project.id}">
-      <div class="landing-project-card-main">
-        <div class="landing-project-name">${project.name}</div>
-        <div class="landing-project-description">${description}</div>
-        <div class="landing-project-meta">
-          <span>${project.pdf_count} PDFs</span>
-          <span>${project.note_count} notes</span>
-        </div>
-      </div>
-      <div class="landing-project-side">
-        <span class="landing-project-time">${formatRelativeTime(project.updated_at)}</span>
-      </div>
+    <button class="landing-minimal-project" type="button" data-project-id="${project.id}">
+      <span class="landing-minimal-project-name">${escapeHtml(project.name)}</span>
+      <span class="landing-minimal-project-time">${formatRelativeTime(project.updated_at)}</span>
     </button>
   `;
 }
 
 function emptyProjectsMarkup() {
   return `
-    <div class="landing-project-empty">
-      <div class="landing-project-empty-title">No projects yet</div>
-      <div class="landing-project-empty-copy">Create the first workspace to start organizing downloads, evidence, and project-specific research state.</div>
+    <div class="landing-minimal-empty">
+      <div class="landing-minimal-empty-title">No recent projects</div>
+      <button class="landing-minimal-empty-link" type="button" data-create-project="true">Open Project 1</button>
     </div>
   `;
 }
@@ -77,46 +122,34 @@ function renderProjects(projects) {
     node.addEventListener("click", () => {
       const projectId = node.dataset.projectId;
       if (!projectId) return;
-      localStorage.setItem("native_researcher_active_project", projectId);
+      localStorage.setItem(activeProjectStorageKey, projectId);
       window.location.href = projectOpenUrl(projectId);
     });
+  });
+  landingEls.projectList.querySelector("[data-create-project]")?.addEventListener("click", () => {
+    void createProjectAndOpen();
   });
 }
 
 async function loadProjects() {
-  const payload = await landingFetchJson("/app/projects");
-  renderProjects(Array.isArray(payload.projects) ? payload.projects : []);
-}
-
-async function handleProjectCreate(event) {
-  event.preventDefault();
-  const name = landingEls.projectNameInput?.value.trim() || "";
-  const description = landingEls.projectDescriptionInput?.value.trim() || "";
-  if (!name) return;
-
-  landingEls.createProjectBtn.disabled = true;
-  landingEls.projectCreateStatus.textContent = "Creating project...";
   try {
-    const project = await landingFetchJson("/app/projects", {
-      method: "POST",
-      body: JSON.stringify({ name, description }),
-    });
-    localStorage.setItem("native_researcher_active_project", project.id);
-    landingEls.projectCreateStatus.textContent = "Project created.";
-    window.location.href = projectOpenUrl(project.id);
+    const payload = await landingFetchJson("/app/projects");
+    renderProjects(Array.isArray(payload.projects) ? payload.projects : []);
   } catch (error) {
-    landingEls.projectCreateStatus.textContent = `Project error: ${error.message}`;
-  } finally {
-    landingEls.createProjectBtn.disabled = false;
+    trackLandingEvent("error", "project_list_failed", error.message || "Project list could not be loaded.");
+    renderProjects([]);
   }
 }
 
 function initLanding() {
-  landingEls.projectCreateForm?.addEventListener("submit", (event) => {
-    void handleProjectCreate(event);
-  });
+  bindLandingErrorLogging();
   void loadProjects();
-  landingEls.projectNameInput?.focus();
+  window.addEventListener("pageshow", () => {
+    void loadProjects();
+  });
+  window.addEventListener("focus", () => {
+    void loadProjects();
+  });
 }
 
 initLanding();

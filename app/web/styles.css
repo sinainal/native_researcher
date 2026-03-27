@@ -2615,8 +2615,8 @@ select {
 
 .native-rail-btn,
 .native-rail-link {
-  width: 44px;
-  height: 44px;
+  width: 45px;
+  height: 45px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3444,13 +3444,13 @@ select {
 
 .native-rail-btn,
 .native-rail-link {
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none !important;
-  border-radius: 13px;
+  border-radius: 14px;
   background: transparent !important;
   color: #60708b;
   text-decoration: none;
@@ -3463,6 +3463,16 @@ select {
 .native-rail-link svg {
   display: block;
   flex: 0 0 auto;
+}
+
+.native-rail-icon {
+  width: 23px;
+  height: 23px;
+}
+
+.native-rail-icon-status {
+  width: 22px;
+  height: 22px;
 }
 
 .native-rail-btn:hover,

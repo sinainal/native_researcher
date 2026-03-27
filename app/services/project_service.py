@@ -14,6 +14,7 @@ from app.schemas.project import (
     ProjectSummary,
     ProjectUpdateRequest,
 )
+from app.schemas.project_state import ProjectStatePayload
 
 
 class ProjectService:
@@ -72,6 +73,27 @@ class ProjectService:
             return None
         return self._project_summary(directory, payload)
 
+    def get_project_state(self, project_id: str) -> ProjectStatePayload | None:
+        directory = self.projects_root / project_id
+        payload = self._read_metadata(directory)
+        if payload is None:
+            return None
+        return self._read_state(directory)
+
+    def save_project_state(self, project_id: str, payload: ProjectStatePayload) -> ProjectStatePayload | None:
+        directory = self.projects_root / project_id
+        metadata = self._read_metadata(directory)
+        if metadata is None:
+            return None
+        state_path = directory / "state.json"
+        state_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
+        metadata["updated_at"] = datetime.now(UTC).replace(microsecond=0).isoformat()
+        (directory / "project.json").write_text(
+            json.dumps(metadata, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        return self._read_state(directory)
+
     def list_project_downloads(self, project_id: str) -> list[ProjectDownloadItem] | None:
         directory = self.projects_root / project_id
         payload = self._read_metadata(directory)
@@ -80,13 +102,12 @@ class ProjectService:
         download_dir = directory / "pdfs"
         download_dir.mkdir(parents=True, exist_ok=True)
         items: list[ProjectDownloadItem] = []
-        for entry in sorted(
-            download_dir.iterdir(),
+        entries = sorted(
+            (item for item in download_dir.rglob("*.pdf") if item.is_file()),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
-        ):
-            if not entry.is_file() or entry.suffix.lower() != ".pdf":
-                continue
+        )
+        for entry in entries:
             stat = entry.stat()
             items.append(
                 ProjectDownloadItem(
@@ -127,6 +148,20 @@ class ProjectService:
             encoding="utf-8",
         )
         return self._project_summary(directory, current)
+
+    @staticmethod
+    def _read_state(directory: Path) -> ProjectStatePayload:
+        state_path = directory / "state.json"
+        if not state_path.exists():
+            return ProjectStatePayload()
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ProjectStatePayload()
+        try:
+            return ProjectStatePayload.model_validate(payload)
+        except Exception:
+            return ProjectStatePayload()
 
     def _unique_project_id(self, name: str) -> str:
         base = self._slugify(name) or "project"
@@ -177,4 +212,4 @@ class ProjectService:
     def _count_files(directory: Path, suffix: str) -> int:
         if not directory.exists():
             return 0
-        return sum(1 for item in directory.iterdir() if item.is_file() and item.suffix.lower() == suffix)
+        return sum(1 for item in directory.rglob(f"*{suffix}") if item.is_file() and item.suffix.lower() == suffix)

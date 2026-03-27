@@ -11,6 +11,7 @@ from app.schemas.project import (
     ProjectSummary,
     ProjectUpdateRequest,
 )
+from app.schemas.project_state import ProjectStatePayload
 from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/app/projects", tags=["projects"])
@@ -61,6 +62,24 @@ async def list_project_downloads(project_id: str, request: Request) -> ProjectDo
     if items is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     return ProjectDownloadListResponse(items=items)
+
+
+@router.get("/{project_id}/state", response_model=ProjectStatePayload)
+async def get_project_state(project_id: str, request: Request) -> ProjectStatePayload:
+    service = get_project_service(request)
+    state = service.get_project_state(project_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return state
+
+
+@router.put("/{project_id}/state", response_model=ProjectStatePayload)
+async def save_project_state(project_id: str, payload: ProjectStatePayload, request: Request) -> ProjectStatePayload:
+    service = get_project_service(request)
+    state = service.save_project_state(project_id, payload)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return state
 
 
 @router.post("/{project_id}/touch", response_model=ProjectSummary)

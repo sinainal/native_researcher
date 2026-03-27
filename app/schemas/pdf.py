@@ -21,6 +21,22 @@ class PDFResolveResponse(BaseModel):
     cache_hit: bool = False
 
 
+class PDFAvailabilityRequest(BaseModel):
+    articles: list[ArticleReference]
+
+
+class PDFAvailabilityItem(BaseModel):
+    article: ArticleReference
+    ready: bool = False
+    source: str | None = None
+    candidate_count: int = 0
+    detail: str | None = None
+
+
+class PDFAvailabilityResponse(BaseModel):
+    items: list[PDFAvailabilityItem]
+
+
 class PDFDownloadRequest(BaseModel):
     articles: list[ArticleReference]
     download_dir: str | None = None

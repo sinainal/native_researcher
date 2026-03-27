@@ -7,6 +7,16 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+APP_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read_secret_file(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -21,6 +31,10 @@ class Settings:
     doi_resolver_base_url: str = "https://doi.org"
     openalex_base_url: str = "https://api.openalex.org"
     unpaywall_base_url: str = "https://api.unpaywall.org/v2"
+    assistant_api_key: str | None = None
+    assistant_api_key_path: Path = APP_ROOT / "api_key.txt"
+    ncbi_api_key_path: Path = APP_ROOT / "ncbi_api"
+    unpaywall_email_path: Path = APP_ROOT / "unpaywall_email"
     unpaywall_email: str | None = None
     ncbi_api_key: str | None = None
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
@@ -44,7 +58,12 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        api_key = os.getenv("NCBI_API_KEY")
+        assistant_api_key_path = Path(os.getenv("ASSISTANT_API_KEY_FILE", str(APP_ROOT / "api_key.txt")))
+        ncbi_api_key_path = Path(os.getenv("NCBI_API_KEY_FILE", str(APP_ROOT / "ncbi_api")))
+        unpaywall_email_path = Path(os.getenv("UNPAYWALL_EMAIL_FILE", str(APP_ROOT / "unpaywall_email")))
+        assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_secret_file(assistant_api_key_path)
+        api_key = os.getenv("NCBI_API_KEY") or _read_secret_file(ncbi_api_key_path)
+        unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_secret_file(unpaywall_email_path)
         default_rps = 10.0 if api_key else 3.0
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", "workspace"))
@@ -59,7 +78,11 @@ class Settings:
                 "UNPAYWALL_BASE_URL",
                 "https://api.unpaywall.org/v2",
             ),
-            unpaywall_email=os.getenv("UNPAYWALL_EMAIL"),
+            assistant_api_key=assistant_api_key,
+            assistant_api_key_path=assistant_api_key_path,
+            ncbi_api_key_path=ncbi_api_key_path,
+            unpaywall_email_path=unpaywall_email_path,
+            unpaywall_email=unpaywall_email,
             ncbi_api_key=api_key,
             request_user_agent=os.getenv(
                 "REQUEST_USER_AGENT",

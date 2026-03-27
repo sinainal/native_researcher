@@ -12,5 +12,8 @@ __pycache__/
 
 .env
 .env.*
+api_key.txt
+ncbi_api
+unpaywall_email
 
 .DS_Store

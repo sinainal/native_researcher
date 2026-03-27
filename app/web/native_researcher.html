@@ -19,25 +19,33 @@
     <aside id="chatSidebar" class="native-sidebar-shell is-open" aria-label="Workspace panel">
       <div class="native-rail">
         <button id="sidebarToggleBtn" class="native-rail-btn" type="button" aria-label="Toggle panel" title="Toggle panel">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <line x1="4" y1="7" x2="20" y2="7" />
             <line x1="4" y1="12" x2="16" y2="12" />
             <line x1="4" y1="17" x2="20" y2="17" />
           </svg>
         </button>
-        <button class="native-rail-btn native-rail-btn-static" type="button" aria-label="Explorer" title="Explorer">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7.5 12 3l9 4.5-9 4.5L3 7.5Z" />
-            <path d="M3 12.5 12 17l9-4.5" />
-            <path d="M3 17.5 12 22l9-4.5" />
+        <button id="sidebarQueriesBtn" class="native-rail-btn" type="button" aria-label="Queries" title="Queries" data-sidebar-panel="queries">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7.5 4.5h7l2.5 2.5v11A1.5 1.5 0 0 1 15.5 19h-8A1.5 1.5 0 0 1 6 17.5v-11A2 2 0 0 1 8 4.5Z" />
+            <path d="M14.5 4.75V7.5H17" />
+            <path d="M9 11h5.5" />
+            <path d="M9 14.5h5.5" />
+          </svg>
+        </button>
+        <button id="sidebarDownloadsBtn" class="native-rail-btn" type="button" aria-label="Downloads" title="Downloads" data-sidebar-panel="downloads">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7.5 4.5h7l2.5 2.5v11A1.5 1.5 0 0 1 15.5 19h-8A1.5 1.5 0 0 1 6 17.5v-11A2 2 0 0 1 8 4.5Z" />
+            <path d="M14.5 4.75V7.5H17" />
+            <path d="M12 10v5" />
+            <path d="m9.5 12.5 2.5 2.5 2.5-2.5" />
           </svg>
         </button>
         <a class="native-rail-btn native-rail-link" href="/researcher_2" title="Legacy Console" aria-label="Legacy Console">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3h12A2.5 2.5 0 0 1 20 5.5v13.75" />
-            <path d="M8 7h8" />
-            <path d="M8 11h8" />
-            <path d="M8 15h5" />
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="5" width="16" height="14" rx="2.5" />
+            <path d="m8 10 2.5 2.5L8 15" />
+            <path d="M13.5 15h3" />
           </svg>
         </a>
         <div class="native-rail-spacer"></div>
@@ -51,18 +59,40 @@
 
       <div class="native-sidebar-drawer">
         <div class="native-sidebar-drawer-head">
-          <div class="native-sidebar-kicker">Explorer</div>
-          <div class="native-sidebar-title">Workspace</div>
+          <div id="sidebarPanelKicker" class="native-sidebar-kicker">Panel</div>
+          <div id="sidebarPanelTitle" class="native-sidebar-title">Queries</div>
         </div>
-        <div class="native-workspace-library">
-          <div class="native-workspace-library-head">
-            <div class="native-workspace-library-label">Downloads</div>
-            <div id="workspaceDownloadCount" class="native-workspace-library-count">0</div>
+        <div id="sidebarQueriesPanel" class="native-sidebar-panel-body">
+          <div class="native-workspace-library">
+            <div class="native-workspace-library-head">
+              <div class="native-workspace-library-label">Queries</div>
+              <div id="workspaceQueryCount" class="native-workspace-library-count">0</div>
+            </div>
+            <div id="workspaceQueryList" class="native-workspace-library-list">
+              <div class="native-workspace-library-empty">
+                <div class="native-workspace-library-empty-title">No queries yet</div>
+                <div class="native-workspace-library-empty-copy">Search history for this project will appear here.</div>
+              </div>
+            </div>
           </div>
-          <div id="workspaceDownloadList" class="native-workspace-library-list">
+          <div id="workspaceQueryDetail" class="native-query-detail-card">
             <div class="native-workspace-library-empty">
-              <div class="native-workspace-library-empty-title">No papers yet</div>
-              <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+              <div class="native-workspace-library-empty-title">Query details</div>
+              <div class="native-workspace-library-empty-copy">Select a saved query to inspect the exact request and result metadata.</div>
+            </div>
+          </div>
+        </div>
+        <div id="sidebarDownloadsPanel" class="native-sidebar-panel-body" hidden>
+          <div class="native-workspace-library">
+            <div class="native-workspace-library-head">
+              <div class="native-workspace-library-label">Downloads</div>
+              <div id="workspaceDownloadCount" class="native-workspace-library-count">0</div>
+            </div>
+            <div id="workspaceDownloadList" class="native-workspace-library-list">
+              <div class="native-workspace-library-empty">
+                <div class="native-workspace-library-empty-title">No papers yet</div>
+                <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -94,6 +124,9 @@
               aria-label="Rename project"
               hidden
             >
+          </div>
+          <div class="native-project-bar-actions">
+            <button id="apiKeysBtn" class="native-project-action-btn" type="button">API Keys</button>
           </div>
         </section>
 
@@ -290,6 +323,39 @@
       </button>
     </div>
     <div id="detailPopupBody" class="detail-popup-body"></div>
+  </section>
+  <div id="apiKeysOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="apiKeysPopup" class="detail-popup api-keys-popup" hidden role="dialog" aria-modal="true" aria-labelledby="apiKeysTitle">
+    <div class="detail-popup-head api-keys-popup-head">
+      <div class="detail-popup-headcopy">
+        <div class="detail-popup-eyebrow">Local Settings</div>
+        <h3 id="apiKeysTitle" class="detail-popup-title">API Keys</h3>
+        <div class="detail-popup-meta">Stored locally on this machine. Changes apply immediately.</div>
+      </div>
+      <button id="apiKeysClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+    <form id="apiKeysForm" class="api-keys-form">
+      <label class="api-keys-field">
+        <span class="api-keys-label">Assistant API Key</span>
+        <input id="assistantApiKeyInput" class="api-keys-input" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="api-keys-field">
+        <span class="api-keys-label">NCBI API Key</span>
+        <input id="ncbiApiKeyInput" class="api-keys-input" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="api-keys-field">
+        <span class="api-keys-label">Unpaywall Email</span>
+        <input id="unpaywallEmailInput" class="api-keys-input" type="email" autocomplete="off" spellcheck="false" placeholder="name@example.com">
+      </label>
+      <div class="api-keys-actions">
+        <button id="apiKeysCancel" class="btn btn-ghost btn-sm" type="button">Cancel</button>
+        <button id="apiKeysSave" class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
   </section>
 
   <script src="/static/native_researcher.js"></script>

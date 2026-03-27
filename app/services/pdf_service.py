@@ -17,6 +17,8 @@ import httpx
 from app.core.config import Settings
 from app.schemas.article import ArticleReference
 from app.schemas.pdf import (
+    PDFAvailabilityItem,
+    PDFAvailabilityResponse,
     PDFCandidate,
     PDFDownloadRequest,
     PDFDownloadResponse,
@@ -391,6 +393,96 @@ class PDFService:
         self.candidate_cache.set(cache_key, candidates)
         return PDFResolveResponse(article=article, candidates=candidates, cache_hit=False)
 
+    async def quick_availability(self, articles: list[ArticleReference]) -> PDFAvailabilityResponse:
+        semaphore = asyncio.Semaphore(4)
+
+        async def run_single(article: ArticleReference) -> PDFAvailabilityItem:
+            async with semaphore:
+                resolved = await self.resolve(article, mode="fast")
+                preferred = [
+                    candidate for candidate in resolved.candidates
+                    if self._is_fast_confidence_source(candidate.source)
+                ]
+                if not preferred:
+                    detail = "Only weak or deep-only signals were found."
+                    if not resolved.candidates:
+                        detail = "No fast candidates were found."
+                    return PDFAvailabilityItem(
+                        article=article,
+                        ready=False,
+                        candidate_count=len(resolved.candidates),
+                        detail=detail,
+                    )
+
+                verified_source = await self._quick_verify_candidates(preferred[:3])
+                if verified_source is None:
+                    return PDFAvailabilityItem(
+                        article=article,
+                        ready=False,
+                        candidate_count=len(resolved.candidates),
+                        detail="Fast verification did not find a downloadable PDF.",
+                    )
+                return PDFAvailabilityItem(
+                    article=article,
+                    ready=True,
+                    source=verified_source,
+                    candidate_count=len(resolved.candidates),
+                    detail="Fast verification confirmed a downloadable PDF.",
+                )
+
+        return PDFAvailabilityResponse(items=await asyncio.gather(*(run_single(article) for article in articles)))
+
+    async def _quick_verify_candidates(self, candidates: list[PDFCandidate]) -> str | None:
+        if not candidates:
+            return None
+        semaphore = asyncio.Semaphore(3)
+
+        async def run_single(candidate: PDFCandidate) -> str | None:
+            async with semaphore:
+                return await self._quick_probe_candidate(candidate)
+
+        tasks = [asyncio.create_task(run_single(candidate)) for candidate in candidates]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                source = await completed
+                if source is not None:
+                    return source
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return None
+
+    async def _quick_probe_candidate(self, candidate: PDFCandidate) -> str | None:
+        headers = self._download_headers()
+        headers["Range"] = "bytes=0-65535"
+        try:
+            async with self.http_client.stream(
+                "GET",
+                candidate.url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=2.0,
+            ) as response:
+                if response.status_code not in {200, 206}:
+                    return None
+                content_type = (response.headers.get("content-type") or "").lower()
+                if "pdf" in content_type:
+                    return candidate.source
+                if "gzip" in content_type or candidate.source == "pmc_oa_tgz":
+                    return None
+                buffer = bytearray()
+                async for chunk in response.aiter_bytes():
+                    buffer.extend(chunk)
+                    if len(buffer) >= 4096:
+                        break
+                if buffer.startswith(b"%PDF"):
+                    return candidate.source
+        except Exception:
+            return None
+        return None
+
     async def download_articles(self, request: PDFDownloadRequest) -> PDFDownloadResponse:
         target_dir = self._resolve_target_dir(request.download_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -546,7 +638,7 @@ class PDFService:
                 source = "pmc_oa_tgz" if url.endswith(".tar.gz") else "pmc_oa_pdf"
                 add_candidate(source, url)
 
-        if mode == "fast" and pmc is not None:
+        if mode == "fast" and pmc is not None and not article.doi:
             return candidates
 
         doi_source_map: dict[str, list[str]] = {}
@@ -1633,6 +1725,18 @@ class PDFService:
     @staticmethod
     def _candidate_concurrency(mode: str) -> int:
         return 6 if mode == "fast" else 5
+
+    @staticmethod
+    def _is_fast_confidence_source(source: str) -> bool:
+        return source in {
+            "pmc_oa_pdf",
+            "crossref",
+            "openalex",
+            "citation_pdf_url",
+            "unpaywall",
+            "europe_pmc",
+            "europepmc",
+        }
 
     @staticmethod
     def _probe_timeout_seconds(mode: str, source: str) -> float:

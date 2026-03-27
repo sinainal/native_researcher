@@ -64,7 +64,7 @@ def parse_pubmed_fetch_xml(xml_text: str) -> dict[str, dict[str, object]]:
 
         doi = None
         pmc_id = None
-        for article_id in article.findall(".//ArticleIdList/ArticleId"):
+        for article_id in article.findall("./PubmedData/ArticleIdList/ArticleId"):
             id_type = article_id.attrib.get("IdType", "").lower()
             value = _text_content(article_id) or None
             if id_type == "doi":

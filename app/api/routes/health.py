@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, Response
 
 router = APIRouter(tags=["health"])
@@ -45,9 +45,10 @@ async def health() -> dict[str, str]:
 
 
 @router.get("/app/bootstrap")
-async def bootstrap() -> dict[str, str]:
-    api_key_path = WEB_DIR.parents[2] / "api_key.txt"
-    api_key = ""
-    if api_key_path.exists():
-        api_key = api_key_path.read_text(encoding="utf-8").strip()
-    return {"api_key": api_key}
+async def bootstrap(request: Request) -> dict[str, str]:
+    settings = request.app.state.settings
+    return {
+        "api_key": settings.assistant_api_key or "",
+        "ncbi_api_key": settings.ncbi_api_key or "",
+        "unpaywall_email": settings.unpaywall_email or "",
+    }

@@ -7,6 +7,8 @@ from fastapi.responses import FileResponse
 
 from app.schemas.article import ArticleReference
 from app.schemas.pdf import (
+    PDFAvailabilityRequest,
+    PDFAvailabilityResponse,
     PDFDownloadRequest,
     PDFDownloadResponse,
     PDFResolveResponse,
@@ -38,6 +40,18 @@ async def resolve_pdf_candidates(
     service = get_pdf_service(request)
     try:
         return await service.resolve(article, mode="balanced")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/availability/fast", response_model=PDFAvailabilityResponse)
+async def verify_fast_availability(
+    payload: PDFAvailabilityRequest,
+    request: Request,
+) -> PDFAvailabilityResponse:
+    service = get_pdf_service(request)
+    try:
+        return await service.quick_availability(payload.articles[:24])
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

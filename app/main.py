@@ -9,6 +9,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.api.routes.app_settings import router as app_settings_router
 from app.api.routes.app_events import router as app_events_router
 from app.api.routes.health import router as health_router
 from app.api.routes.helper import router as helper_router
@@ -150,6 +151,7 @@ def create_app(
             log_service=HelperLogService(resolved_settings.helper_log_path),
         )
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    app.include_router(app_settings_router)
     app.include_router(app_events_router)
     app.include_router(health_router)
     app.include_router(helper_router)

@@ -1,0 +1,317 @@
+{
+  "generated_at": "2026-03-27T11:37:48.589451+00:00",
+  "settings": {
+    "unpaywall_email_set": false,
+    "ncbi_api_key_set": true
+  },
+  "queries": [
+    {
+      "query": "serotonin receptor docking",
+      "fetched": 8,
+      "total_found": 653,
+      "elapsed_ms": 2438,
+      "request_count": 4
+    },
+    {
+      "query": "serotonin pathway cancer",
+      "fetched": 6,
+      "total_found": 879,
+      "elapsed_ms": 3621,
+      "request_count": 4
+    },
+    {
+      "query": "alphafold ligand discovery",
+      "fetched": 6,
+      "total_found": 104,
+      "elapsed_ms": 1646,
+      "request_count": 4
+    }
+  ],
+  "fast_sample_pmids": [
+    "36171289",
+    "38753765",
+    "39810414",
+    "29679900",
+    "32079105",
+    "30814658",
+    "37378639",
+    "39097134"
+  ],
+  "balanced_sample_pmids": [
+    "38753765",
+    "39810414",
+    "29679900",
+    "37378639"
+  ],
+  "fast_results": [
+    {
+      "pmid": "36171289",
+      "title": "Bespoke library docking for 5-HT(2A) receptor agonists with antidepressant activity.",
+      "year": "2022",
+      "doi": "10.1038/s41586-022-05258-z",
+      "pmc_id": "PMC9996387",
+      "ui_ready": true,
+      "resolve_ms": 1178,
+      "probe_ms": 41594,
+      "total_ms": 42772,
+      "success": true,
+      "source": "crossref",
+      "candidate_count": 2,
+      "attempt_count": 2,
+      "attempt_sources": [
+        "pmc_direct",
+        "crossref"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "38753765",
+      "title": "AlphaFold2 structures guide prospective ligand discovery.",
+      "year": "2024",
+      "doi": "10.1126/science.adn6354",
+      "pmc_id": "PMC11253030",
+      "ui_ready": true,
+      "resolve_ms": 868,
+      "probe_ms": 419,
+      "total_ms": 1287,
+      "success": false,
+      "source": null,
+      "candidate_count": 3,
+      "attempt_count": 3,
+      "attempt_sources": [
+        "pmc_direct",
+        "openalex",
+        "crossref"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "39810414",
+      "title": "Long-Term Exposure to Tire-Derived 6-PPD Quinone Causes Neurotoxicity and Neuroinflammation via Inhibition of HTR2A in C57BL/6 Mice.",
+      "year": "2025",
+      "doi": "10.1021/acs.est.4c09276",
+      "pmc_id": null,
+      "ui_ready": false,
+      "resolve_ms": 277,
+      "probe_ms": 81,
+      "total_ms": 358,
+      "success": false,
+      "source": null,
+      "candidate_count": 1,
+      "attempt_count": 1,
+      "attempt_sources": [
+        "crossref"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "29679900",
+      "title": "Structural insights into serotonin receptor ligands polypharmacology.",
+      "year": "2018",
+      "doi": "10.1016/j.ejmech.2018.04.010",
+      "pmc_id": null,
+      "ui_ready": false,
+      "resolve_ms": 263,
+      "probe_ms": 0,
+      "total_ms": 263,
+      "success": false,
+      "source": null,
+      "candidate_count": 0,
+      "attempt_count": 0,
+      "attempt_sources": [],
+      "failure_errors": []
+    },
+    {
+      "pmid": "32079105",
+      "title": "Mechanisms of Action of Cassiae Semen for Weight Management: A Computational Molecular Docking Study of Serotonin Receptor 5-HT2C.",
+      "year": "2020",
+      "doi": "10.3390/ijms21041326",
+      "pmc_id": "PMC7072867",
+      "ui_ready": true,
+      "resolve_ms": 927,
+      "probe_ms": 4493,
+      "total_ms": 5420,
+      "success": true,
+      "source": "pmc_oa_tgz",
+      "candidate_count": 4,
+      "attempt_count": 4,
+      "attempt_sources": [
+        "openalex",
+        "crossref",
+        "pmc_direct",
+        "pmc_oa_tgz"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "30814658",
+      "title": "Structural insight into the serotonin (5-HT) receptor family by molecular docking, molecular dynamics simulation and systems pharmacology analysis.",
+      "year": "2019",
+      "doi": "10.1038/s41401-019-0217-9",
+      "pmc_id": "PMC6786385",
+      "ui_ready": true,
+      "resolve_ms": 994,
+      "probe_ms": 20391,
+      "total_ms": 21385,
+      "success": true,
+      "source": "crossref",
+      "candidate_count": 3,
+      "attempt_count": 2,
+      "attempt_sources": [
+        "pmc_direct",
+        "crossref"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "37378639",
+      "title": "Design, Synthesis, Molecular Docking, and Biological Evaluation of Novel Pimavanserin-Based Analogues as Potential Serotonin 5-HT(2A) Receptor Inverse Agonists.",
+      "year": "2023",
+      "doi": "10.1021/acs.jmedchem.3c00662",
+      "pmc_id": null,
+      "ui_ready": false,
+      "resolve_ms": 434,
+      "probe_ms": 78,
+      "total_ms": 512,
+      "success": false,
+      "source": null,
+      "candidate_count": 1,
+      "attempt_count": 1,
+      "attempt_sources": [
+        "crossref"
+      ],
+      "failure_errors": []
+    },
+    {
+      "pmid": "39097134",
+      "title": "Serotonylation in tumor-associated fibroblasts contributes to the tumor-promoting roles of serotonin in colorectal cancer.",
+      "year": "2024",
+      "doi": "10.1016/j.canlet.2024.217150",
+      "pmc_id": null,
+      "ui_ready": false,
+      "resolve_ms": 264,
+      "probe_ms": 0,
+      "total_ms": 264,
+      "success": false,
+      "source": null,
+      "candidate_count": 0,
+      "attempt_count": 0,
+      "attempt_sources": [],
+      "failure_errors": []
+    }
+  ],
+  "balanced_results": [
+    {
+      "pmid": "38753765",
+      "title": "AlphaFold2 structures guide prospective ligand discovery.",
+      "ui_ready": true,
+      "total_ms": 8389,
+      "success": true,
+      "source": "browser_pmc",
+      "reason": "downloadable",
+      "candidate_count": 6,
+      "attempt_count": 7,
+      "browser_used": true,
+      "attempt_sources": [
+        "crossref",
+        "pmc_article_html",
+        "pmc_direct",
+        "openalex",
+        "europepmc",
+        "europe_pmc_article",
+        "browser_pmc"
+      ]
+    },
+    {
+      "pmid": "39810414",
+      "title": "Long-Term Exposure to Tire-Derived 6-PPD Quinone Causes Neurotoxicity and Neuroinflammation via Inhibition of HTR2A in C57BL/6 Mice.",
+      "ui_ready": false,
+      "total_ms": 1381,
+      "success": false,
+      "source": null,
+      "reason": "blocked_403",
+      "candidate_count": 1,
+      "attempt_count": 1,
+      "browser_used": false,
+      "attempt_sources": [
+        "crossref"
+      ]
+    },
+    {
+      "pmid": "29679900",
+      "title": "Structural insights into serotonin receptor ligands polypharmacology.",
+      "ui_ready": false,
+      "total_ms": 2699,
+      "success": false,
+      "source": null,
+      "reason": "blocked_403",
+      "candidate_count": 2,
+      "attempt_count": 2,
+      "browser_used": false,
+      "attempt_sources": [
+        "doi_guessed",
+        "doi_guessed"
+      ]
+    },
+    {
+      "pmid": "37378639",
+      "title": "Design, Synthesis, Molecular Docking, and Biological Evaluation of Novel Pimavanserin-Based Analogues as Potential Serotonin 5-HT(2A) Receptor Inverse Agonists.",
+      "ui_ready": false,
+      "total_ms": 1203,
+      "success": false,
+      "source": null,
+      "reason": "blocked_403",
+      "candidate_count": 1,
+      "attempt_count": 1,
+      "browser_used": false,
+      "attempt_sources": [
+        "crossref"
+      ]
+    }
+  ],
+  "fast_summary": {
+    "timing": {
+      "total": {
+        "count": 8,
+        "mean_ms": 9032.6,
+        "median_ms": 899.5,
+        "min_ms": 263,
+        "max_ms": 42772
+      },
+      "resolve": {
+        "count": 8,
+        "mean_ms": 650.6,
+        "median_ms": 651.0,
+        "min_ms": 263,
+        "max_ms": 1178
+      },
+      "probe": {
+        "count": 8,
+        "mean_ms": 8382,
+        "median_ms": 250.0,
+        "min_ms": 0,
+        "max_ms": 41594
+      }
+    },
+    "success_count": 3,
+    "failure_count": 5,
+    "false_positive_count": 1,
+    "false_negative_count": 0,
+    "false_positive_pmids": [
+      "38753765"
+    ],
+    "false_negative_pmids": []
+  },
+  "balanced_summary": {
+    "timing": {
+      "count": 4,
+      "mean_ms": 3418,
+      "median_ms": 2040.0,
+      "min_ms": 1203,
+      "max_ms": 8389
+    },
+    "success_count": 1,
+    "failure_count": 3,
+    "browser_success_count": 1
+  }
+}

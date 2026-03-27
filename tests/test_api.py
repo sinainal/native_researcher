@@ -12,10 +12,17 @@ from app.core.config import Settings
 from app.main import create_app
 from app.schemas.article import Article, ArticleReference
 from app.schemas.helper import HelperChatResponse
-from app.schemas.pdf import PDFCandidate, PDFDownloadResponse, PDFDownloadResult, PDFResolveResponse
+from app.schemas.pdf import (
+    PDFAvailabilityResponse,
+    PDFCandidate,
+    PDFDownloadResponse,
+    PDFDownloadResult,
+    PDFResolveResponse,
+)
 from app.schemas.pdf import PDFTestResult
 from app.schemas.llm import LLMBatchReport, LLMProcessResponse
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
+from app.utils.pubmed_xml import parse_pubmed_fetch_xml
 
 
 class FakePubMedService:
@@ -60,6 +67,20 @@ class FakePDFService:
             article=article,
             candidates=[PDFCandidate(source="crossref", url="https://example.org/test.pdf")],
             cache_hit=False,
+        )
+
+    async def quick_availability(self, articles):  # noqa: ANN001
+        return PDFAvailabilityResponse(
+            items=[
+                {
+                    "article": article,
+                    "ready": True,
+                    "source": "crossref",
+                    "candidate_count": 1,
+                    "detail": "verified",
+                }
+                for article in articles
+            ]
         )
 
     async def download_articles(self, payload):  # noqa: ANN001
@@ -161,6 +182,9 @@ def test_api_endpoints() -> None:
                 workspace_root=temp_root / "workspace",
                 helper_log_path=temp_root / "logs" / "helper_ai_history.jsonl",
                 app_event_log_path=temp_root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=temp_root / "assistant_api_key.txt",
+                ncbi_api_key_path=temp_root / "ncbi_api",
+                unpaywall_email_path=temp_root / "unpaywall_email",
             )
             app = create_app(
                 settings=settings,
@@ -204,6 +228,37 @@ def test_api_endpoints() -> None:
                 assert health.status_code == 200
                 assert health.json() == {"status": "ok"}
 
+                bootstrap = await client.get("/app/bootstrap")
+                assert bootstrap.status_code == 200
+                assert bootstrap.json() == {
+                    "api_key": "",
+                    "ncbi_api_key": "",
+                    "unpaywall_email": "",
+                }
+
+                api_keys = await client.get("/app/api-keys")
+                assert api_keys.status_code == 200
+                assert api_keys.json() == {
+                    "assistant_api_key": "",
+                    "ncbi_api_key": "",
+                    "unpaywall_email": "",
+                }
+
+                update_api_keys = await client.put(
+                    "/app/api-keys",
+                    json={
+                        "assistant_api_key": "assistant-secret",
+                        "ncbi_api_key": "ncbi-secret",
+                        "unpaywall_email": "me@example.com",
+                    },
+                )
+                assert update_api_keys.status_code == 200
+                assert update_api_keys.json() == {
+                    "assistant_api_key": "assistant-secret",
+                    "ncbi_api_key": "ncbi-secret",
+                    "unpaywall_email": "me@example.com",
+                }
+
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200
                 assert projects.json() == {"projects": []}
@@ -226,7 +281,7 @@ def test_api_endpoints() -> None:
                 assert create_second_default_project.json()["id"] == "project-2"
                 assert create_second_default_project.json()["name"] == "Project 2"
 
-                project_pdf_dir = settings.workspace_root / "projects" / "project-1" / "pdfs"
+                project_pdf_dir = settings.workspace_root / "projects" / "project-1" / "pdfs" / "year_2025"
                 project_pdf_dir.mkdir(parents=True, exist_ok=True)
                 sample_pdf = project_pdf_dir / "sample-paper.pdf"
                 sample_pdf.write_bytes(b"%PDF-1.4\n%test\n")
@@ -247,6 +302,73 @@ def test_api_endpoints() -> None:
                 project_downloads = await client.get("/app/projects/project-1/downloads")
                 assert project_downloads.status_code == 200
                 assert project_downloads.json()["items"][0]["name"] == "sample-paper.pdf"
+                assert project.json()["pdf_count"] == 1
+
+                project_state = await client.get("/app/projects/project-1/state")
+                assert project_state.status_code == 200
+                assert project_state.json()["query_history"] == []
+
+                saved_state = await client.put(
+                    "/app/projects/project-1/state",
+                    json={
+                        "active_query_id": "qry_1",
+                        "selected_ids": [1],
+                        "detail_article_id": 1,
+                        "sidebar_panel": "queries",
+                        "query_detail_id": "qry_1",
+                        "query_history": [
+                            {
+                                "id": "qry_1",
+                                "title": "ndm inhibitor",
+                                "created_at": "2026-03-27T12:00:00+00:00",
+                                "updated_at": "2026-03-27T12:00:00+00:00",
+                                "search_payload": {
+                                    "query": "ndm inhibitor",
+                                    "year_start": None,
+                                    "year_end": None,
+                                    "max_results": 1,
+                                    "batch_size": None,
+                                    "min_cite": None,
+                                    "article_type": None,
+                                    "use_cache": True,
+                                },
+                                "meta": {
+                                    "full_query": "ndm inhibitor",
+                                    "total_results_found": 1,
+                                    "fetched_results": 1,
+                                    "batch_size_used": 50,
+                                    "request_count": 3,
+                                    "elapsed_ms": 15,
+                                    "cache_hit": False,
+                                },
+                                "articles": [
+                                    {
+                                        "id": 1,
+                                        "pmid": "123",
+                                        "title": "Test article",
+                                        "abstract": "A short abstract.",
+                                        "year": "2024",
+                                        "journal": "Test Journal",
+                                        "publication_date": "2024 Jan",
+                                        "article_type": "Review",
+                                        "article_types": ["Review", "Journal Article"],
+                                        "citation_count": 42,
+                                        "authors": ["Jane Doe", "John Roe"],
+                                        "keywords": ["ndm", "inhibitor"],
+                                        "mesh_terms": ["beta-Lactamases", "Drug Inhibitors"],
+                                        "related_articles": ["456", "789"],
+                                        "reference_count": 12,
+                                        "doi": "10.1000/test",
+                                        "pmc_id": "PMC123",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+                assert saved_state.status_code == 200
+                assert saved_state.json()["active_query_id"] == "qry_1"
+                assert saved_state.json()["query_history"][0]["title"] == "ndm inhibitor"
 
                 touched_project = await client.post("/app/projects/project-1/touch")
                 assert touched_project.status_code == 200
@@ -308,6 +430,13 @@ def test_api_endpoints() -> None:
                 assert resolve.status_code == 200
                 assert resolve.json()["candidates"][0]["source"] == "crossref"
 
+                availability = await client.post(
+                    "/pdf/availability/fast",
+                    json={"articles": [{"title": "Test article", "doi": "10.1000/test"}]},
+                )
+                assert availability.status_code == 200
+                assert availability.json()["items"][0]["ready"] is True
+
                 download = await client.post(
                     "/pdf/download",
                     json={"articles": [{"title": "Test article", "doi": "10.1000/test"}]},
@@ -323,3 +452,37 @@ def test_api_endpoints() -> None:
                 assert pdf_test.json()["success_count"] == 1
 
     asyncio.run(runner())
+
+
+def test_pubmed_parser_uses_primary_article_ids() -> None:
+    xml_text = """
+    <PubmedArticleSet>
+      <PubmedArticle>
+        <MedlineCitation>
+          <PMID>12345</PMID>
+          <Article>
+            <Journal><JournalIssue><PubDate><Year>2026</Year></PubDate></JournalIssue><Title>Test</Title></Journal>
+            <ArticleTitle>Parser check</ArticleTitle>
+          </Article>
+        </MedlineCitation>
+        <PubmedData>
+          <ArticleIdList>
+            <ArticleId IdType="pubmed">12345</ArticleId>
+            <ArticleId IdType="pmc">PMC999</ArticleId>
+            <ArticleId IdType="doi">10.1000/right</ArticleId>
+          </ArticleIdList>
+          <ReferenceList>
+            <Reference>
+              <ArticleIdList>
+                <ArticleId IdType="pmc">PMCWRONG</ArticleId>
+                <ArticleId IdType="doi">10.1000/wrong</ArticleId>
+              </ArticleIdList>
+            </Reference>
+          </ReferenceList>
+        </PubmedData>
+      </PubmedArticle>
+    </PubmedArticleSet>
+    """
+    parsed = parse_pubmed_fetch_xml(xml_text)
+    assert parsed["12345"]["doi"] == "10.1000/right"
+    assert parsed["12345"]["pmc_id"] == "PMC999"

@@ -3444,25 +3444,31 @@ select {
 
 .native-rail-btn,
 .native-rail-link {
-  width: 40px;
-  height: 40px;
+  width: 42px;
+  height: 42px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none !important;
-  border-radius: 12px;
+  border-radius: 13px;
   background: transparent !important;
-  color: #66758d;
+  color: #60708b;
   text-decoration: none;
   box-shadow: none !important;
   transform: none !important;
   transition: background .14s ease, color .14s ease;
 }
 
+.native-rail-btn svg,
+.native-rail-link svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
 .native-rail-btn:hover,
 .native-rail-link:hover {
   background: #e3ebf7 !important;
-  color: #1f2937;
+  color: #20314c;
 }
 
 .native-rail-btn.is-active {

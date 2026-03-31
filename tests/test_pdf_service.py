@@ -146,6 +146,136 @@ def test_pdf_service_downloads_from_pmc_oa_package(tmp_path) -> None:
     asyncio.run(runner())
 
 
+def test_pdf_service_fast_mode_short_circuits_with_pmc_preflight(tmp_path) -> None:
+    async def runner() -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            pdf_bytes = b"%PDF-1.7 pmc preflight document"
+            info = tarfile.TarInfo(name="PMC999/article.pdf")
+            info.size = len(pdf_bytes)
+            archive.addfile(info, io.BytesIO(pdf_bytes))
+        archive_bytes = buffer.getvalue()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/oa/oa.fcgi" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/xml; charset=utf-8"},
+                    text=(
+                        "<OA><records><record>"
+                        "<link format='tgz' href='ftp://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC999.tar.gz' />"
+                        "</record></records></OA>"
+                    ),
+                )
+            if url == "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC999.tar.gz":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/x-gzip"},
+                    content=archive_bytes,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[
+                        ArticleReference(
+                            title="PMC Preflight Article",
+                            year="2024",
+                            pmc_id="PMC999",
+                            doi="10.1000/preflight",
+                        )
+                    ],
+                    mode="fast",
+                )
+            )
+
+        assert response.success_count == 1
+        result = response.results[0]
+        assert result.success is True
+        assert result.source == "pmc_oa_tgz"
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_fast_mode_uses_europe_pmc_repo_for_pmc_doi_article(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/oa/oa.fcgi" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/xml; charset=utf-8"},
+                    text="<OA><records><record id='PMC4242'></record></records></OA>",
+                )
+            if "api.crossref.org/works/" in url:
+                return httpx.Response(200, json={"message": {"link": []}})
+            if "api.openalex.org/works" in url:
+                return httpx.Response(200, json={"results": []})
+            if "doaj.org/api/search/articles" in url:
+                return httpx.Response(200, json={"results": []})
+            if "europepmc.org/api/fulltextRepo" in url and "type=METADATA" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "version": 1,
+                        "files": [
+                            {
+                                "filename": "article.pdf",
+                                "mimeType": "application/pdf",
+                                "type": "pdf",
+                            }
+                        ],
+                    },
+                )
+            if "europepmc/webservices/rest/search" in url:
+                return httpx.Response(200, json={"resultList": {"result": []}})
+            if "europepmc.org/api/fulltextRepo" in url and "type=FILE" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/pdf"},
+                    content=b"%PDF-1.7 europe pmc repo document",
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[
+                        ArticleReference(
+                            title="Europe PMC Repo Article",
+                            year="2024",
+                            pmc_id="PMC4242",
+                            doi="10.1000/europepmc",
+                        )
+                    ],
+                    mode="fast",
+                )
+            )
+
+        assert response.success_count == 1
+        result = response.results[0]
+        assert result.success is True
+        assert result.source == "europe_pmc_repo_pdf"
+
+    asyncio.run(runner())
+
+
 def test_pdf_service_fast_mode_skips_doi_landing_page(tmp_path) -> None:
     async def runner() -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -776,6 +906,13 @@ def test_pdf_service_expands_browser_candidates_for_publishers(tmp_path) -> None
 def test_pdf_service_quick_availability_marks_pmc_direct_pdf_ready(tmp_path) -> None:
     async def runner() -> None:
         requests: list[str] = []
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+            pdf_payload = b"%PDF-1.7 pmc oa tgz preview"
+            info = tarfile.TarInfo(name="article.pdf")
+            info.size = len(pdf_payload)
+            archive.addfile(info, io.BytesIO(pdf_payload))
+        archive_bytes = archive_buffer.getvalue()
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(str(request.url))
@@ -789,11 +926,11 @@ def test_pdf_service_quick_availability_marks_pmc_direct_pdf_ready(tmp_path) -> 
                         "</record></records></OA>"
                     ),
                 )
-            if str(request.url) == "https://pmc.ncbi.nlm.nih.gov/articles/PMC555/pdf/":
+            if str(request.url) == "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC555.tar.gz":
                 return httpx.Response(
                     200,
-                    headers={"content-type": "application/pdf"},
-                    content=b"%PDF-1.7 pmc direct preview",
+                    headers={"content-type": "application/x-gzip"},
+                    content=archive_bytes,
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
@@ -810,10 +947,10 @@ def test_pdf_service_quick_availability_marks_pmc_direct_pdf_ready(tmp_path) -> 
             )
 
         assert response.items[0].ready is True
-        assert response.items[0].source == "pmc_direct"
+        assert response.items[0].source == "pmc_oa_tgz"
         assert requests == [
             "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=PMC555",
-            "https://pmc.ncbi.nlm.nih.gov/articles/PMC555/pdf/",
+            "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC555.tar.gz",
         ]
 
     asyncio.run(runner())

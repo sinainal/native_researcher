@@ -39,7 +39,7 @@ async def resolve_pdf_candidates(
 ) -> PDFResolveResponse:
     service = get_pdf_service(request)
     try:
-        return await service.resolve(article, mode="balanced")
+        return await service.resolve(article, mode="fast")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

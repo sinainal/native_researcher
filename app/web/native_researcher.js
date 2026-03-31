@@ -31,7 +31,6 @@ const state = {
   sidebarOpen: localStorage.getItem("native_researcher_sidebar_open") !== "false",
   chatHistoryExpanded: false,
   chatHistoryOpen: false,
-  deepDownloadJob: null,
 };
 
 const els = {
@@ -60,12 +59,15 @@ const els = {
   workspaceQueryCount: document.getElementById("workspaceQueryCount"),
   workspaceQueryList: document.getElementById("workspaceQueryList"),
   workspaceQueryDetail: document.getElementById("workspaceQueryDetail"),
+  sidebarQuickQuery: document.getElementById("sidebarQuickQuery"),
+  sidebarQuickMaxResults: document.getElementById("sidebarQuickMaxResults"),
+  sidebarQuickSearchBtn: document.getElementById("sidebarQuickSearchBtn"),
+  sidebarQuickStatus: document.getElementById("sidebarQuickStatus"),
   workspaceDownloadCount: document.getElementById("workspaceDownloadCount"),
   workspaceDownloadList: document.getElementById("workspaceDownloadList"),
   clearSelectionBtn: document.getElementById("clearSelectionBtn"),
   selectAllBtn: document.getElementById("selectAllBtn"),
   quickDownloadSelectedBtn: document.getElementById("quickDownloadSelectedBtn"),
-  deepDownloadSelectedBtn: document.getElementById("deepDownloadSelectedBtn"),
   metaStrip: document.getElementById("metaStrip"),
   resultsBody: document.getElementById("resultsBody"),
   sortButtons: document.querySelectorAll(".table-sort-btn"),
@@ -89,19 +91,6 @@ const els = {
   pubmedOaOnlyToggle: document.getElementById("pubmedOaOnlyToggle"),
   pubmedOaOnlyStatus: document.getElementById("pubmedOaOnlyStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
-  deepDownloadOverlay: document.getElementById("deepDownloadOverlay"),
-  deepDownloadPopup: document.getElementById("deepDownloadPopup"),
-  deepDownloadClose: document.getElementById("deepDownloadClose"),
-  deepDownloadDoneBtn: document.getElementById("deepDownloadDoneBtn"),
-  deepDownloadStage: document.getElementById("deepDownloadStage"),
-  deepDownloadProgressText: document.getElementById("deepDownloadProgressText"),
-  deepDownloadElapsed: document.getElementById("deepDownloadElapsed"),
-  deepDownloadBarFill: document.getElementById("deepDownloadBarFill"),
-  deepDownloadSuccessCount: document.getElementById("deepDownloadSuccessCount"),
-  deepDownloadRetryCount: document.getElementById("deepDownloadRetryCount"),
-  deepDownloadFailedCount: document.getElementById("deepDownloadFailedCount"),
-  deepDownloadCurrent: document.getElementById("deepDownloadCurrent"),
-  deepDownloadRecent: document.getElementById("deepDownloadRecent"),
   assistantSendBtn: document.getElementById("assistantSendBtn"),
   assistantModelBtn: document.getElementById("assistantModelBtn"),
   assistantModelLabel: document.getElementById("assistantModelLabel"),
@@ -151,12 +140,12 @@ let resultsRenderScheduled = false;
 let appErrorLoggingBound = false;
 
 const downloadabilityLabels = {
-  loading: "Checking",
+  loading: "Downloading",
   high: "Ready",
   medium: "Ready",
   low: "Ready",
-  blocked: "No PDF",
-  unavailable: "No PDF",
+  blocked: "Unavailable",
+  unavailable: "Unavailable",
   downloaded: "Downloaded",
   failed: "Error",
 };
@@ -200,6 +189,15 @@ function fetchJson(url, options = {}) {
     }
     return payload;
   });
+}
+
+function chunkArray(items, size) {
+  const normalizedSize = Math.max(1, Number(size) || 1);
+  const chunks = [];
+  for (let index = 0; index < items.length; index += normalizedSize) {
+    chunks.push(items.slice(index, index + normalizedSize));
+  }
+  return chunks;
 }
 
 function trackAppEvent(level, event, message, context = {}) {
@@ -314,7 +312,7 @@ function renderProjectDownloads() {
     els.workspaceDownloadList.innerHTML = `
       <div class="native-workspace-library-empty">
         <div class="native-workspace-library-empty-title">No papers yet</div>
-        <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+        <div class="native-workspace-library-empty-copy">Downloaded files for this project will appear here.</div>
       </div>
     `;
     return;
@@ -449,6 +447,23 @@ function renderQueryHistory() {
   renderQueryDetail();
 }
 
+function syncSidebarQuickControls() {
+  if (els.sidebarQuickQuery) {
+    const nextQuery = els.query?.value?.trim() || "";
+    if (!els.sidebarQuickQuery.value.trim() || nextQuery) {
+      els.sidebarQuickQuery.value = nextQuery;
+    }
+    autoResizeTextarea(els.sidebarQuickQuery);
+  }
+  if (els.sidebarQuickMaxResults && els.maxResults) {
+    const nextMax = normalizedNumber(els.maxResults, 20);
+    els.sidebarQuickMaxResults.value = String(nextMax);
+  }
+  if (els.sidebarQuickStatus) {
+    els.sidebarQuickStatus.textContent = "Uses the same OA-aware PubMed search and downloader.";
+  }
+}
+
 function createQueryRecordFromDataset(response) {
   const payload = cloneJson(state.lastSearchPayload || {});
   const timestamp = new Date().toISOString();
@@ -549,6 +564,7 @@ function restoreQueryRecord(queryId) {
     els.maxResults.value = String(record.search_payload.max_results || 50);
     autoResizeTextarea(els.query);
   }
+  syncSidebarQuickControls();
   renderQueryHistory();
   scheduleProjectStateSave();
 }
@@ -562,9 +578,7 @@ async function loadProjectState() {
     state.queryHistory = Array.isArray(payload.query_history) ? payload.query_history : [];
     state.activeQueryId = payload.active_query_id || state.queryHistory[0]?.id || null;
     state.queryDetailId = payload.query_detail_id || state.activeQueryId;
-    state.downloadabilityCache = payload.downloadability_cache && typeof payload.downloadability_cache === "object"
-      ? payload.downloadability_cache
-      : {};
+    state.downloadabilityCache = sanitizePersistedDownloadabilityCache(payload.downloadability_cache);
     state.selectedIds = new Set();
     state.detailArticleId = null;
     applyAssistantProjectState(payload);
@@ -711,121 +725,6 @@ async function saveApiKeys(overrides = {}, options = {}) {
   if (closeDialog) {
     setApiKeysDialogOpen(false);
   }
-}
-
-function renderDeepDownloadDialog() {
-  const job = state.deepDownloadJob;
-  if (!job) return;
-  if (els.deepDownloadStage) {
-    if (job.running && job.phase === "fast") {
-      els.deepDownloadStage.textContent = `Fast pass ${Math.min(job.fastProcessed, job.fastTotal)}/${job.fastTotal}`;
-    } else if (job.running && job.phase === "deep") {
-      els.deepDownloadStage.textContent = `Deep retry ${Math.min(job.deepProcessed, job.deepTotal)}/${job.deepTotal}`;
-    } else if (job.running) {
-      els.deepDownloadStage.textContent = "Preparing download";
-    } else {
-      els.deepDownloadStage.textContent = job.failedCount ? "Download finished with gaps" : "Download complete";
-    }
-  }
-  if (els.deepDownloadProgressText) {
-    els.deepDownloadProgressText.textContent = `${job.completedCount}/${job.total}`;
-  }
-  if (els.deepDownloadElapsed) {
-    els.deepDownloadElapsed.textContent = formatElapsedClock(job.startedAt);
-  }
-  if (els.deepDownloadBarFill) {
-    const ratio = job.total ? Math.max(0, Math.min(1, job.completedCount / job.total)) : 0;
-    els.deepDownloadBarFill.style.width = `${ratio * 100}%`;
-  }
-  if (els.deepDownloadSuccessCount) {
-    els.deepDownloadSuccessCount.textContent = String(job.successCount);
-  }
-  if (els.deepDownloadRetryCount) {
-    els.deepDownloadRetryCount.textContent = String(job.retryCount);
-  }
-  if (els.deepDownloadFailedCount) {
-    els.deepDownloadFailedCount.textContent = String(job.failedCount);
-  }
-  if (els.deepDownloadCurrent) {
-    els.deepDownloadCurrent.textContent = job.currentTitle || "Waiting for selected papers.";
-  }
-  if (els.deepDownloadRecent) {
-    els.deepDownloadRecent.innerHTML = job.recentItems.length
-      ? job.recentItems
-        .map((item) => `
-          <div class="deep-download-recent-item ${item.tone}">
-            <span class="deep-download-recent-status">${escapeHtml(item.label)}</span>
-            <span class="deep-download-recent-title">${escapeHtml(item.title)}</span>
-          </div>
-        `)
-        .join("")
-      : "";
-  }
-  if (els.deepDownloadClose) {
-    els.deepDownloadClose.disabled = Boolean(job.running);
-  }
-  if (els.deepDownloadDoneBtn) {
-    els.deepDownloadDoneBtn.disabled = Boolean(job.running);
-    els.deepDownloadDoneBtn.textContent = job.running ? "Running…" : "Done";
-  }
-}
-
-function stopDeepDownloadClock() {
-  const job = state.deepDownloadJob;
-  if (!job?.clockId) return;
-  clearInterval(job.clockId);
-  job.clockId = null;
-}
-
-function setDeepDownloadDialogOpen(next) {
-  const open = Boolean(next);
-  els.deepDownloadPopup?.classList.toggle("is-open", open);
-  els.deepDownloadOverlay?.classList.toggle("is-open", open);
-  if (els.deepDownloadPopup) els.deepDownloadPopup.hidden = !open;
-  if (els.deepDownloadOverlay) els.deepDownloadOverlay.hidden = !open;
-  if (!open) {
-    stopDeepDownloadClock();
-    state.deepDownloadJob = null;
-    return;
-  }
-  renderDeepDownloadDialog();
-}
-
-function pushDeepDownloadRecent(label, title, tone) {
-  const job = state.deepDownloadJob;
-  if (!job) return;
-  job.recentItems.unshift({
-    label,
-    title: title || "Untitled article",
-    tone,
-  });
-  job.recentItems = job.recentItems.slice(0, 6);
-}
-
-function startDeepDownloadJob(chosen, fastTotal) {
-  stopDeepDownloadClock();
-  state.deepDownloadJob = {
-    running: true,
-    phase: "fast",
-    total: chosen.length,
-    completedCount: 0,
-    successCount: 0,
-    failedCount: 0,
-    retryCount: 0,
-    fastProcessed: 0,
-    fastTotal,
-    deepProcessed: 0,
-    deepTotal: 0,
-    currentTitle: "Preparing selected papers…",
-    recentItems: [],
-    startedAt: Date.now(),
-    clockId: null,
-  };
-  setDeepDownloadDialogOpen(true);
-  state.deepDownloadJob.clockId = window.setInterval(() => {
-    renderDeepDownloadDialog();
-  }, 1000);
-  renderDeepDownloadDialog();
 }
 
 function applyActiveProject(project) {
@@ -1410,7 +1309,7 @@ function getDownloadability(articleId) {
   return state.downloadabilityById[articleId] || {
     status: "unavailable",
     label: downloadabilityLabels.unavailable,
-    detail: "No PMC signal.",
+    detail: "No article identifiers available.",
     openUrl: null,
   };
 }
@@ -1425,13 +1324,20 @@ function setArticleDownloadability(articleId, next) {
 
 function persistableDownloadabilityInfo(info) {
   if (!info || !info.status) return null;
-  if (info.status === "loading" || info.status === "failed") return null;
+  if (info.status !== "downloaded") return null;
   return {
     status: info.status,
     label: info.label || "",
     detail: info.detail || "",
     openUrl: info.openUrl || null,
   };
+}
+
+function sanitizePersistedDownloadabilityCache(cache) {
+  const source = cache && typeof cache === "object" ? cache : {};
+  return Object.fromEntries(
+    Object.entries(source).filter(([, info]) => info?.status === "downloaded"),
+  );
 }
 
 function rememberArticleDownloadability(article, info) {
@@ -1478,23 +1384,21 @@ function downloadControlMarkup(article) {
   const display = downloadabilityDisplay(article.id);
   const canOpen = Boolean(info.openUrl);
   const disabled = display.tone !== "ready" ? "disabled" : "";
+  const buttonClass = display.tone === "ready"
+    ? "btn btn-primary btn-xs row-download-btn"
+    : "btn btn-secondary btn-xs row-download-btn";
+  const buttonLabel = display.tone === "pending"
+    ? (info.label || downloadabilityLabels.loading)
+    : display.tone === "blocked"
+      ? downloadabilityLabels.unavailable
+      : "Download";
   return canOpen
-    ? `<a class="btn btn-primary btn-xs file-open-btn" href="${info.openUrl}" target="_blank" rel="noreferrer">PDF</a>`
-    : `<button type="button" class="btn btn-secondary btn-xs row-download-btn" data-id="${article.id}" ${disabled}>Download</button>`;
+    ? `<a class="btn btn-primary btn-xs file-open-btn" href="${info.openUrl}" target="_blank" rel="noreferrer">Open</a>`
+    : `<button type="button" class="${buttonClass}" data-id="${article.id}" ${disabled}>${escapeHtml(buttonLabel)}</button>`;
 }
 
 function renderDownloadabilityCell(article) {
-  const info = getDownloadability(article.id);
-  const display = downloadabilityDisplay(article.id);
-  const tooltip = escapeHtml(info.detail || display.text);
-  return `
-    <div class="download-action-cell">
-      <span class="availability-dot-shell ${display.tone}" title="${tooltip}">
-        <span class="availability-dot"></span>
-      </span>
-      ${downloadControlMarkup(article)}
-    </div>
-  `;
+  return `<div class="download-action-cell">${downloadControlMarkup(article)}</div>`;
 }
 
 function seedDownloadability(articles) {
@@ -1507,17 +1411,17 @@ function seedDownloadability(articles) {
       }
       return [
         article.id,
-        article.pmc_id || article.doi
+        article.pmc_id || article.doi || article.pmid
           ? {
-            status: "loading",
-            label: downloadabilityLabels.loading,
-            detail: "Verifying quick download path.",
+            status: "high",
+            label: downloadabilityLabels.high,
+            detail: "Ready to download.",
             openUrl: null,
           }
           : {
             status: "unavailable",
             label: downloadabilityLabels.unavailable,
-            detail: "No DOI or PMC signal.",
+            detail: "No PMID, DOI, or PMCID signal.",
             openUrl: null,
           },
       ];
@@ -1525,89 +1429,40 @@ function seedDownloadability(articles) {
   );
 }
 
-function applyVerifiedDownloadability(payload) {
-  const article = state.allArticles.find((item) => articleIdentityKey(item) === articleIdentityKey(payload.article));
-  if (!article) return;
-  const current = getDownloadability(article.id);
-  if (current.status === "downloaded") return;
-  if (payload.ready) {
-    const next = {
-      status: "high",
-      label: downloadabilityLabels.high,
-      detail: payload.detail || "Fast verification confirmed a downloadable PDF.",
-      openUrl: null,
-    };
-    state.downloadabilityById[article.id] = next;
-    rememberArticleDownloadability(article, next);
-    return;
-  }
-  const next = {
-    status: "unavailable",
-    label: downloadabilityLabels.unavailable,
-    detail: payload.detail || "Fast verification did not find a downloadable PDF.",
-    openUrl: null,
-  };
-  state.downloadabilityById[article.id] = next;
-  rememberArticleDownloadability(article, next);
-}
-
-async function verifyDownloadabilityInBackground() {
-  if (!state.allArticles.length) return;
-  const runId = Date.now();
-  state.downloadabilityRunId = runId;
-  const queue = state.allArticles.filter(
-    (article) => (article.doi || article.pmc_id) && getDownloadability(article.id).status === "loading",
-  );
-  const chunkSize = 50;
-  const workerCount = 2;
-  let cursor = 0;
-
-  async function worker() {
-    while (cursor < queue.length) {
-      if (state.downloadabilityRunId !== runId) return;
-      const start = cursor;
-      cursor += chunkSize;
-      const chunk = queue.slice(start, start + chunkSize);
-      if (!chunk.length) return;
-      try {
-        const data = await fetchJson("/pdf/availability/fast", {
-          method: "POST",
-          body: JSON.stringify({
-            articles: chunk.map(articleReference),
-          }),
-        });
-        if (state.downloadabilityRunId !== runId) return;
-        (data.items || []).forEach(applyVerifiedDownloadability);
-        scheduleResultsRender();
-      } catch (error) {
-        trackAppEvent("error", "pdf_availability_verify_failed", error.message || "Fast availability check failed.", {
-          project_id: state.projectId || "",
-          chunk_start: start,
-          chunk_size: chunk.length,
-        });
+async function requestArticleDownload(article, options = {}) {
+  const { timeoutMs = null, signal = null } = options;
+  const controller = createLinkedAbortController(signal);
+  const timeoutId = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Single article download timed out."));
       }
+    }, timeoutMs)
+    : null;
+  let data;
+  try {
+    data = await fetchJson("/pdf/download", {
+      method: "POST",
+      body: JSON.stringify({
+        articles: [articleReference(article)],
+        download_dir: projectDownloadDir(),
+        max_articles: 1,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (controller.signal.aborted && !signal?.aborted) {
+      throw new Error("Single article download timed out.");
     }
+    throw error;
   }
-
-  await Promise.all(
-    Array.from({ length: Math.min(workerCount, Math.ceil(queue.length / chunkSize)) }, () => worker()),
-  );
-}
-
-async function requestArticleDownload(article, mode) {
-  const data = await fetchJson("/pdf/download", {
-    method: "POST",
-    body: JSON.stringify({
-      articles: [articleReference(article)],
-      download_dir: projectDownloadDir(),
-      max_articles: 1,
-      mode,
-    }),
-  });
+  if (timeoutId) clearTimeout(timeoutId);
   return data.results?.[0] || null;
 }
 
-async function requestBatchDownload(articles, mode) {
+async function requestBatchDownload(articles, options = {}) {
+  const { timeoutMs = null, signal = null } = options;
   const batch = Array.isArray(articles) ? articles.filter(Boolean) : [];
   if (!batch.length) {
     return {
@@ -1617,15 +1472,33 @@ async function requestBatchDownload(articles, mode) {
       results: [],
     };
   }
-  return fetchJson("/pdf/download", {
-    method: "POST",
-    body: JSON.stringify({
-      articles: batch.map(articleReference),
-      download_dir: projectDownloadDir(),
-      max_articles: batch.length,
-      mode,
-    }),
-  });
+  const controller = createLinkedAbortController(signal);
+  const timeoutId = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Batch download timed out."));
+      }
+    }, timeoutMs)
+    : null;
+  try {
+    return await fetchJson("/pdf/download", {
+      method: "POST",
+      body: JSON.stringify({
+        articles: batch.map(articleReference),
+        download_dir: projectDownloadDir(),
+        max_articles: batch.length,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (controller.signal.aborted && !signal?.aborted) {
+      throw new Error("Batch download timed out.");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function applyDownloadResultState(article, result) {
@@ -1634,7 +1507,7 @@ function applyDownloadResultState(article, result) {
     const next = {
       status: "downloaded",
       label: downloadabilityLabels.downloaded,
-      detail: result.file_path ? "PDF downloaded. Open it with the PDF button." : "PDF downloaded.",
+      detail: result.file_path ? "Downloaded file is ready to open." : "Downloaded file is ready.",
       openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
     };
     setArticleDownloadability(article.id, next);
@@ -1644,7 +1517,7 @@ function applyDownloadResultState(article, result) {
   const next = {
     status: "failed",
     label: downloadabilityLabels.failed,
-    detail: result?.error || "PDF download failed.",
+    detail: result?.error || "Download failed.",
     openUrl: null,
   };
   setArticleDownloadability(article.id, next);
@@ -1666,43 +1539,26 @@ async function downloadSingleArticle(articleId) {
   scheduleResultsRender();
 
   try {
-    let result = await requestArticleDownload(article, "fast");
-    if (
-      !result?.success
-      && result?.error === "No downloadable PDF candidate succeeded."
-      && (article.pmc_id || article.doi)
-    ) {
-      state.downloadabilityById[article.id] = {
-        ...state.downloadabilityById[article.id],
-        detail: "Retrying with deep lookup.",
-      };
-      scheduleResultsRender();
-      trackAppEvent("info", "pdf_download_retry_balanced", article.title || "Retrying with deep lookup.", {
-        article_id: article.id,
-        pmid: article.pmid || "",
-        project_id: state.projectId || "",
-      });
-      result = await requestArticleDownload(article, "balanced");
-    }
+    const result = await requestArticleDownload(article);
     if (applyDownloadResultState(article, result)) {
-      trackAppEvent("info", "pdf_downloaded", article.title || "PDF downloaded.", {
+      trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
         article_id: article.id,
         pmid: article.pmid || "",
         project_id: state.projectId || "",
       });
       await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
     } else {
-      trackAppEvent("error", "pdf_download_failed", result?.error || "PDF download failed.", {
+      trackAppEvent("error", "pdf_download_failed", result?.error || "Download failed.", {
         pmid: article.pmid || "",
         article_id: article.id,
       });
     }
   } catch (error) {
-    trackAppEvent("error", "pdf_download_failed", error.message || "PDF download failed.", {
+    trackAppEvent("error", "pdf_download_failed", error.message || "Download failed.", {
       pmid: article.pmid || "",
       article_id: article.id,
     });
-    applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
+    applyDownloadResultState(article, { success: false, error: error.message || "Download failed." });
   }
 
   scheduleResultsRender();
@@ -1747,9 +1603,19 @@ function applyBatchDownloadResults(chosen, results) {
   return { successes, failures };
 }
 
-async function downloadSelectedFast() {
-  const chosen = activeArticles();
+async function downloadSelectedArticles() {
+  const chosen = activeArticles().filter((article) => {
+    const current = getDownloadability(article.id);
+    return isDownloadReadyStatus(current.status) || current.status === "downloaded";
+  });
   if (!chosen.length) return;
+  const concurrency = 1;
+  const singleTimeoutMs = 65000;
+  const originalBatchLabel = els.quickDownloadSelectedBtn?.textContent || "Download Selected";
+  if (els.quickDownloadSelectedBtn) {
+    els.quickDownloadSelectedBtn.disabled = true;
+    els.quickDownloadSelectedBtn.textContent = "Downloading…";
+  }
   chosen.forEach((article) => {
     const current = getDownloadability(article.id);
     setArticleDownloadability(article.id, {
@@ -1762,197 +1628,84 @@ async function downloadSelectedFast() {
   scheduleResultsRender();
 
   try {
-    const data = await requestBatchDownload(chosen, "fast");
-    const { successes, failures } = applyBatchDownloadResults(chosen, data.results || []);
-    successes.forEach(({ article }) => {
-      trackAppEvent("info", "pdf_downloaded", article.title || "PDF downloaded.", {
-        article_id: article.id,
-        pmid: article.pmid || "",
-        project_id: state.projectId || "",
-      });
-    });
-    failures.forEach(({ article, result }) => {
-      trackAppEvent("error", "pdf_download_failed", result?.error || "PDF download failed.", {
-        article_id: article.id,
-        pmid: article.pmid || "",
-        project_id: state.projectId || "",
-      });
-    });
-    await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
+    const successes = [];
+    const failures = [];
+    let cursor = 0;
+    let completed = 0;
+
+    const refreshDownloads = async () => {
+      await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
+    };
+
+    const updateButtonLabel = () => {
+      if (els.quickDownloadSelectedBtn) {
+        els.quickDownloadSelectedBtn.textContent = `Downloading ${completed} / ${chosen.length}`;
+      }
+    };
+
+    const processArticle = async (article, index) => {
+      try {
+        const result = await requestArticleDownload(article, { timeoutMs: singleTimeoutMs });
+        if (applyDownloadResultState(article, result)) {
+          successes.push({ article, result });
+          trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        } else {
+          failures.push({ article, result });
+          trackAppEvent("error", "pdf_download_failed", result?.error || "Download failed.", {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        }
+      } catch (singleError) {
+        const result = { success: false, error: singleError.message || "Download failed." };
+        applyDownloadResultState(article, result);
+        failures.push({ article, result });
+        trackAppEvent("error", "pdf_download_failed", result.error, {
+          article_id: article.id,
+          pmid: article.pmid || "",
+          project_id: state.projectId || "",
+        });
+      }
+      completed += 1;
+      updateButtonLabel();
+      scheduleResultsRender();
+      if (completed === chosen.length || completed % concurrency === 0 || index < concurrency) {
+        await refreshDownloads();
+      }
+    };
+
+    const worker = async () => {
+      while (true) {
+        const nextIndex = cursor;
+        cursor += 1;
+        if (nextIndex >= chosen.length) return;
+        await processArticle(chosen[nextIndex], nextIndex);
+      }
+    };
+
+    updateButtonLabel();
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    await refreshDownloads();
   } catch (error) {
     chosen.forEach((article) => {
-      applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
+      applyDownloadResultState(article, { success: false, error: error.message || "Download failed." });
     });
-    trackAppEvent("error", "pdf_batch_download_failed", error.message || "Fast batch download failed.", {
+    trackAppEvent("error", "pdf_batch_download_failed", error.message || "Batch download failed.", {
       project_id: state.projectId || "",
       selected_count: chosen.length,
-      mode: "fast",
     });
     scheduleResultsRender();
-  }
-}
-
-async function downloadSelectedArticles(mode = "balanced") {
-  const chosen = activeArticles();
-  if (!chosen.length) return;
-  if (state.deepDownloadJob?.running) return;
-  const fastQueue = chosen.filter((article) => isDownloadReadyStatus(getDownloadability(article.id).status));
-  const fastIds = new Set(fastQueue.map((article) => article.id));
-  const deepQueue = chosen.filter((article) => !fastIds.has(article.id));
-  startDeepDownloadJob(chosen, fastQueue.length);
-  fastQueue.forEach((article) => {
-    const current = getDownloadability(article.id);
-    setArticleDownloadability(article.id, {
-      status: "loading",
-      label: "Downloading",
-      detail: "Fast pass in progress.",
-      openUrl: current.openUrl || null,
-    });
-  });
-  deepQueue.forEach((article) => {
-    setArticleDownloadability(article.id, {
-      status: "loading",
-      label: "Queued",
-      detail: "Queued for deep retry.",
-      openUrl: null,
-    });
-  });
-  scheduleResultsRender();
-
-  let retryQueue = [...deepQueue];
-  try {
-    const job = state.deepDownloadJob;
-    if (job && fastQueue.length) {
-      job.currentTitle = `Running fast pass for ${fastQueue.length} selected papers…`;
-      renderDeepDownloadDialog();
+  } finally {
+    if (els.quickDownloadSelectedBtn) {
+      els.quickDownloadSelectedBtn.disabled = false;
+      els.quickDownloadSelectedBtn.textContent = originalBatchLabel;
     }
-    let fastApplied = { successes: [], failures: [] };
-    if (fastQueue.length) {
-      const fastData = await requestBatchDownload(fastQueue, "fast");
-      fastApplied = applyBatchDownloadResults(fastQueue, fastData.results || []);
-      retryQueue = [...deepQueue, ...fastApplied.failures.map(({ article }) => article)];
-    }
-    if (job) {
-      job.fastProcessed = fastQueue.length;
-      job.successCount = fastApplied.successes.length;
-      job.completedCount = fastApplied.successes.length;
-      job.retryCount = retryQueue.length;
-    }
-    fastApplied.successes.forEach(({ article }) => {
-      pushDeepDownloadRecent("Fast", article.title, "success");
-    });
-    fastApplied.failures.forEach(({ article }) => {
-      setArticleDownloadability(article.id, {
-        status: "loading",
-        label: "Retrying",
-        detail: "Queued for deep retry.",
-        openUrl: null,
-      });
-      pushDeepDownloadRecent("Queued", article.title, "queued");
-    });
-    renderDeepDownloadDialog();
-    scheduleResultsRender();
-  } catch (error) {
-    retryQueue = [...deepQueue, ...fastQueue];
-    fastQueue.forEach((article) => {
-      setArticleDownloadability(article.id, {
-        status: "loading",
-        label: "Retrying",
-        detail: error.message || "Queued for deep retry.",
-        openUrl: null,
-      });
-      pushDeepDownloadRecent("Queued", article.title, "queued");
-    });
-    if (state.deepDownloadJob) {
-      state.deepDownloadJob.fastProcessed = fastQueue.length;
-      state.deepDownloadJob.retryCount = retryQueue.length;
-      state.deepDownloadJob.currentTitle = "Fast pass stalled, escalating to deep retry…";
-      renderDeepDownloadDialog();
-    }
-    trackAppEvent("error", "pdf_fast_batch_failed", error.message || "Fast batch download failed.", {
-      project_id: state.projectId || "",
-      selected_count: fastQueue.length,
-    });
-    scheduleResultsRender();
   }
-
-  if (state.deepDownloadJob) {
-    state.deepDownloadJob.phase = "deep";
-    state.deepDownloadJob.deepTotal = retryQueue.length;
-    state.deepDownloadJob.retryCount = retryQueue.length;
-    state.deepDownloadJob.currentTitle = retryQueue.length
-      ? "Retrying unresolved papers…"
-      : "All selected papers downloaded in the fast pass.";
-    renderDeepDownloadDialog();
-  }
-
-  if (retryQueue.length) {
-    retryQueue.forEach((article) => {
-      setArticleDownloadability(article.id, {
-        status: "loading",
-        label: "Downloading",
-        detail: "Deep retry in progress.",
-        openUrl: null,
-      });
-    });
-    scheduleResultsRender();
-    try {
-      const deepData = await requestBatchDownload(retryQueue, mode);
-      const deepApplied = applyBatchDownloadResults(retryQueue, deepData.results || []);
-      if (state.deepDownloadJob) {
-        state.deepDownloadJob.deepProcessed = retryQueue.length;
-        state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount + retryQueue.length;
-        state.deepDownloadJob.successCount += deepApplied.successes.length;
-        state.deepDownloadJob.failedCount += deepApplied.failures.length;
-        state.deepDownloadJob.retryCount = 0;
-      }
-      deepApplied.successes.forEach(({ article }) => {
-        pushDeepDownloadRecent("Deep", article.title, "success");
-      });
-      deepApplied.failures.forEach(({ article }) => {
-        pushDeepDownloadRecent("Failed", article.title, "failed");
-      });
-      renderDeepDownloadDialog();
-    } catch (error) {
-      retryQueue.forEach((article) => {
-        applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
-        pushDeepDownloadRecent("Failed", article.title, "failed");
-      });
-      if (state.deepDownloadJob) {
-        state.deepDownloadJob.deepProcessed = retryQueue.length;
-        state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount + retryQueue.length;
-        state.deepDownloadJob.failedCount += retryQueue.length;
-        state.deepDownloadJob.retryCount = 0;
-      }
-      renderDeepDownloadDialog();
-      scheduleResultsRender();
-      trackAppEvent("error", "pdf_deep_batch_failed", error.message || "Deep batch download failed.", {
-        project_id: state.projectId || "",
-        retry_count: retryQueue.length,
-        mode,
-      });
-    }
-  } else if (state.deepDownloadJob) {
-    state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount;
-  }
-
-  if (state.deepDownloadJob) {
-    state.deepDownloadJob.running = false;
-    state.deepDownloadJob.phase = "done";
-    state.deepDownloadJob.currentTitle = state.deepDownloadJob.failedCount
-      ? "Download finished. Some papers still need manual follow-up."
-      : "All selected papers are ready.";
-    stopDeepDownloadClock();
-    renderDeepDownloadDialog();
-  }
-  trackAppEvent("info", "pdf_batch_download_completed", `Deep flow complete: ${state.deepDownloadJob?.successCount || 0}/${chosen.length}`, {
-    project_id: state.projectId || "",
-    mode,
-    success_count: state.deepDownloadJob?.successCount || 0,
-    failed_count: state.deepDownloadJob?.failedCount || 0,
-    selected_count: chosen.length,
-  });
-  await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
 }
 
 function compactList(items, limit = 8) {
@@ -2080,8 +1833,6 @@ function detailBlockMarkup(article, field, label, text, subtext = "") {
 
 function detailRowMarkup(article) {
   const link = bestArticleLink(article);
-  const downloadInfo = getDownloadability(article.id);
-  const downloadDisplay = downloadabilityDisplay(article.id);
   return `
     <tr class="detail-row">
       <td colspan="9">
@@ -2112,12 +1863,6 @@ function detailRowMarkup(article) {
             ${detailBlockMarkup(article, "keywords", "Keywords", compactList(article.keywords, 12))}
             ${detailBlockMarkup(article, "article_types", "Article Types", compactList(article.article_types, 8))}
             ${detailBlockMarkup(article, "related_articles", "Related Articles", compactList(article.related_articles, 8))}
-          </div>
-          <div class="inline-downloadability">
-            <span class="availability-dot-shell ${downloadDisplay.tone}" title="${escapeHtml(downloadInfo.detail || downloadDisplay.text)}">
-              <span class="availability-dot"></span>
-            </span>
-            <span class="detail-inline-text">${escapeHtml(downloadInfo.detail || downloadDisplay.text)}</span>
           </div>
         </div>
       </td>
@@ -2227,10 +1972,6 @@ function updateCounters() {
     els.quickDownloadSelectedBtn.disabled = !hasSelection;
     els.quickDownloadSelectedBtn.classList.toggle("is-active", hasSelection);
   }
-  if (els.deepDownloadSelectedBtn) {
-    els.deepDownloadSelectedBtn.disabled = !hasSelection;
-    els.deepDownloadSelectedBtn.classList.toggle("is-active", hasSelection);
-  }
 }
 
 async function enrichCitationsInBackground() {
@@ -2315,7 +2056,6 @@ function applyArticleDataset(data, options = {}) {
   renderMeta(data.meta || null);
   applyArticleSort();
   renderResults();
-  void verifyDownloadabilityInBackground();
   if (persist) {
     upsertActiveQueryRecord();
     scheduleProjectStateSave();
@@ -2431,6 +2171,7 @@ async function runSearch() {
     });
     state.citationsLoading = response.articles?.length > 0;
     applyArticleDataset(response);
+    syncSidebarQuickControls();
     trackAppEvent("info", "pubmed_search_completed", `${response.meta?.fetched_results || 0} articles`, {
       project_id: state.projectId || "",
       fetched_results: response.meta?.fetched_results || 0,
@@ -2451,6 +2192,33 @@ async function runSearch() {
     throw error;
   } finally {
     els.searchBtn.disabled = false;
+  }
+}
+
+async function runSidebarQuickSearch() {
+  const query = els.sidebarQuickQuery?.value?.trim() || "";
+  if (!query) {
+    throw new Error("Sidebar query cannot be empty.");
+  }
+  const maxResults = normalizedNumber(els.sidebarQuickMaxResults, 5);
+  if (els.sidebarQuickSearchBtn) els.sidebarQuickSearchBtn.disabled = true;
+  if (els.sidebarQuickStatus) els.sidebarQuickStatus.textContent = "Running PubMed search…";
+  els.query.value = query;
+  els.maxResults.value = String(maxResults);
+  autoResizeTextarea(els.query);
+  autoResizeTextarea(els.sidebarQuickQuery);
+  try {
+    await runSearch();
+    if (els.sidebarQuickStatus) {
+      els.sidebarQuickStatus.textContent = `${state.articles.length} articles loaded.`;
+    }
+  } catch (error) {
+    if (els.sidebarQuickStatus) {
+      els.sidebarQuickStatus.textContent = error.message || "Sidebar search failed.";
+    }
+    throw error;
+  } finally {
+    if (els.sidebarQuickSearchBtn) els.sidebarQuickSearchBtn.disabled = false;
   }
 }
 
@@ -2912,6 +2680,17 @@ function bindEvents() {
   });
 
   els.query.addEventListener("input", () => autoResizeTextarea(els.query));
+  els.sidebarQuickQuery?.addEventListener("input", () => autoResizeTextarea(els.sidebarQuickQuery));
+  els.sidebarQuickSearchBtn?.addEventListener("click", async () => {
+    try {
+      await runSidebarQuickSearch();
+    } catch (error) {
+      trackAppEvent("error", "sidebar_pubmed_search_failed", error.message || "Sidebar PubMed search failed.", {
+        project_id: state.projectId || "",
+      });
+      pushAssistantMessage({ role: "assistant", text: `Sidebar search error: ${error.message}` });
+    }
+  });
   els.assistantInput.addEventListener("input", () => autoResizeTextarea(els.assistantInput));
   els.assistantInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -2958,10 +2737,7 @@ function bindEvents() {
   });
 
   els.quickDownloadSelectedBtn?.addEventListener("click", () => {
-    void downloadSelectedFast();
-  });
-  els.deepDownloadSelectedBtn?.addEventListener("click", () => {
-    void downloadSelectedArticles("balanced");
+    void downloadSelectedArticles();
   });
   els.apiKeysBtn?.addEventListener("click", () => {
     setApiKeysDialogOpen(true);
@@ -3000,19 +2776,6 @@ function bindEvents() {
       if (els.pubmedOaOnlyToggle) els.pubmedOaOnlyToggle.disabled = false;
     }
   });
-  els.deepDownloadOverlay?.addEventListener("click", () => {
-    if (state.deepDownloadJob?.running) return;
-    setDeepDownloadDialogOpen(false);
-  });
-  els.deepDownloadClose?.addEventListener("click", () => {
-    if (state.deepDownloadJob?.running) return;
-    setDeepDownloadDialogOpen(false);
-  });
-  els.deepDownloadDoneBtn?.addEventListener("click", () => {
-    if (state.deepDownloadJob?.running) return;
-    setDeepDownloadDialogOpen(false);
-  });
-
   els.sidebarToggleBtn?.addEventListener("click", () => {
     setSidebarOpen(!state.sidebarOpen);
   });
@@ -3096,7 +2859,9 @@ async function init() {
   updateThinkingLabel();
   setApiKeysDialogOpen(false);
   autoResizeTextarea(els.query);
+  autoResizeTextarea(els.sidebarQuickQuery);
   autoResizeTextarea(els.assistantInput);
+  syncSidebarQuickControls();
   bindEvents();
   setSidebarOpen(state.sidebarOpen, { immediate: true });
   setSidebarPanel(state.sidebarPanel);

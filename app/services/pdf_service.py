@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import ipaddress
 import re
 import tarfile
 import tempfile
@@ -13,7 +14,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, TypeVar
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
@@ -32,11 +33,15 @@ from app.schemas.pdf import (
     PDFTestResult,
 )
 from app.services.app_event_log_service import AppEventLogService
+from app.services.new_method_exact_bridge import ExactNewMethodBridge
 from app.utils.cache import TTLCache
 from app.utils.files import ensure_unique_path, sanitize_filename
 from app.utils.rate_limit import AsyncRateLimiter
 
 _T = TypeVar("_T")
+
+DOAJ_SEARCH_URL = "https://doaj.org/api/search/articles"
+EUROPE_PMC_REPO_URL = "https://europepmc.org/api/fulltextRepo"
 
 
 @dataclass
@@ -52,7 +57,7 @@ class _ProbeOutcome:
 
     @property
     def success(self) -> bool:
-        return self.status_code == 200 and self.payload_bytes is not None and self.error is None
+        return self.status_code in {200, 206} and self.content_kind is not None and self.error is None
 
     def to_attempt(self) -> PDFTestAttempt:
         return PDFTestAttempt(
@@ -395,19 +400,86 @@ class PDFService:
             max_entries=max(512, settings.pdf_cache_max_entries * 4),
         )
         self.resolve_rate_limiter = AsyncRateLimiter(settings.pdf_resolve_requests_per_second)
+        self.exact_bridge = ExactNewMethodBridge(transport=getattr(http_client, "_transport", None))
+
+    @staticmethod
+    def _resolve_timeout() -> httpx.Timeout:
+        return httpx.Timeout(connect=4.0, read=4.0, write=4.0, pool=2.0)
+
+    @staticmethod
+    def _exact_mode(mode: str) -> str:
+        return mode if mode in {"fast", "balanced"} else "fast"
+
+    @staticmethod
+    def _result_content_metadata(file_path: str | None) -> tuple[str | None, str | None]:
+        if not file_path:
+            return None, None
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".pdf":
+            return "pdf", "application/pdf"
+        if suffix == ".xml":
+            return "xml_fulltext", "application/xml"
+        if suffix == ".html":
+            return "html_fulltext", "text/html"
+        if suffix == ".txt":
+            return "text_fulltext", "text/plain"
+        return None, None
+
+    def _to_pdf_download_result(self, article: ArticleReference, payload: dict[str, Any]) -> PDFDownloadResult:
+        content_kind, content_type = self._result_content_metadata(payload.get("file_path"))
+        return PDFDownloadResult(
+            article=article,
+            success=bool(payload.get("success")),
+            source=payload.get("source"),
+            url=payload.get("url"),
+            file_path=payload.get("file_path"),
+            content_kind=content_kind,
+            content_type=content_type,
+            candidate_count=int(payload.get("candidate_count") or 0),
+            error=None if payload.get("success") else (payload.get("note") or "no_successful_candidate"),
+        )
+
+    def _to_pdf_test_result(self, article: ArticleReference, payload: dict[str, Any], *, expose_file_path: bool) -> PDFTestResult:
+        content_kind, content_type = self._result_content_metadata(payload.get("file_path"))
+        attempts = [
+            PDFTestAttempt(
+                source=str(item.get("source") or ""),
+                url=str(item.get("url") or ""),
+                status_code=item.get("status_code"),
+                content_type=item.get("content_type"),
+                mode=None,
+                success=str(item.get("status") or "") == "ok",
+                error=None if str(item.get("status") or "") == "ok" else item.get("detail"),
+            )
+            for item in payload.get("attempts") or []
+        ]
+        return PDFTestResult(
+            article=article,
+            success=bool(payload.get("success")),
+            reason="downloadable" if payload.get("success") else str(payload.get("note") or "no_successful_candidate"),
+            source=payload.get("source"),
+            url=payload.get("url"),
+            file_path=payload.get("file_path") if expose_file_path else None,
+            content_kind=content_kind,
+            content_type=content_type,
+            candidate_count=int(payload.get("candidate_count") or 0),
+            attempts=attempts,
+        )
 
     async def resolve(self, article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
-        cache_key = self._candidate_cache_key(article, mode)
+        exact_mode = self._exact_mode(mode)
+        cache_key = self._candidate_cache_key(article, exact_mode)
         cached = self.candidate_cache.get(cache_key)
         if cached is not None:
             return PDFResolveResponse(article=article, candidates=cached, cache_hit=True)
 
-        candidates = await self._build_candidates(article, mode=mode)
+        candidate_payloads = await self.exact_bridge.resolve_candidates(article, mode=exact_mode)
+        candidates = [PDFCandidate(**item) for item in candidate_payloads]
         self.candidate_cache.set(cache_key, candidates)
         return PDFResolveResponse(article=article, candidates=candidates, cache_hit=False)
 
     async def quick_availability(self, articles: list[ArticleReference]) -> PDFAvailabilityResponse:
-        semaphore = asyncio.Semaphore(36)
+        semaphore = asyncio.Semaphore(8)
 
         async def run_single(article: ArticleReference) -> PDFAvailabilityItem:
             cache_key = self._availability_cache_key(article)
@@ -415,38 +487,27 @@ class PDFService:
             if cached is not None:
                 return cached.model_copy(deep=True)
             async with semaphore:
-                resolved = await self.resolve(article, mode="fast")
-                preferred = self._rank_fast_candidates(resolved.candidates)
-                if not preferred:
-                    detail = "Only weak or deep-only signals were found."
-                    if not resolved.candidates:
-                        detail = "No fast candidates were found."
-                    result = PDFAvailabilityItem(
-                        article=article,
-                        ready=False,
-                        candidate_count=len(resolved.candidates),
-                        detail=detail,
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    payload = await self.exact_bridge.run(
+                        article,
+                        output_dir=Path(temp_dir),
+                        mode="fast",
+                        budget_seconds=60.0,
                     )
-                    self.availability_cache.set(cache_key, result)
-                    return result
-
-                verified_source = await self._quick_verify_candidates(preferred[:3])
-                if verified_source is None:
-                    verified_source = await self._quick_verify_second_pass(article, resolved.candidates)
-                if verified_source is None:
+                if not payload.get("success"):
                     result = PDFAvailabilityItem(
                         article=article,
                         ready=False,
-                        candidate_count=len(resolved.candidates),
-                        detail="Fast verification did not find a downloadable full text candidate.",
+                        candidate_count=int(payload.get("candidate_count") or 0),
+                        detail=str(payload.get("note") or "Fast verification did not find a downloadable full text candidate."),
                     )
                     self.availability_cache.set(cache_key, result)
                     return result
                 result = PDFAvailabilityItem(
                     article=article,
                     ready=True,
-                    source=verified_source,
-                    candidate_count=len(resolved.candidates),
+                    source=payload.get("source"),
+                    candidate_count=int(payload.get("candidate_count") or 0),
                     detail="Fast verification confirmed downloadable full text.",
                 )
                 self.availability_cache.set(cache_key, result)
@@ -491,8 +552,9 @@ class PDFService:
         return None
 
     async def _quick_probe_candidate(self, candidate: PDFCandidate) -> str | None:
-        headers = self._download_headers()
-        headers["Range"] = self._quick_probe_range_header(candidate.source)
+        headers = self._candidate_request_headers(candidate.source)
+        if not candidate.source.endswith("_html_fulltext") and candidate.source not in {"crossref_elsevier_xml", "europe_pmc_repo_xml"}:
+            headers["Range"] = self._quick_probe_range_header(candidate.source)
         try:
             async with self.http_client.stream(
                 "GET",
@@ -534,8 +596,8 @@ class PDFService:
         target_dir = self._resolve_target_dir(request.download_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         articles = request.articles[: request.max_articles] if request.max_articles else request.articles
-        enable_browser = request.use_browser_fallback or request.mode == "balanced"
-        semaphore = asyncio.Semaphore(self._download_concurrency(request.mode))
+        exact_mode = self._exact_mode(request.mode)
+        semaphore = asyncio.Semaphore(self._download_concurrency(exact_mode))
         batch_id = self._new_batch_id()
         batch_started = time.monotonic()
         self._log_download_event(
@@ -544,79 +606,71 @@ class PDFService:
             "PDF download batch started.",
             context={
                 "batch": batch_id,
-                "mode": request.mode,
+                "mode": exact_mode,
                 "total": len(articles),
-                "browser": enable_browser,
+                "browser": False,
             },
         )
-        browser_runtime = await self._prepare_browser_runtime(enable_browser)
 
         async def run_single(index: int, article: ArticleReference) -> tuple[int, PDFDownloadResult]:
             async with semaphore:
-                result = await self._download_single_article(
+                payload = await self.exact_bridge.run(
                     article,
-                    target_dir,
-                    mode=request.mode,
-                    use_browser_fallback=enable_browser,
-                    browser_runtime=browser_runtime,
-                    batch_id=batch_id,
-                    article_index=index + 1,
-                    article_total=len(articles),
+                    output_dir=target_dir,
+                    mode=exact_mode,
+                    budget_seconds=60.0,
                 )
+                result = self._to_pdf_download_result(article, payload)
                 return index, result
 
-        try:
-            pending = {
-                asyncio.create_task(run_single(index, article))
-                for index, article in enumerate(articles)
-            }
-            results: list[PDFDownloadResult | None] = [None] * len(articles)
-            success_count = 0
-            completed_count = 0
-            while pending:
-                done, pending = await asyncio.wait(
-                    pending,
-                    timeout=15.0,
-                    return_when=asyncio.FIRST_COMPLETED,
+        pending = {
+            asyncio.create_task(run_single(index, article))
+            for index, article in enumerate(articles)
+        }
+        results: list[PDFDownloadResult | None] = [None] * len(articles)
+        success_count = 0
+        completed_count = 0
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=15.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                self._log_download_event(
+                    "info",
+                    "pdf_download_batch_heartbeat",
+                    "PDF download batch still running.",
+                    context={
+                        "batch": batch_id,
+                        "mode": exact_mode,
+                        "done": completed_count,
+                        "total": len(articles),
+                        "pending": len(pending),
+                        "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
+                    },
                 )
-                if not done:
-                    self._log_download_event(
-                        "info",
-                        "pdf_download_batch_heartbeat",
-                        "PDF download batch still running.",
-                        context={
-                            "batch": batch_id,
-                            "mode": request.mode,
-                            "done": completed_count,
-                            "total": len(articles),
-                            "pending": len(pending),
-                            "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
-                        },
-                    )
-                    continue
-                for task in done:
-                    index, result = await task
-                    results[index] = result
-                    completed_count += 1
-                    if result.success:
-                        success_count += 1
-                    self._log_download_event(
-                        "info",
-                        "pdf_download_progress",
-                        "PDF download article completed.",
-                        context={
-                            "batch": batch_id,
-                            "mode": request.mode,
-                            "done": completed_count,
-                            "total": len(articles),
-                            "ok": result.success,
-                            "article": self._article_log_key(result.article),
-                            "source": result.source or "-",
-                        },
-                    )
-        finally:
-            if browser_runtime is not None:
-                await browser_runtime.close()
+                continue
+            for task in done:
+                index, result = await task
+                results[index] = result
+                completed_count += 1
+                if result.success:
+                    success_count += 1
+                self._log_download_event(
+                    "info",
+                    "pdf_download_progress",
+                    "PDF download article completed.",
+                    context={
+                        "batch": batch_id,
+                        "mode": exact_mode,
+                        "done": completed_count,
+                        "total": len(articles),
+                        "ok": result.success,
+                        "article": self._article_log_key(result.article),
+                        "source": result.source or "-",
+                    },
+                )
         finalized = [item for item in results if item is not None]
         success_count = sum(1 for item in finalized if item.success)
         self._log_download_event(
@@ -625,7 +679,7 @@ class PDFService:
             "PDF download batch finished.",
             context={
                 "batch": batch_id,
-                "mode": request.mode,
+                "mode": exact_mode,
                 "total": len(finalized),
                 "ok": success_count,
                 "fail": len(finalized) - success_count,
@@ -651,16 +705,13 @@ class PDFService:
         temp_dir_context: tempfile.TemporaryDirectory[str] | None = None
         if save_files:
             target_dir = self._resolve_target_dir(download_dir)
-        elif use_browser_fallback or mode == "balanced":
+        else:
             temp_dir_context = tempfile.TemporaryDirectory()
             target_dir = Path(temp_dir_context.name)
-        else:
-            target_dir = None
-        if target_dir is not None:
-            target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-        enable_browser = use_browser_fallback or mode == "balanced"
-        semaphore = asyncio.Semaphore(self._download_concurrency(mode))
+        exact_mode = self._exact_mode(mode)
+        semaphore = asyncio.Semaphore(self._download_concurrency(exact_mode))
         batch_id = self._new_batch_id()
         batch_started = time.monotonic()
         self._log_download_event(
@@ -669,27 +720,22 @@ class PDFService:
             "PDF diagnose batch started.",
             context={
                 "batch": batch_id,
-                "mode": mode,
+                "mode": exact_mode,
                 "total": len(articles),
-                "browser": enable_browser,
+                "browser": False,
                 "save": save_files,
             },
         )
-        browser_runtime = await self._prepare_browser_runtime(enable_browser)
 
         async def run_single(index: int, article: ArticleReference) -> tuple[int, PDFTestResult]:
             async with semaphore:
-                result = await self._diagnose_single_article(
+                payload = await self.exact_bridge.run(
                     article,
-                    target_dir,
-                    mode=mode,
-                    use_browser_fallback=enable_browser,
-                    expose_file_path=save_files,
-                    browser_runtime=browser_runtime,
-                    batch_id=batch_id,
-                    article_index=index + 1,
-                    article_total=len(articles),
+                    output_dir=target_dir,
+                    mode=exact_mode,
+                    budget_seconds=60.0,
                 )
+                result = self._to_pdf_test_result(article, payload, expose_file_path=save_files)
                 return index, result
 
         try:
@@ -712,7 +758,7 @@ class PDFService:
                         "PDF diagnose batch still running.",
                         context={
                             "batch": batch_id,
-                            "mode": mode,
+                            "mode": exact_mode,
                             "done": completed_count,
                             "total": len(articles),
                             "pending": len(pending),
@@ -730,7 +776,7 @@ class PDFService:
                         "PDF diagnose article completed.",
                         context={
                             "batch": batch_id,
-                            "mode": mode,
+                            "mode": exact_mode,
                             "done": completed_count,
                             "total": len(articles),
                             "ok": result.success,
@@ -745,7 +791,7 @@ class PDFService:
                 "PDF diagnose batch finished.",
                 context={
                     "batch": batch_id,
-                    "mode": mode,
+                    "mode": exact_mode,
                     "total": len(finalized),
                     "ok": sum(1 for item in finalized if item.success),
                     "fail": sum(1 for item in finalized if not item.success),
@@ -754,8 +800,6 @@ class PDFService:
             )
             return finalized
         finally:
-            if browser_runtime is not None:
-                await browser_runtime.close()
             if temp_dir_context is not None:
                 temp_dir_context.cleanup()
 
@@ -784,6 +828,62 @@ class PDFService:
                 article_total=article_total,
             ),
         )
+        if mode == "fast" and article.pmc_id:
+            pmc_preflight_candidates = await self._fast_pmc_preflight_candidates(article)
+            if pmc_preflight_candidates:
+                success_probe, _attempts = await self._probe_fast_candidates_in_order(
+                    pmc_preflight_candidates,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                )
+                if success_probe is not None and success_probe.payload_bytes is None:
+                    success_probe = await self._await_stage_with_heartbeat(
+                        self._download_candidate_payload(success_probe.candidate, mode=mode),
+                        article=article,
+                        mode=mode,
+                        stage="fetch",
+                        batch_id=batch_id,
+                        article_index=article_index,
+                        article_total=article_total,
+                        extra_context={"source": success_probe.candidate.source},
+                    )
+                if success_probe is not None and success_probe.payload_bytes is not None:
+                    file_path = self._build_file_path(
+                        article,
+                        success_probe.candidate.source,
+                        target_dir,
+                        suffix=success_probe.extension or ".pdf",
+                    )
+                    file_path.write_bytes(success_probe.payload_bytes)
+                    self._log_download_event(
+                        "info",
+                        "pdf_download_article_done",
+                        "PDF download article succeeded.",
+                        context=self._article_trace_context(
+                            article,
+                            batch_id=batch_id,
+                            mode=mode,
+                            article_index=article_index,
+                            article_total=article_total,
+                            extra={
+                                "source": success_probe.candidate.source,
+                                "cand": len(pmc_preflight_candidates),
+                                "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                            },
+                        ),
+                    )
+                    return PDFDownloadResult(
+                        article=article,
+                        success=True,
+                        source=success_probe.candidate.source,
+                        url=success_probe.candidate.url,
+                        file_path=str(file_path),
+                        content_kind=success_probe.content_kind,
+                        content_type=success_probe.content_type,
+                        candidate_count=len(pmc_preflight_candidates),
+                    )
         resolved = await self._await_stage_with_heartbeat(
             self.resolve(article, mode=mode),
             article=article,
@@ -794,24 +894,44 @@ class PDFService:
             article_total=article_total,
         )
         probe_candidates = self._download_probe_candidates(article, resolved.candidates, mode=mode)
-        success_probe, _attempts = await self._await_stage_with_heartbeat(
-            self._probe_candidates(
+        if mode == "fast":
+            success_probe, _attempts = await self._probe_fast_candidates_in_order(
                 probe_candidates,
-                mode=mode,
-                stop_on_first_success=True,
                 article=article,
                 batch_id=batch_id,
                 article_index=article_index,
                 article_total=article_total,
-            ),
-            article=article,
-            mode=mode,
-            stage="probe",
-            batch_id=batch_id,
-            article_index=article_index,
-            article_total=article_total,
-            extra_context={"cand": len(probe_candidates)},
-        )
+            )
+        else:
+            success_probe, _attempts = await self._await_stage_with_heartbeat(
+                self._probe_candidates(
+                    probe_candidates,
+                    mode=mode,
+                    stop_on_first_success=True,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                ),
+                article=article,
+                mode=mode,
+                stage="probe",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"cand": len(probe_candidates)},
+            )
+        if success_probe is not None and success_probe.payload_bytes is None:
+            success_probe = await self._await_stage_with_heartbeat(
+                self._download_candidate_payload(success_probe.candidate, mode=mode),
+                article=article,
+                mode=mode,
+                stage="fetch",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"source": success_probe.candidate.source},
+            )
         if success_probe is not None and success_probe.payload_bytes is not None:
             file_path = self._build_file_path(
                 article,
@@ -820,16 +940,6 @@ class PDFService:
                 suffix=success_probe.extension or ".pdf",
             )
             file_path.write_bytes(success_probe.payload_bytes)
-            return PDFDownloadResult(
-                article=article,
-                success=True,
-                source=success_probe.candidate.source,
-                url=success_probe.candidate.url,
-                file_path=str(file_path),
-                content_kind=success_probe.content_kind,
-                content_type=success_probe.content_type,
-                candidate_count=len(resolved.candidates),
-            )
             self._log_download_event(
                 "info",
                 "pdf_download_article_done",
@@ -847,7 +957,16 @@ class PDFService:
                     },
                 ),
             )
-            return result
+            return PDFDownloadResult(
+                article=article,
+                success=True,
+                source=success_probe.candidate.source,
+                url=success_probe.candidate.url,
+                file_path=str(file_path),
+                content_kind=success_probe.content_kind,
+                content_type=success_probe.content_type,
+                candidate_count=len(resolved.candidates),
+            )
 
         if use_browser_fallback:
             browser_result = await self._await_stage_with_heartbeat(
@@ -889,7 +1008,7 @@ class PDFService:
             article=article,
             success=False,
             candidate_count=len(resolved.candidates),
-            error="No downloadable PDF candidate succeeded.",
+            error="No downloadable full text candidate succeeded.",
         )
         self._log_download_event(
             "warning",
@@ -914,25 +1033,35 @@ class PDFService:
         seen: set[str] = set()
 
         def add_candidate(source: str, url: str | None) -> None:
-            if not url or url in seen:
+            normalized_url = self._normalize_candidate_url(url)
+            if not normalized_url or normalized_url in seen:
                 return
-            seen.add(url)
-            candidates.append(PDFCandidate(source=source, url=url))
+            seen.add(normalized_url)
+            candidates.append(PDFCandidate(source=source, url=normalized_url))
 
         pmc_task: asyncio.Task[list[str]] | None = None
+        europe_pmc_repo_task: asyncio.Task[list[PDFCandidate]] | None = None
         europe_pmc_task: asyncio.Task[list[str]] | None = None
         doi_task: asyncio.Task[dict[str, list[str]]] | None = None
+        doaj_task: asyncio.Task[list[PDFCandidate]] | None = None
+        ncbi_linkout_task: asyncio.Task[list[PDFCandidate]] | None = None
         pmc = article.pmc_id.upper() if article.pmc_id else None
         if article.pmc_id:
             pmc_task = asyncio.create_task(self._pmc_oa_links(pmc))
-            if mode == "balanced":
+            if mode == "balanced" or article.doi:
+                europe_pmc_repo_task = asyncio.create_task(self._europe_pmc_repo_candidates(pmc))
+            if mode == "balanced" or (mode == "fast" and article.doi):
                 europe_pmc_task = asyncio.create_task(self._europe_pmc_fulltext_links(pmc_id=pmc))
+            if mode == "balanced":
                 add_candidate("europepmc", f"https://europepmc.org/articles/{pmc}?pdf=render")
                 add_candidate("europe_pmc_article", f"https://europepmc.org/articles/{pmc}")
                 add_candidate("pmc_article_html", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/")
             add_candidate("pmc_direct", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/pdf/")
         if article.doi:
             doi_task = asyncio.create_task(self._doi_source_map(article.doi, mode=mode))
+            doaj_task = asyncio.create_task(self._doaj_candidates(article.doi))
+        if article.pmid and not article.pmc_id:
+            ncbi_linkout_task = asyncio.create_task(self._ncbi_linkout_candidates(article.pmid))
 
         pmc_links: list[str] = []
         if pmc_task is not None:
@@ -941,8 +1070,15 @@ class PDFService:
                 source = "pmc_oa_tgz" if url.endswith(".tar.gz") else "pmc_oa_pdf"
                 add_candidate(source, url)
 
-        if mode == "fast" and pmc is not None and not article.doi:
+        if mode == "fast" and pmc_links and not article.doi:
             return candidates
+
+        if article.pmc_id and europe_pmc_repo_task is None and not article.doi:
+            europe_pmc_repo_task = asyncio.create_task(self._europe_pmc_repo_candidates(pmc))
+
+        if europe_pmc_repo_task is not None:
+            for candidate in await europe_pmc_repo_task:
+                add_candidate(candidate.source, candidate.url)
 
         doi_source_map: dict[str, list[str]] = {}
         if doi_task is not None:
@@ -954,6 +1090,8 @@ class PDFService:
                     add_candidate("europe_pmc", url)
             for url in doi_source_map.get("crossref", []):
                 add_candidate("crossref", url)
+            for url in doi_source_map.get("crossref_elsevier_xml", []):
+                add_candidate("crossref_elsevier_xml", url)
             for url in doi_source_map.get("openalex", []):
                 add_candidate("openalex", url)
             for url in doi_source_map.get("citation_pdf_url", []):
@@ -969,7 +1107,47 @@ class PDFService:
             for url in await europe_pmc_task:
                 add_candidate("europe_pmc", url)
 
+        if doaj_task is not None:
+            for candidate in await doaj_task:
+                add_candidate(candidate.source, candidate.url)
+
+        if ncbi_linkout_task is not None:
+            for candidate in await ncbi_linkout_task:
+                add_candidate(candidate.source, candidate.url)
+
         return candidates
+
+    @staticmethod
+    def _normalize_candidate_url(url: str | None) -> str | None:
+        if not url:
+            return None
+        parsed = urlparse(url)
+        scheme = parsed.scheme
+        hostname = (parsed.hostname or "").lower()
+        is_ip_host = False
+        if hostname:
+            try:
+                ipaddress.ip_address(hostname)
+                is_ip_host = True
+            except ValueError:
+                is_ip_host = False
+        if parsed.scheme in {"http", "https"} and not is_ip_host:
+            scheme = "https"
+        netloc = parsed.netloc.lower()
+        return urlunparse((scheme, netloc, parsed.path, "", parsed.query, ""))
+
+    async def _fast_pmc_preflight_candidates(self, article: ArticleReference) -> list[PDFCandidate]:
+        if not article.pmc_id:
+            return []
+        pmc_links = await self._pmc_oa_links(article.pmc_id.upper())
+        candidates = [
+            PDFCandidate(
+                source="pmc_oa_tgz" if url.endswith(".tar.gz") else "pmc_oa_pdf",
+                url=self._normalize_candidate_url(url) or url,
+            )
+            for url in pmc_links
+        ]
+        return self._rank_fast_candidates(candidates)
 
     async def _diagnose_single_article(
         self,
@@ -997,6 +1175,70 @@ class PDFService:
                 article_total=article_total,
             ),
         )
+        preflight_attempts: list[PDFTestAttempt] = []
+        if mode == "fast" and article.pmc_id:
+            pmc_preflight_candidates = await self._fast_pmc_preflight_candidates(article)
+            if pmc_preflight_candidates:
+                success_probe, probe_attempts = await self._probe_fast_candidates_in_order(
+                    pmc_preflight_candidates,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                )
+                preflight_attempts = [outcome.to_attempt() for outcome in probe_attempts]
+                if success_probe is not None and success_probe.payload_bytes is None:
+                    success_probe = await self._await_stage_with_heartbeat(
+                        self._download_candidate_payload(success_probe.candidate, mode=mode),
+                        article=article,
+                        mode=mode,
+                        stage="fetch",
+                        batch_id=batch_id,
+                        article_index=article_index,
+                        article_total=article_total,
+                        extra_context={"source": success_probe.candidate.source},
+                    )
+                if success_probe is not None and success_probe.payload_bytes is not None:
+                    file_path: str | None = None
+                    if target_dir is not None:
+                        output_path = self._build_file_path(
+                            article,
+                            success_probe.candidate.source,
+                            target_dir,
+                            suffix=success_probe.extension or ".pdf",
+                        )
+                        output_path.write_bytes(success_probe.payload_bytes)
+                        file_path = str(output_path)
+                    result = PDFTestResult(
+                        article=article,
+                        success=True,
+                        reason="downloadable",
+                        file_path=file_path if expose_file_path else None,
+                        source=success_probe.candidate.source,
+                        url=success_probe.candidate.url,
+                        attempts=preflight_attempts,
+                        candidate_count=len(pmc_preflight_candidates),
+                        content_kind=success_probe.content_kind,
+                        content_type=success_probe.content_type,
+                    )
+                    self._log_download_event(
+                        "info",
+                        "pdf_diagnose_article_done",
+                        "PDF diagnose article succeeded.",
+                        context=self._article_trace_context(
+                            article,
+                            batch_id=batch_id,
+                            mode=mode,
+                            article_index=article_index,
+                            article_total=article_total,
+                            extra={
+                                "source": success_probe.candidate.source,
+                                "cand": len(pmc_preflight_candidates),
+                                "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                            },
+                        ),
+                    )
+                    return result
         resolved = await self._await_stage_with_heartbeat(
             self.resolve(article, mode=mode),
             article=article,
@@ -1007,25 +1249,45 @@ class PDFService:
             article_total=article_total,
         )
         probe_candidates = self._download_probe_candidates(article, resolved.candidates, mode=mode)
-        success_probe, probe_attempts = await self._await_stage_with_heartbeat(
-            self._probe_candidates(
+        if mode == "fast":
+            success_probe, probe_attempts = await self._probe_fast_candidates_in_order(
                 probe_candidates,
-                mode=mode,
-                stop_on_first_success=True,
                 article=article,
                 batch_id=batch_id,
                 article_index=article_index,
                 article_total=article_total,
-            ),
-            article=article,
-            mode=mode,
-            stage="probe",
-            batch_id=batch_id,
-            article_index=article_index,
-            article_total=article_total,
-            extra_context={"cand": len(probe_candidates)},
-        )
-        attempts = [outcome.to_attempt() for outcome in probe_attempts]
+            )
+        else:
+            success_probe, probe_attempts = await self._await_stage_with_heartbeat(
+                self._probe_candidates(
+                    probe_candidates,
+                    mode=mode,
+                    stop_on_first_success=True,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                ),
+                article=article,
+                mode=mode,
+                stage="probe",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"cand": len(probe_candidates)},
+            )
+        attempts = [*preflight_attempts, *(outcome.to_attempt() for outcome in probe_attempts)]
+        if success_probe is not None and success_probe.payload_bytes is None:
+            success_probe = await self._await_stage_with_heartbeat(
+                self._download_candidate_payload(success_probe.candidate, mode=mode),
+                article=article,
+                mode=mode,
+                stage="fetch",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"source": success_probe.candidate.source},
+            )
         if success_probe is not None and success_probe.payload_bytes is not None:
             file_path: str | None = None
             if target_dir is not None:
@@ -1532,40 +1794,63 @@ class PDFService:
         return None
 
     async def _crossref_pdf_links(self, doi: str) -> list[str]:
+        result = await self._crossref_source_map(doi)
+        return result["crossref"]
+
+    async def _fast_pmc_doi_source_map(self, doi: str) -> dict[str, list[str]]:
+        crossref_map = await self._crossref_source_map(doi)
+        return {
+            "unpaywall": [],
+            "europe_pmc": [],
+            "crossref": crossref_map["crossref"],
+            "crossref_elsevier_xml": crossref_map["crossref_elsevier_xml"],
+            "openalex": [],
+            "citation_pdf_url": [],
+            "doi_page": [],
+            "doi_landing": [],
+            "doi_guessed": [],
+        }
+
+    async def _crossref_source_map(self, doi: str) -> dict[str, list[str]]:
         try:
             await self.resolve_rate_limiter.wait()
             response = await self.http_client.get(
                 f"{self.settings.crossref_base_url}/works/{quote(doi, safe='')}",
                 headers={"User-Agent": self.settings.request_user_agent},
                 follow_redirects=True,
+                timeout=self._resolve_timeout(),
             )
             response.raise_for_status()
             message = response.json().get("message", {})
         except (httpx.HTTPError, ValueError):
-            return []
-        urls = []
+            return {"crossref": [], "crossref_elsevier_xml": []}
+        pdf_urls: list[str] = []
+        elsevier_xml_urls: list[str] = []
         for item in message.get("link", []):
             url = item.get("URL")
             if not url:
                 continue
             content_type = (item.get("content-type") or "").lower()
+            host = urlparse(url).netloc.lower()
             if "pdf" in content_type or "pdf" in url.lower():
-                urls.append(url)
-        return urls
+                pdf_urls.append(url)
+            elif host == "api.elsevier.com" and "text/xml" in content_type:
+                elsevier_xml_urls.append(url)
+        return {"crossref": pdf_urls, "crossref_elsevier_xml": elsevier_xml_urls}
 
     async def _doi_source_map(self, doi: str, *, mode: str) -> dict[str, list[str]]:
         unpaywall_task = asyncio.create_task(self._unpaywall_pdf_links(doi)) if mode == "balanced" else None
         europe_pmc_task = (
             asyncio.create_task(self._europe_pmc_fulltext_links(doi=doi)) if mode == "balanced" else None
         )
-        crossref_task = asyncio.create_task(self._crossref_pdf_links(doi))
+        crossref_task = asyncio.create_task(self._crossref_source_map(doi))
         openalex_task = asyncio.create_task(self._openalex_pdf_links(doi))
         landing_task = asyncio.create_task(self._doi_landing_source_map(doi)) if mode == "balanced" else None
         if mode == "balanced":
             (
                 unpaywall_links,
                 europe_pmc_links,
-                crossref_links,
+                crossref_map,
                 openalex_links,
                 landing_map,
             ) = await asyncio.gather(
@@ -1576,7 +1861,7 @@ class PDFService:
                 landing_task,
             )
         else:
-            crossref_links, openalex_links = await asyncio.gather(crossref_task, openalex_task)
+            crossref_map, openalex_links = await asyncio.gather(crossref_task, openalex_task)
             unpaywall_links = []
             europe_pmc_links = []
             landing_map = {"citation_pdf_url": [], "doi_page": [], "doi_landing": [], "doi_guessed": []}
@@ -1584,13 +1869,149 @@ class PDFService:
         return {
             "unpaywall": unpaywall_links,
             "europe_pmc": europe_pmc_links,
-            "crossref": crossref_links,
+            "crossref": crossref_map["crossref"],
+            "crossref_elsevier_xml": crossref_map["crossref_elsevier_xml"],
             "openalex": openalex_links,
             "citation_pdf_url": landing_map["citation_pdf_url"],
             "doi_page": landing_map["doi_page"],
             "doi_landing": landing_map["doi_landing"],
             "doi_guessed": landing_map["doi_guessed"],
         }
+
+    async def _landing_page_candidates_from_url(
+        self,
+        source: str,
+        landing_url: str,
+    ) -> list[PDFCandidate]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                landing_url,
+                headers={"User-Agent": self.settings.request_user_agent, "Accept": "text/html,*/*"},
+                follow_redirects=True,
+                timeout=self._resolve_timeout(),
+            )
+            response.raise_for_status()
+        except Exception:
+            return []
+
+        base_url = str(response.url)
+        html = response.text
+        candidates: list[PDFCandidate] = []
+        for url in self._extract_meta_pdf_urls_from_html(html, base_url):
+            candidates.append(PDFCandidate(source=f"{source}_citation_pdf_url", url=url))
+        meta_set = {candidate.url for candidate in candidates}
+        for url in self._extract_pdf_urls_from_html(html, base_url, include_meta=False):
+            if url in meta_set:
+                continue
+            candidates.append(PDFCandidate(source=f"{source}_page_pdf", url=url))
+        if self._looks_like_fulltext(html):
+            candidates.append(PDFCandidate(source=f"{source}_html_fulltext", url=base_url))
+        return candidates
+
+    async def _doaj_candidates(self, doi: str) -> list[PDFCandidate]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{DOAJ_SEARCH_URL}/{quote(f'doi:{doi}', safe='')}",
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+                timeout=self._resolve_timeout(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return []
+
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        candidates: list[PDFCandidate] = []
+        for result in results:
+            bibjson = result.get("bibjson", {}) if isinstance(result, dict) else {}
+            for item in bibjson.get("link", []) if isinstance(bibjson, dict) else []:
+                url = item.get("url")
+                if not url:
+                    continue
+                link_type = str(item.get("type") or "").lower()
+                lower = url.lower()
+                if ".pdf" in lower or "/pdf" in lower:
+                    candidates.append(PDFCandidate(source="doaj_pdf", url=url))
+                    continue
+                if "fulltext" in link_type or "html" in link_type or "/doi/" in lower:
+                    candidates.extend(await self._landing_page_candidates_from_url("doaj", url))
+        return candidates
+
+    async def _ncbi_linkout_candidates(self, pmid: str) -> list[PDFCandidate]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                f"{self.settings.ncbi_base_url}/elink.fcgi",
+                params={
+                    "dbfrom": "pubmed",
+                    "id": pmid,
+                    "cmd": "prlinks",
+                    "retmode": "json",
+                },
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+                timeout=self._resolve_timeout(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return []
+
+        candidates: list[PDFCandidate] = []
+        linksets = payload.get("linksets", []) if isinstance(payload, dict) else []
+        for linkset in linksets:
+            for idurllist in linkset.get("idurllist", []) if isinstance(linkset, dict) else []:
+                for objurl in idurllist.get("objurls", []) if isinstance(idurllist, dict) else []:
+                    url_value = ((objurl.get("url") or {}).get("value") or "").strip()
+                    if not url_value:
+                        continue
+                    categories = [str(item).lower() for item in objurl.get("categories") or []]
+                    if "full text sources" not in categories:
+                        continue
+                    lower = url_value.lower()
+                    if ".pdf" in lower or "/pdf" in lower:
+                        candidates.append(PDFCandidate(source="ncbi_linkout", url=url_value))
+                        continue
+                    candidates.extend(await self._landing_page_candidates_from_url("ncbi_linkout", url_value))
+        return candidates
+
+    async def _europe_pmc_repo_candidates(self, pmc_id: str) -> list[PDFCandidate]:
+        try:
+            await self.resolve_rate_limiter.wait()
+            response = await self.http_client.get(
+                EUROPE_PMC_REPO_URL,
+                params={"pmcId": pmc_id, "type": "METADATA"},
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+                timeout=self._resolve_timeout(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return []
+
+        version = int(float(payload.get("version") or 1))
+        candidates: list[PDFCandidate] = []
+        for file_item in payload.get("files") or []:
+            filename = str(file_item.get("filename") or "")
+            mime_type = str(file_item.get("mimeType") or "")
+            file_type = str(file_item.get("type") or "").lower()
+            if not filename or not mime_type:
+                continue
+            url = (
+                f"{EUROPE_PMC_REPO_URL}?pmcId={pmc_id}&type=FILE"
+                f"&fileName={quote(filename, safe='')}"
+                f"&mimeType={quote(mime_type, safe='')}"
+                f"&version={version}&pmc_pageType=pdf&pmc_domain=null"
+            )
+            if file_type == "pdf" or "pdf" in mime_type.lower():
+                candidates.append(PDFCandidate(source="europe_pmc_repo_pdf", url=url))
+            elif "xml" in mime_type.lower():
+                candidates.append(PDFCandidate(source="europe_pmc_repo_xml", url=url))
+        return candidates
 
     async def _doi_landing_source_map(self, doi: str) -> dict[str, list[str]]:
         landing_page = await self._fetch_doi_landing_page(doi)
@@ -1614,17 +2035,25 @@ class PDFService:
         }
 
     async def _pmc_oa_links(self, pmc_id: str) -> list[str]:
-        try:
-            await self.resolve_rate_limiter.wait()
-            response = await self.http_client.get(
-                self.settings.pmc_oa_base_url,
-                params={"id": pmc_id},
-                headers={"User-Agent": self.settings.request_user_agent},
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-            root = ET.fromstring(response.text)
-        except (httpx.HTTPError, ET.ParseError, ValueError):
+        root: ET.Element | None = None
+        for attempt in range(2):
+            try:
+                await self.resolve_rate_limiter.wait()
+                response = await self.http_client.get(
+                    self.settings.pmc_oa_base_url,
+                    params={"id": pmc_id},
+                    headers={"User-Agent": self.settings.request_user_agent},
+                    follow_redirects=True,
+                    timeout=self._resolve_timeout(),
+                )
+                response.raise_for_status()
+                root = ET.fromstring(response.text)
+                break
+            except (httpx.HTTPError, ET.ParseError, ValueError):
+                if attempt == 1:
+                    return []
+                await asyncio.sleep(0.2)
+        if root is None:
             return []
 
         urls: list[str] = []
@@ -1648,6 +2077,7 @@ class PDFService:
                 },
                 headers={"User-Agent": self.settings.request_user_agent},
                 follow_redirects=True,
+                timeout=self._resolve_timeout(),
             )
             response.raise_for_status()
             results = response.json().get("results", [])
@@ -1676,6 +2106,7 @@ class PDFService:
                 params={"email": self.settings.unpaywall_email},
                 headers={"User-Agent": self.settings.request_user_agent},
                 follow_redirects=True,
+                timeout=self._resolve_timeout(),
             )
             if response.status_code == 404:
                 return []
@@ -1729,6 +2160,7 @@ class PDFService:
                 },
                 headers={"User-Agent": self.settings.request_user_agent},
                 follow_redirects=True,
+                timeout=self._resolve_timeout(),
             )
             response.raise_for_status()
             payload = response.json()
@@ -1797,6 +2229,7 @@ class PDFService:
                 f"{self.settings.doi_resolver_base_url}/{quote(doi, safe='')}",
                 headers={"User-Agent": self.settings.request_user_agent, "Accept": "text/html,*/*"},
                 follow_redirects=True,
+                timeout=self._resolve_timeout(),
             )
         except httpx.HTTPError:
             return None
@@ -1854,6 +2287,73 @@ class PDFService:
             success_outcome = next((outcome for outcome in outcomes if outcome.success), None)
         return success_outcome, outcomes
 
+    async def _probe_fast_candidates_in_order(
+        self,
+        candidates: list[PDFCandidate],
+        *,
+        article: ArticleReference,
+        batch_id: str | None,
+        article_index: int | None,
+        article_total: int | None,
+    ) -> tuple[_ProbeOutcome | None, list[_ProbeOutcome]]:
+        if not candidates:
+            return None, []
+
+        attempts: list[_ProbeOutcome] = []
+        checked_urls: set[str] = set()
+        first_wave = candidates[:2]
+        if first_wave:
+            success_outcome, outcomes = await self._await_stage_with_heartbeat(
+                self._probe_candidates(
+                    first_wave,
+                    mode="fast",
+                    stop_on_first_success=True,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                ),
+                article=article,
+                mode="fast",
+                stage="probe",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"cand": len(first_wave)},
+            )
+            attempts.extend(outcomes)
+            checked_urls.update(candidate.url for candidate in first_wave)
+            if success_outcome is not None:
+                return success_outcome, attempts
+
+        for candidate in candidates:
+            if candidate.url in checked_urls:
+                continue
+            success_outcome, outcomes = await self._await_stage_with_heartbeat(
+                self._probe_candidates(
+                    [candidate],
+                    mode="fast",
+                    stop_on_first_success=True,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                ),
+                article=article,
+                mode="fast",
+                stage="probe",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+                extra_context={"cand": 1, "source": candidate.source},
+            )
+            attempts.extend(outcomes)
+            checked_urls.add(candidate.url)
+            if success_outcome is not None:
+                return success_outcome, attempts
+
+        return None, attempts
+
     async def _bounded_probe_candidate(
         self,
         candidate: PDFCandidate,
@@ -1902,30 +2402,14 @@ class PDFService:
                 ),
             )
         try:
-            response = await self.http_client.get(
-                candidate.url,
-                headers=self._download_headers(),
-                follow_redirects=True,
-                timeout=self._probe_timeout_seconds(mode, candidate.source),
-            )
-            content_type = response.headers.get("content-type", "").lower() or None
-            payload_bytes, payload_mode, content_kind, extension = await asyncio.to_thread(
-                self._extract_download_payload,
-                candidate.url,
-                content_type or "",
-                response.content,
-            )
-            if response.status_code != 200:
-                payload_bytes = None
-            outcome = _ProbeOutcome(
-                candidate=candidate,
-                status_code=response.status_code,
-                content_type=content_type,
-                mode=payload_mode,
-                payload_bytes=payload_bytes,
-                content_kind=content_kind,
-                extension=extension,
-            )
+            if self._probe_uses_full_body(candidate.source):
+                outcome = await self._download_candidate_payload(
+                    candidate,
+                    mode=mode,
+                    timeout=self._probe_timeout_seconds(mode, candidate.source),
+                )
+            else:
+                outcome = await self._probe_candidate_preview(candidate, mode=mode)
             if article is not None:
                 self._log_download_event(
                     "info",
@@ -1941,7 +2425,7 @@ class PDFService:
                         extra={
                             "source": candidate.source,
                             "ok": outcome.success,
-                            "code": response.status_code,
+                            "code": outcome.status_code,
                             "elapsed_ms": int((time.monotonic() - started) * 1000),
                         },
                     ),
@@ -1973,6 +2457,150 @@ class PDFService:
                     ),
                 )
             return outcome
+
+    @classmethod
+    def _probe_uses_full_body(cls, source: str) -> bool:
+        return (
+            source == "crossref_elsevier_xml"
+            or source == "europe_pmc_repo_xml"
+            or source.endswith("_html_fulltext")
+            or source.endswith("_xml_fulltext")
+        )
+
+    @staticmethod
+    def _response_looks_textual(content_type: str, preview_bytes: bytes) -> bool:
+        lowered = preview_bytes[:512].lower()
+        return (
+            "html" in content_type
+            or "xml" in content_type
+            or "text/plain" in content_type
+            or b"<html" in lowered
+            or b"<?xml" in lowered
+        )
+
+    async def _probe_candidate_preview(
+        self,
+        candidate: PDFCandidate,
+        *,
+        mode: str,
+    ) -> _ProbeOutcome:
+        headers = self._candidate_request_headers(candidate.source)
+        headers["Range"] = self._quick_probe_range_header(candidate.source)
+        timeout = self._probe_timeout_seconds(mode, candidate.source)
+        async with self.http_client.stream(
+            "GET",
+            candidate.url,
+            headers=headers,
+            follow_redirects=True,
+            timeout=timeout,
+        ) as response:
+            content_type = response.headers.get("content-type", "").lower() or None
+            preview = bytearray()
+            limit = (
+                self._quick_tgz_probe_max_bytes()
+                if candidate.source == "pmc_oa_tgz"
+                else self._quick_probe_read_limit(candidate.source, content_type or "")
+            )
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                remaining = limit - len(preview)
+                if remaining <= 0:
+                    break
+                preview.extend(chunk[:remaining])
+                if len(preview) >= limit:
+                    break
+            preview_bytes = bytes(preview)
+            if response.status_code in {200, 206} and (
+                candidate.source == "pmc_oa_tgz"
+                or "gzip" in (content_type or "")
+                or "x-gzip" in (content_type or "")
+            ):
+                return _ProbeOutcome(
+                    candidate=candidate,
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    mode="tgz_preview",
+                    payload_bytes=None,
+                    content_kind="pdf" if self._tgz_payload_has_pdf_entry(preview_bytes) else None,
+                    extension=".pdf" if self._tgz_payload_has_pdf_entry(preview_bytes) else None,
+                )
+            if self._response_looks_textual(content_type or "", preview_bytes):
+                async for chunk in response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    preview.extend(chunk)
+                full_bytes = bytes(preview)
+                payload_bytes, payload_mode, content_kind, extension = await asyncio.to_thread(
+                    self._extract_download_payload,
+                    candidate.url,
+                    content_type or "",
+                    full_bytes,
+                )
+                if response.status_code not in {200, 206}:
+                    payload_bytes = None
+                    content_kind = None
+                    extension = None
+                return _ProbeOutcome(
+                    candidate=candidate,
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    mode=payload_mode,
+                    payload_bytes=payload_bytes,
+                    content_kind=content_kind,
+                    extension=extension,
+                )
+            payload_mode = "preview"
+            content_kind: str | None = None
+            extension: str | None = None
+            if response.status_code in {200, 206}:
+                if self._is_pdf_payload(content_type or "", preview_bytes):
+                    payload_mode = "pdf_preview"
+                    content_kind = "pdf"
+                    extension = ".pdf"
+            return _ProbeOutcome(
+                candidate=candidate,
+                status_code=response.status_code,
+                content_type=content_type,
+                mode=payload_mode,
+                payload_bytes=None,
+                content_kind=content_kind,
+                extension=extension,
+            )
+
+    async def _download_candidate_payload(
+        self,
+        candidate: PDFCandidate,
+        *,
+        mode: str,
+        timeout: float | None = None,
+    ) -> _ProbeOutcome:
+        response = await self.http_client.get(
+            candidate.url,
+            headers=self._candidate_request_headers(candidate.source),
+            follow_redirects=True,
+            timeout=timeout or self._download_timeout_seconds(mode, candidate.source),
+        )
+        content_type = response.headers.get("content-type", "").lower() or None
+        payload_bytes, payload_mode, content_kind, extension = await asyncio.to_thread(
+            self._extract_download_payload,
+            candidate.url,
+            content_type or "",
+            response.content,
+        )
+        if response.status_code not in {200, 206}:
+            payload_bytes = None
+            content_kind = None
+            extension = None
+        return _ProbeOutcome(
+            candidate=candidate,
+            status_code=response.status_code,
+            content_type=content_type,
+            mode=payload_mode,
+            payload_bytes=payload_bytes,
+            content_kind=content_kind,
+            extension=extension,
+        )
 
     def _resolve_target_dir(self, download_dir: str | None) -> Path:
         if download_dir:
@@ -2070,6 +2698,15 @@ class PDFService:
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
             "Accept": "application/pdf,*/*",
         }
+
+    @classmethod
+    def _candidate_request_headers(cls, source: str) -> dict[str, str]:
+        headers = cls._download_headers()
+        if source == "crossref_elsevier_xml" or source.endswith("_xml_fulltext") or source == "europe_pmc_repo_xml":
+            headers["Accept"] = "application/xml,text/xml,*/*"
+        elif source.endswith("_html_fulltext"):
+            headers["Accept"] = "text/html,*/*"
+        return headers
 
     @staticmethod
     def _is_pdf_payload(content_type: str, content: bytes) -> bool:
@@ -2399,34 +3036,59 @@ class PDFService:
 
     @staticmethod
     def _is_fast_confidence_source(source: str) -> bool:
-        return source in {
-            "pmc_oa_pdf",
-            "pmc_direct",
-            "crossref",
-            "openalex",
-            "citation_pdf_url",
-            "unpaywall",
-            "europe_pmc",
-            "europepmc",
-        }
+        return (
+            source in {
+                "pmc_oa_pdf",
+                "pmc_oa_tgz",
+                "europe_pmc_repo_pdf",
+                "europe_pmc_repo_xml",
+                "crossref",
+                "crossref_elsevier_xml",
+                "openalex",
+                "citation_pdf_url",
+                "doaj_pdf",
+                "europe_pmc",
+                "europepmc",
+                "ncbi_linkout",
+            }
+            or source.endswith("_citation_pdf_url")
+            or source.endswith("_page_pdf")
+            or source.endswith("_html_fulltext")
+        )
 
     @classmethod
     def _rank_fast_candidates(cls, candidates: list[PDFCandidate]) -> list[PDFCandidate]:
         priority = {
             "pmc_oa_pdf": 0,
-            "pmc_direct": 1,
-            "crossref": 2,
-            "openalex": 3,
-            "citation_pdf_url": 4,
-            "europe_pmc": 5,
-            "europepmc": 5,
-            "unpaywall": 6,
+            "pmc_oa_tgz": 1,
+            "europe_pmc_repo_pdf": 2,
+            "europe_pmc_repo_xml": 3,
+            "crossref": 10,
+            "crossref_elsevier_xml": 12,
+            "ncbi_linkout": 13,
+            "citation_pdf_url": 14,
+            "doaj_pdf": 16,
+            "openalex": 20,
+            "europe_pmc": 30,
+            "europepmc": 30,
+            "pmc_direct": 90,
         }
         preferred = [
             candidate for candidate in candidates
             if cls._is_fast_confidence_source(candidate.source)
         ]
-        preferred.sort(key=lambda candidate: (priority.get(candidate.source, 99), candidate.url))
+        def sort_key(candidate: PDFCandidate) -> tuple[int, str]:
+            source = candidate.source
+            base_priority = priority.get(source, 99)
+            if source.endswith("_citation_pdf_url"):
+                base_priority = min(base_priority, 14)
+            elif source.endswith("_page_pdf"):
+                base_priority = min(base_priority, 15)
+            elif source.endswith("_html_fulltext"):
+                base_priority = min(base_priority, 18)
+            return base_priority, candidate.url
+
+        preferred.sort(key=sort_key)
         return preferred
 
     @classmethod
@@ -2442,23 +3104,38 @@ class PDFService:
 
         preferred = cls._rank_fast_candidates(candidates)
         if preferred:
-            shortlist = preferred[:4]
-            return shortlist
+            return preferred
 
         if article.pmc_id:
             pmc_candidates = [
                 candidate
                 for candidate in candidates
-                if candidate.source in {"pmc_oa_pdf", "pmc_direct"}
+                if candidate.source in {"pmc_oa_pdf", "pmc_oa_tgz", "europe_pmc_repo_pdf", "europe_pmc_repo_xml", "pmc_direct"}
             ]
             if pmc_candidates:
-                return pmc_candidates[:2]
+                return pmc_candidates
 
-        return candidates[:3]
+        return candidates
 
 
     @staticmethod
+    def _download_timeout_seconds(mode: str, source: str) -> float:
+        if source == "europe_pmc_repo_pdf":
+            return 60.0 if mode == "fast" else 75.0
+        if source == "pmc_oa_tgz":
+            return 25.0 if mode == "fast" else 35.0
+        if source in {"crossref_elsevier_xml", "europe_pmc_repo_xml"} or source.endswith("_html_fulltext"):
+            return 25.0 if mode == "fast" else 35.0
+        if source.startswith("pmc_oa"):
+            return 15.0 if mode == "fast" else 25.0
+        return 20.0 if mode == "fast" else 30.0
+
+    @staticmethod
     def _probe_timeout_seconds(mode: str, source: str) -> float:
+        if source == "europe_pmc_repo_pdf":
+            return 45.0 if mode == "fast" else 50.0
+        if source in {"crossref_elsevier_xml", "europe_pmc_repo_xml"} or source.endswith("_html_fulltext"):
+            return 20.0 if mode == "fast" else 30.0
         if source.startswith("pmc_oa"):
             return 3.0 if mode == "fast" else 8.0
         if source in {

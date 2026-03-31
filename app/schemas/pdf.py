@@ -41,7 +41,7 @@ class PDFDownloadRequest(BaseModel):
     articles: list[ArticleReference]
     download_dir: str | None = None
     max_articles: int | None = Field(default=None, ge=1)
-    mode: Literal["fast", "balanced"] = "balanced"
+    mode: Literal["fast", "balanced"] = "fast"
     use_browser_fallback: bool = False
 
 
@@ -95,7 +95,7 @@ class PDFTestRequest(BaseModel):
     batch_size: int | None = Field(default=None, ge=1, le=250)
     download_dir: str | None = None
     save_files: bool = True
-    mode: Literal["fast", "balanced"] = "balanced"
+    mode: Literal["fast", "balanced"] = "fast"
     use_browser_fallback: bool = False
 
 

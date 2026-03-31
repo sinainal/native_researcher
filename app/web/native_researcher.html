@@ -63,6 +63,24 @@
           <div id="sidebarPanelTitle" class="native-sidebar-title">Queries</div>
         </div>
         <div id="sidebarQueriesPanel" class="native-sidebar-panel-body">
+          <div class="native-query-quick-card">
+            <div class="native-query-quick-title">Quick PubMed Query</div>
+            <div class="native-query-quick-copy">Run a small OA-aware search directly from the sidebar.</div>
+            <textarea
+              id="sidebarQuickQuery"
+              class="native-query-quick-input"
+              rows="3"
+              placeholder="Paste a PubMed query"
+            ></textarea>
+            <div class="native-query-quick-actions">
+              <label class="native-query-quick-field" for="sidebarQuickMaxResults">
+                <span>Max</span>
+                <input id="sidebarQuickMaxResults" class="native-query-quick-max" type="number" value="5" min="1" max="50">
+              </label>
+              <button id="sidebarQuickSearchBtn" class="btn btn-primary btn-sm" type="button">Run Query</button>
+            </div>
+            <div id="sidebarQuickStatus" class="native-query-quick-status">Uses the same OA-aware PubMed search and downloader.</div>
+          </div>
           <div class="native-workspace-library">
             <div class="native-workspace-library-head">
               <div class="native-workspace-library-label">Queries</div>
@@ -91,7 +109,7 @@
             <div id="workspaceDownloadList" class="native-workspace-library-list">
               <div class="native-workspace-library-empty">
                 <div class="native-workspace-library-empty-title">No papers yet</div>
-                <div class="native-workspace-library-empty-copy">Downloaded PDFs for this project will appear here.</div>
+                <div class="native-workspace-library-empty-copy">Downloaded files for this project will appear here.</div>
               </div>
             </div>
           </div>
@@ -171,8 +189,7 @@
                 <span class="native-inline-stat"><strong id="articleCount">0</strong> articles</span>
                 <span class="native-inline-stat"><strong id="selectedCount">0</strong> selected</span>
               </div>
-              <button id="quickDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Quick</button>
-              <button id="deepDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Deep Download</button>
+              <button id="quickDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Download Selected</button>
               <button id="clearSelectionBtn" class="btn btn-ghost btn-sm" disabled>Clear Selection</button>
               <button id="selectAllBtn" class="btn btn-ghost btn-sm" disabled>Select All</button>
             </div>
@@ -383,44 +400,6 @@
       </div>
     </form>
   </section>
-  <div id="deepDownloadOverlay" class="detail-popup-overlay" hidden></div>
-  <section id="deepDownloadPopup" class="detail-popup deep-download-popup" hidden role="dialog" aria-modal="true" aria-labelledby="deepDownloadTitle">
-    <div class="detail-popup-head deep-download-popup-head">
-      <div class="detail-popup-headcopy">
-        <div class="detail-popup-eyebrow">Selection Download</div>
-        <h3 id="deepDownloadTitle" class="detail-popup-title">Deep download</h3>
-        <div class="detail-popup-meta">Fast pass first. Remaining papers are retried with deeper retrieval.</div>
-      </div>
-      <button id="deepDownloadClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-        </svg>
-      </button>
-    </div>
-    <div class="detail-popup-body deep-download-body">
-      <div class="deep-download-topline">
-        <div>
-          <div id="deepDownloadStage" class="deep-download-stage">Preparing…</div>
-          <div id="deepDownloadProgressText" class="deep-download-progress-text">0 / 0</div>
-        </div>
-        <div id="deepDownloadElapsed" class="deep-download-elapsed">00:00</div>
-      </div>
-      <div class="deep-download-bar-shell" aria-hidden="true">
-        <span id="deepDownloadBarFill" class="deep-download-bar-fill"></span>
-      </div>
-      <div class="deep-download-stats">
-        <span class="deep-download-stat"><strong id="deepDownloadSuccessCount">0</strong> downloaded</span>
-        <span class="deep-download-stat"><strong id="deepDownloadRetryCount">0</strong> retrying</span>
-        <span class="deep-download-stat"><strong id="deepDownloadFailedCount">0</strong> failed</span>
-      </div>
-      <div id="deepDownloadCurrent" class="deep-download-current">Waiting for selected papers.</div>
-      <div id="deepDownloadRecent" class="deep-download-recent"></div>
-      <div class="api-keys-actions deep-download-actions">
-        <button id="deepDownloadDoneBtn" class="btn btn-primary btn-sm" type="button" disabled>Running…</button>
-      </div>
-    </div>
-  </section>
-
   <script src="/static/native_researcher.js"></script>
 </body>
 

@@ -1,4 +1,7 @@
 const landingEls = {
+  createProjectForm: document.getElementById("createProjectForm"),
+  createProjectNameInput: document.getElementById("createProjectNameInput"),
+  createProjectButton: document.getElementById("createProjectButton"),
   projectList: document.getElementById("projectList"),
 };
 
@@ -79,11 +82,11 @@ function projectOpenUrl(projectId) {
   return `/native_researcher?project=${encodeURIComponent(projectId)}`;
 }
 
-async function createProjectAndOpen() {
+async function createProjectAndOpen(projectName = "") {
   try {
     const project = await landingFetchJson("/app/projects", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ name: String(projectName || "").trim() }),
     });
     if (!project?.id) return;
     localStorage.setItem(activeProjectStorageKey, project.id);
@@ -94,20 +97,51 @@ async function createProjectAndOpen() {
   }
 }
 
+async function deleteProject(projectId, projectName) {
+  const label = String(projectName || "this project").trim();
+  const confirmed = window.confirm(`Delete ${label}?`);
+  if (!confirmed) return;
+  try {
+    await landingFetchJson(`/app/projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE",
+    });
+    if (localStorage.getItem(activeProjectStorageKey) === projectId) {
+      localStorage.removeItem(activeProjectStorageKey);
+    }
+    await loadProjects();
+  } catch (error) {
+    trackLandingEvent("error", "project_delete_failed", error.message || "Project deletion failed.", {
+      project_id: projectId,
+    });
+    throw error;
+  }
+}
+
 function projectCardMarkup(project) {
   return `
-    <button class="landing-minimal-project" type="button" data-project-id="${project.id}">
-      <span class="landing-minimal-project-name">${escapeHtml(project.name)}</span>
-      <span class="landing-minimal-project-time">${formatRelativeTime(project.updated_at)}</span>
-    </button>
+    <div class="landing-minimal-project">
+      <button class="landing-minimal-project-main" type="button" data-project-id="${project.id}">
+        <span class="landing-minimal-project-name">${escapeHtml(project.name)}</span>
+        <span class="landing-minimal-project-time">${formatRelativeTime(project.updated_at)}</span>
+      </button>
+      <button
+        class="landing-minimal-project-delete"
+        type="button"
+        data-delete-project="${project.id}"
+        data-project-name="${escapeHtml(project.name)}"
+        aria-label="Delete ${escapeHtml(project.name)}"
+      >
+        Delete
+      </button>
+    </div>
   `;
 }
 
 function emptyProjectsMarkup() {
   return `
-    <div class="landing-minimal-empty">
+      <div class="landing-minimal-empty">
       <div class="landing-minimal-empty-title">No recent projects</div>
-      <button class="landing-minimal-empty-link" type="button" data-create-project="true">Open Project 1</button>
+      <button class="landing-minimal-empty-link" type="button" data-create-project="true">New project</button>
     </div>
   `;
 }
@@ -126,8 +160,15 @@ function renderProjects(projects) {
       window.location.href = projectOpenUrl(projectId);
     });
   });
+  landingEls.projectList.querySelectorAll("[data-delete-project]").forEach((node) => {
+    node.addEventListener("click", () => {
+      const projectId = node.dataset.deleteProject;
+      if (!projectId) return;
+      void deleteProject(projectId, node.dataset.projectName || "");
+    });
+  });
   landingEls.projectList.querySelector("[data-create-project]")?.addEventListener("click", () => {
-    void createProjectAndOpen();
+    void createProjectAndOpen(landingEls.createProjectNameInput?.value || "");
   });
 }
 
@@ -143,6 +184,10 @@ async function loadProjects() {
 
 function initLanding() {
   bindLandingErrorLogging();
+  landingEls.createProjectForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void createProjectAndOpen(landingEls.createProjectNameInput?.value || "");
+  });
   void loadProjects();
   window.addEventListener("pageshow", () => {
     void loadProjects();

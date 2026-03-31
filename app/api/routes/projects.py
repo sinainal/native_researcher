@@ -18,8 +18,7 @@ router = APIRouter(prefix="/app/projects", tags=["projects"])
 
 
 def get_project_service(request: Request) -> ProjectService:
-    settings = request.app.state.settings
-    return ProjectService(settings.workspace_root)
+    return request.app.state.project_service
 
 
 def log_project_event(request: Request, level: str, event: str, message: str, **context: object) -> None:
@@ -104,6 +103,22 @@ async def update_project(project_id: str, payload: ProjectUpdateRequest, request
         request,
         "info",
         "project_renamed",
+        project.name,
+        project_id=project.id,
+    )
+    return project
+
+
+@router.delete("/{project_id}", response_model=ProjectSummary)
+async def delete_project(project_id: str, request: Request) -> ProjectSummary:
+    service = get_project_service(request)
+    project = service.delete_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    log_project_event(
+        request,
+        "info",
+        "project_deleted",
         project.name,
         project_id=project.id,
     )

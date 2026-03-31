@@ -51,6 +51,7 @@ class PubMedService:
                 request_count=result.request_count,
                 elapsed_ms=result.elapsed_ms,
                 cache_hit=False,
+                oa_only=result.oa_only,
             ),
             articles=result.articles,
         )
@@ -58,8 +59,7 @@ class PubMedService:
             self.cache.set(cache_key, response.model_copy(deep=True))
         return response
 
-    @staticmethod
-    def _cache_key(request: PubMedSearchRequest) -> str:
+    def _cache_key(self, request: PubMedSearchRequest) -> str:
         return "|".join(
             [
                 request.query.strip().lower(),
@@ -69,6 +69,7 @@ class PubMedService:
                 str(request.batch_size or ""),
                 str(request.min_cite or ""),
                 (request.article_type or "").strip().lower(),
+                str(bool(getattr(self.client.settings, "pubmed_oa_only", False))),
             ]
         )
 

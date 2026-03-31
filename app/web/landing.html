@@ -18,7 +18,20 @@
   <main class="landing-minimal-shell">
     <section class="landing-minimal-panel" aria-label="Recent projects">
       <div class="landing-minimal-kicker">Native Researcher</div>
-      <h1 class="landing-minimal-title">Recent projects</h1>
+      <div class="landing-minimal-head">
+        <h1 class="landing-minimal-title">Recent projects</h1>
+        <form id="createProjectForm" class="landing-minimal-create-form">
+          <input
+            id="createProjectNameInput"
+            class="landing-minimal-create-input"
+            type="text"
+            maxlength="200"
+            placeholder="Project name"
+            autocomplete="off"
+          >
+          <button id="createProjectButton" class="landing-minimal-create" type="submit">New project</button>
+        </form>
+      </div>
       <div id="projectList" class="landing-minimal-list" aria-live="polite"></div>
     </section>
   </main>

@@ -7,10 +7,14 @@ import io
 import re
 import tarfile
 import tempfile
+import time
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Awaitable, TypeVar
 from urllib.parse import quote, urljoin, urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -27,9 +31,12 @@ from app.schemas.pdf import (
     PDFTestAttempt,
     PDFTestResult,
 )
+from app.services.app_event_log_service import AppEventLogService
 from app.utils.cache import TTLCache
 from app.utils.files import ensure_unique_path, sanitize_filename
 from app.utils.rate_limit import AsyncRateLimiter
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -377,10 +384,16 @@ class PDFService:
         http_client: httpx.AsyncClient,
         settings: Settings,
         candidate_cache: TTLCache[str, list[PDFCandidate]],
+        event_log_service: AppEventLogService | None = None,
     ) -> None:
         self.http_client = http_client
         self.settings = settings
         self.candidate_cache = candidate_cache
+        self.event_log_service = event_log_service
+        self.availability_cache: TTLCache[str, PDFAvailabilityItem] = TTLCache(
+            ttl_seconds=min(settings.pdf_cache_ttl_seconds, 900),
+            max_entries=max(512, settings.pdf_cache_max_entries * 4),
+        )
         self.resolve_rate_limiter = AsyncRateLimiter(settings.pdf_resolve_requests_per_second)
 
     async def resolve(self, article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
@@ -394,48 +407,71 @@ class PDFService:
         return PDFResolveResponse(article=article, candidates=candidates, cache_hit=False)
 
     async def quick_availability(self, articles: list[ArticleReference]) -> PDFAvailabilityResponse:
-        semaphore = asyncio.Semaphore(4)
+        semaphore = asyncio.Semaphore(36)
 
         async def run_single(article: ArticleReference) -> PDFAvailabilityItem:
+            cache_key = self._availability_cache_key(article)
+            cached = self.availability_cache.get(cache_key)
+            if cached is not None:
+                return cached.model_copy(deep=True)
             async with semaphore:
                 resolved = await self.resolve(article, mode="fast")
-                preferred = [
-                    candidate for candidate in resolved.candidates
-                    if self._is_fast_confidence_source(candidate.source)
-                ]
+                preferred = self._rank_fast_candidates(resolved.candidates)
                 if not preferred:
                     detail = "Only weak or deep-only signals were found."
                     if not resolved.candidates:
                         detail = "No fast candidates were found."
-                    return PDFAvailabilityItem(
+                    result = PDFAvailabilityItem(
                         article=article,
                         ready=False,
                         candidate_count=len(resolved.candidates),
                         detail=detail,
                     )
+                    self.availability_cache.set(cache_key, result)
+                    return result
 
                 verified_source = await self._quick_verify_candidates(preferred[:3])
                 if verified_source is None:
-                    return PDFAvailabilityItem(
+                    verified_source = await self._quick_verify_second_pass(article, resolved.candidates)
+                if verified_source is None:
+                    result = PDFAvailabilityItem(
                         article=article,
                         ready=False,
                         candidate_count=len(resolved.candidates),
-                        detail="Fast verification did not find a downloadable PDF.",
+                        detail="Fast verification did not find a downloadable full text candidate.",
                     )
-                return PDFAvailabilityItem(
+                    self.availability_cache.set(cache_key, result)
+                    return result
+                result = PDFAvailabilityItem(
                     article=article,
                     ready=True,
                     source=verified_source,
                     candidate_count=len(resolved.candidates),
-                    detail="Fast verification confirmed a downloadable PDF.",
+                    detail="Fast verification confirmed downloadable full text.",
                 )
+                self.availability_cache.set(cache_key, result)
+                return result
 
         return PDFAvailabilityResponse(items=await asyncio.gather(*(run_single(article) for article in articles)))
+
+    async def _quick_verify_second_pass(
+        self,
+        article: ArticleReference,
+        candidates: list[PDFCandidate],
+    ) -> str | None:
+        if not article.pmc_id:
+            return None
+        if not any(candidate.source == "openalex" for candidate in candidates):
+            return None
+        tgz_candidates = [candidate for candidate in candidates if candidate.source == "pmc_oa_tgz"]
+        if not tgz_candidates:
+            return None
+        return await self._quick_verify_candidates(tgz_candidates[:1])
 
     async def _quick_verify_candidates(self, candidates: list[PDFCandidate]) -> str | None:
         if not candidates:
             return None
-        semaphore = asyncio.Semaphore(3)
+        semaphore = asyncio.Semaphore(6)
 
         async def run_single(candidate: PDFCandidate) -> str | None:
             async with semaphore:
@@ -456,32 +492,43 @@ class PDFService:
 
     async def _quick_probe_candidate(self, candidate: PDFCandidate) -> str | None:
         headers = self._download_headers()
-        headers["Range"] = "bytes=0-65535"
+        headers["Range"] = self._quick_probe_range_header(candidate.source)
         try:
             async with self.http_client.stream(
                 "GET",
                 candidate.url,
                 headers=headers,
                 follow_redirects=True,
-                timeout=2.0,
+                timeout=self._probe_timeout_seconds("fast", candidate.source),
             ) as response:
                 if response.status_code not in {200, 206}:
                     return None
                 content_type = (response.headers.get("content-type") or "").lower()
-                if "pdf" in content_type:
-                    return candidate.source
-                if "gzip" in content_type or candidate.source == "pmc_oa_tgz":
-                    return None
+                if candidate.source == "pmc_oa_tgz" or "gzip" in content_type or "x-gzip" in content_type:
+                    return candidate.source if await self._quick_probe_tgz_stream(response) else None
                 buffer = bytearray()
                 async for chunk in response.aiter_bytes():
                     buffer.extend(chunk)
-                    if len(buffer) >= 4096:
+                    if len(buffer) >= self._quick_probe_read_limit(candidate.source, content_type):
                         break
-                if buffer.startswith(b"%PDF"):
+                payload_bytes, _payload_mode, content_kind, _extension = self._extract_download_payload(
+                    candidate.url,
+                    content_type,
+                    bytes(buffer),
+                )
+                if payload_bytes is not None and content_kind in {"pdf", "html_fulltext", "xml_fulltext", "text_fulltext"}:
                     return candidate.source
         except Exception:
             return None
         return None
+
+    async def _quick_probe_tgz_stream(self, response: httpx.Response) -> bool:
+        buffer = bytearray()
+        async for chunk in response.aiter_bytes():
+            buffer.extend(chunk)
+            if len(buffer) >= self._quick_tgz_probe_max_bytes():
+                break
+        return self._tgz_payload_has_pdf_entry(bytes(buffer))
 
     async def download_articles(self, request: PDFDownloadRequest) -> PDFDownloadResponse:
         target_dir = self._resolve_target_dir(request.download_dir)
@@ -489,29 +536,107 @@ class PDFService:
         articles = request.articles[: request.max_articles] if request.max_articles else request.articles
         enable_browser = request.use_browser_fallback or request.mode == "balanced"
         semaphore = asyncio.Semaphore(self._download_concurrency(request.mode))
+        batch_id = self._new_batch_id()
+        batch_started = time.monotonic()
+        self._log_download_event(
+            "info",
+            "pdf_download_batch_start",
+            "PDF download batch started.",
+            context={
+                "batch": batch_id,
+                "mode": request.mode,
+                "total": len(articles),
+                "browser": enable_browser,
+            },
+        )
         browser_runtime = await self._prepare_browser_runtime(enable_browser)
 
-        async def run_single(article: ArticleReference) -> PDFDownloadResult:
+        async def run_single(index: int, article: ArticleReference) -> tuple[int, PDFDownloadResult]:
             async with semaphore:
-                return await self._download_single_article(
+                result = await self._download_single_article(
                     article,
                     target_dir,
                     mode=request.mode,
                     use_browser_fallback=enable_browser,
                     browser_runtime=browser_runtime,
+                    batch_id=batch_id,
+                    article_index=index + 1,
+                    article_total=len(articles),
                 )
+                return index, result
 
         try:
-            results = await asyncio.gather(*(run_single(article) for article in articles))
+            pending = {
+                asyncio.create_task(run_single(index, article))
+                for index, article in enumerate(articles)
+            }
+            results: list[PDFDownloadResult | None] = [None] * len(articles)
+            success_count = 0
+            completed_count = 0
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=15.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    self._log_download_event(
+                        "info",
+                        "pdf_download_batch_heartbeat",
+                        "PDF download batch still running.",
+                        context={
+                            "batch": batch_id,
+                            "mode": request.mode,
+                            "done": completed_count,
+                            "total": len(articles),
+                            "pending": len(pending),
+                            "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
+                        },
+                    )
+                    continue
+                for task in done:
+                    index, result = await task
+                    results[index] = result
+                    completed_count += 1
+                    if result.success:
+                        success_count += 1
+                    self._log_download_event(
+                        "info",
+                        "pdf_download_progress",
+                        "PDF download article completed.",
+                        context={
+                            "batch": batch_id,
+                            "mode": request.mode,
+                            "done": completed_count,
+                            "total": len(articles),
+                            "ok": result.success,
+                            "article": self._article_log_key(result.article),
+                            "source": result.source or "-",
+                        },
+                    )
         finally:
             if browser_runtime is not None:
                 await browser_runtime.close()
-        success_count = sum(1 for item in results if item.success)
+        finalized = [item for item in results if item is not None]
+        success_count = sum(1 for item in finalized if item.success)
+        self._log_download_event(
+            "info",
+            "pdf_download_batch_done",
+            "PDF download batch finished.",
+            context={
+                "batch": batch_id,
+                "mode": request.mode,
+                "total": len(finalized),
+                "ok": success_count,
+                "fail": len(finalized) - success_count,
+                "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
+            },
+        )
         return PDFDownloadResponse(
-            total=len(results),
+            total=len(finalized),
             success_count=success_count,
-            failed_count=len(results) - success_count,
-            results=results,
+            failed_count=len(finalized) - success_count,
+            results=finalized,
         )
 
     async def diagnose_articles(
@@ -536,21 +661,98 @@ class PDFService:
 
         enable_browser = use_browser_fallback or mode == "balanced"
         semaphore = asyncio.Semaphore(self._download_concurrency(mode))
+        batch_id = self._new_batch_id()
+        batch_started = time.monotonic()
+        self._log_download_event(
+            "info",
+            "pdf_diagnose_batch_start",
+            "PDF diagnose batch started.",
+            context={
+                "batch": batch_id,
+                "mode": mode,
+                "total": len(articles),
+                "browser": enable_browser,
+                "save": save_files,
+            },
+        )
         browser_runtime = await self._prepare_browser_runtime(enable_browser)
 
-        async def run_single(article: ArticleReference) -> PDFTestResult:
+        async def run_single(index: int, article: ArticleReference) -> tuple[int, PDFTestResult]:
             async with semaphore:
-                return await self._diagnose_single_article(
+                result = await self._diagnose_single_article(
                     article,
                     target_dir,
                     mode=mode,
                     use_browser_fallback=enable_browser,
                     expose_file_path=save_files,
                     browser_runtime=browser_runtime,
+                    batch_id=batch_id,
+                    article_index=index + 1,
+                    article_total=len(articles),
                 )
+                return index, result
 
         try:
-            return await asyncio.gather(*(run_single(article) for article in articles))
+            pending = {
+                asyncio.create_task(run_single(index, article))
+                for index, article in enumerate(articles)
+            }
+            results: list[PDFTestResult | None] = [None] * len(articles)
+            completed_count = 0
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=15.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    self._log_download_event(
+                        "info",
+                        "pdf_diagnose_batch_heartbeat",
+                        "PDF diagnose batch still running.",
+                        context={
+                            "batch": batch_id,
+                            "mode": mode,
+                            "done": completed_count,
+                            "total": len(articles),
+                            "pending": len(pending),
+                            "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
+                        },
+                    )
+                    continue
+                for task in done:
+                    index, result = await task
+                    results[index] = result
+                    completed_count += 1
+                    self._log_download_event(
+                        "info",
+                        "pdf_diagnose_progress",
+                        "PDF diagnose article completed.",
+                        context={
+                            "batch": batch_id,
+                            "mode": mode,
+                            "done": completed_count,
+                            "total": len(articles),
+                            "ok": result.success,
+                            "article": self._article_log_key(result.article),
+                            "reason": result.reason,
+                        },
+                    )
+            finalized = [item for item in results if item is not None]
+            self._log_download_event(
+                "info",
+                "pdf_diagnose_batch_done",
+                "PDF diagnose batch finished.",
+                context={
+                    "batch": batch_id,
+                    "mode": mode,
+                    "total": len(finalized),
+                    "ok": sum(1 for item in finalized if item.success),
+                    "fail": sum(1 for item in finalized if not item.success),
+                    "elapsed_ms": int((time.monotonic() - batch_started) * 1000),
+                },
+            )
+            return finalized
         finally:
             if browser_runtime is not None:
                 await browser_runtime.close()
@@ -565,12 +767,50 @@ class PDFService:
         mode: str = "fast",
         use_browser_fallback: bool = False,
         browser_runtime: _BrowserFallbackRuntime | None = None,
+        batch_id: str | None = None,
+        article_index: int | None = None,
+        article_total: int | None = None,
     ) -> PDFDownloadResult:
-        resolved = await self.resolve(article, mode=mode)
-        success_probe, _attempts = await self._probe_candidates(
-            resolved.candidates,
+        article_started = time.monotonic()
+        self._log_download_event(
+            "info",
+            "pdf_download_article_start",
+            "PDF download article started.",
+            context=self._article_trace_context(
+                article,
+                batch_id=batch_id,
+                mode=mode,
+                article_index=article_index,
+                article_total=article_total,
+            ),
+        )
+        resolved = await self._await_stage_with_heartbeat(
+            self.resolve(article, mode=mode),
+            article=article,
             mode=mode,
-            stop_on_first_success=True,
+            stage="resolve",
+            batch_id=batch_id,
+            article_index=article_index,
+            article_total=article_total,
+        )
+        probe_candidates = self._download_probe_candidates(article, resolved.candidates, mode=mode)
+        success_probe, _attempts = await self._await_stage_with_heartbeat(
+            self._probe_candidates(
+                probe_candidates,
+                mode=mode,
+                stop_on_first_success=True,
+                article=article,
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+            ),
+            article=article,
+            mode=mode,
+            stage="probe",
+            batch_id=batch_id,
+            article_index=article_index,
+            article_total=article_total,
+            extra_context={"cand": len(probe_candidates)},
         )
         if success_probe is not None and success_probe.payload_bytes is not None:
             file_path = self._build_file_path(
@@ -590,24 +830,84 @@ class PDFService:
                 content_type=success_probe.content_type,
                 candidate_count=len(resolved.candidates),
             )
+            self._log_download_event(
+                "info",
+                "pdf_download_article_done",
+                "PDF download article succeeded.",
+                context=self._article_trace_context(
+                    article,
+                    batch_id=batch_id,
+                    mode=mode,
+                    article_index=article_index,
+                    article_total=article_total,
+                    extra={
+                        "source": success_probe.candidate.source,
+                        "cand": len(resolved.candidates),
+                        "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                    },
+                ),
+            )
+            return result
 
         if use_browser_fallback:
-            browser_result = await self._download_with_browser_fallback(
-                article,
-                target_dir,
+            browser_result = await self._await_stage_with_heartbeat(
+                self._download_with_browser_fallback(
+                    article,
+                    target_dir,
+                    mode=mode,
+                    browser_runtime=browser_runtime,
+                ),
+                article=article,
                 mode=mode,
-                browser_runtime=browser_runtime,
+                stage="browser",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
             )
             if browser_result is not None:
                 browser_result.candidate_count = len(resolved.candidates)
+                self._log_download_event(
+                    "info",
+                    "pdf_download_article_done",
+                    "PDF download article succeeded via browser.",
+                    context=self._article_trace_context(
+                        article,
+                        batch_id=batch_id,
+                        mode=mode,
+                        article_index=article_index,
+                        article_total=article_total,
+                        extra={
+                            "source": browser_result.source or "browser",
+                            "cand": len(resolved.candidates),
+                            "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                        },
+                    ),
+                )
                 return browser_result
 
-        return PDFDownloadResult(
+        result = PDFDownloadResult(
             article=article,
             success=False,
             candidate_count=len(resolved.candidates),
             error="No downloadable PDF candidate succeeded.",
         )
+        self._log_download_event(
+            "warning",
+            "pdf_download_article_done",
+            "PDF download article failed.",
+            context=self._article_trace_context(
+                article,
+                batch_id=batch_id,
+                mode=mode,
+                article_index=article_index,
+                article_total=article_total,
+                extra={
+                    "cand": len(resolved.candidates),
+                    "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                },
+            ),
+        )
+        return result
 
     async def _build_candidates(self, article: ArticleReference, *, mode: str) -> list[PDFCandidate]:
         candidates: list[PDFCandidate] = []
@@ -621,6 +921,7 @@ class PDFService:
 
         pmc_task: asyncio.Task[list[str]] | None = None
         europe_pmc_task: asyncio.Task[list[str]] | None = None
+        doi_task: asyncio.Task[dict[str, list[str]]] | None = None
         pmc = article.pmc_id.upper() if article.pmc_id else None
         if article.pmc_id:
             pmc_task = asyncio.create_task(self._pmc_oa_links(pmc))
@@ -630,6 +931,8 @@ class PDFService:
                 add_candidate("europe_pmc_article", f"https://europepmc.org/articles/{pmc}")
                 add_candidate("pmc_article_html", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/")
             add_candidate("pmc_direct", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/pdf/")
+        if article.doi:
+            doi_task = asyncio.create_task(self._doi_source_map(article.doi, mode=mode))
 
         pmc_links: list[str] = []
         if pmc_task is not None:
@@ -642,8 +945,8 @@ class PDFService:
             return candidates
 
         doi_source_map: dict[str, list[str]] = {}
-        if article.doi:
-            doi_source_map = await self._doi_source_map(article.doi, mode=mode)
+        if doi_task is not None:
+            doi_source_map = await doi_task
             if mode == "balanced":
                 for url in doi_source_map.get("unpaywall", []):
                     add_candidate("unpaywall", url)
@@ -677,12 +980,50 @@ class PDFService:
         use_browser_fallback: bool = False,
         expose_file_path: bool = True,
         browser_runtime: _BrowserFallbackRuntime | None = None,
+        batch_id: str | None = None,
+        article_index: int | None = None,
+        article_total: int | None = None,
     ) -> PDFTestResult:
-        resolved = await self.resolve(article, mode=mode)
-        success_probe, probe_attempts = await self._probe_candidates(
-            resolved.candidates,
+        article_started = time.monotonic()
+        self._log_download_event(
+            "info",
+            "pdf_diagnose_article_start",
+            "PDF diagnose article started.",
+            context=self._article_trace_context(
+                article,
+                batch_id=batch_id,
+                mode=mode,
+                article_index=article_index,
+                article_total=article_total,
+            ),
+        )
+        resolved = await self._await_stage_with_heartbeat(
+            self.resolve(article, mode=mode),
+            article=article,
             mode=mode,
-            stop_on_first_success=True,
+            stage="resolve",
+            batch_id=batch_id,
+            article_index=article_index,
+            article_total=article_total,
+        )
+        probe_candidates = self._download_probe_candidates(article, resolved.candidates, mode=mode)
+        success_probe, probe_attempts = await self._await_stage_with_heartbeat(
+            self._probe_candidates(
+                probe_candidates,
+                mode=mode,
+                stop_on_first_success=True,
+                article=article,
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+            ),
+            article=article,
+            mode=mode,
+            stage="probe",
+            batch_id=batch_id,
+            article_index=article_index,
+            article_total=article_total,
+            extra_context={"cand": len(probe_candidates)},
         )
         attempts = [outcome.to_attempt() for outcome in probe_attempts]
         if success_probe is not None and success_probe.payload_bytes is not None:
@@ -697,7 +1038,7 @@ class PDFService:
                 output_path.write_bytes(success_probe.payload_bytes)
                 file_path = str(output_path)
 
-            return PDFTestResult(
+            result = PDFTestResult(
                 article=article,
                 success=True,
                 reason="downloadable",
@@ -709,13 +1050,40 @@ class PDFService:
                 candidate_count=len(resolved.candidates),
                 attempts=attempts,
             )
+            self._log_download_event(
+                "info",
+                "pdf_diagnose_article_done",
+                "PDF diagnose article succeeded.",
+                context=self._article_trace_context(
+                    article,
+                    batch_id=batch_id,
+                    mode=mode,
+                    article_index=article_index,
+                    article_total=article_total,
+                    extra={
+                        "reason": "downloadable",
+                        "source": success_probe.candidate.source,
+                        "cand": len(resolved.candidates),
+                        "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                    },
+                ),
+            )
+            return result
 
         if use_browser_fallback and target_dir is not None:
-            browser_result = await self._download_with_browser_fallback(
-                article,
-                target_dir,
+            browser_result = await self._await_stage_with_heartbeat(
+                self._download_with_browser_fallback(
+                    article,
+                    target_dir,
+                    mode=mode,
+                    browser_runtime=browser_runtime,
+                ),
+                article=article,
                 mode=mode,
-                browser_runtime=browser_runtime,
+                stage="browser",
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
             )
             if browser_result is not None:
                 attempts.append(
@@ -728,7 +1096,7 @@ class PDFService:
                         success=True,
                     )
                 )
-                return PDFTestResult(
+                result = PDFTestResult(
                     article=article,
                     success=True,
                     reason="downloadable",
@@ -740,14 +1108,51 @@ class PDFService:
                     candidate_count=len(resolved.candidates),
                     attempts=attempts,
                 )
+                self._log_download_event(
+                    "info",
+                    "pdf_diagnose_article_done",
+                    "PDF diagnose article succeeded via browser.",
+                    context=self._article_trace_context(
+                        article,
+                        batch_id=batch_id,
+                        mode=mode,
+                        article_index=article_index,
+                        article_total=article_total,
+                        extra={
+                            "reason": "downloadable",
+                            "source": browser_result.source or "browser",
+                            "cand": len(resolved.candidates),
+                            "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                        },
+                    ),
+                )
+                return result
 
-        return PDFTestResult(
+        result = PDFTestResult(
             article=article,
             success=False,
             reason=self._diagnostic_reason(attempts),
             candidate_count=len(resolved.candidates),
             attempts=attempts,
         )
+        self._log_download_event(
+            "warning",
+            "pdf_diagnose_article_done",
+            "PDF diagnose article failed.",
+            context=self._article_trace_context(
+                article,
+                batch_id=batch_id,
+                mode=mode,
+                article_index=article_index,
+                article_total=article_total,
+                extra={
+                    "reason": result.reason,
+                    "cand": len(resolved.candidates),
+                    "elapsed_ms": int((time.monotonic() - article_started) * 1000),
+                },
+            ),
+        )
+        return result
 
     async def _prepare_browser_runtime(
         self,
@@ -778,6 +1183,155 @@ class PDFService:
 
     def _uses_mock_transport(self) -> bool:
         return isinstance(getattr(self.http_client, "_transport", None), httpx.MockTransport)
+
+    async def _await_stage_with_heartbeat(
+        self,
+        awaitable: Awaitable[_T],
+        *,
+        article: ArticleReference,
+        mode: str,
+        stage: str,
+        batch_id: str | None,
+        article_index: int | None,
+        article_total: int | None,
+        extra_context: dict[str, Any] | None = None,
+        heartbeat_seconds: float = 15.0,
+    ) -> _T:
+        should_trace = self.event_log_service is not None
+        if not should_trace:
+            return await awaitable
+
+        started = time.monotonic()
+        self._log_download_event(
+            "info",
+            "pdf_download_stage_start",
+            f"Download stage {stage} started.",
+            context=self._article_trace_context(
+                article,
+                batch_id=batch_id,
+                mode=mode,
+                article_index=article_index,
+                article_total=article_total,
+                stage=stage,
+                extra=extra_context,
+            ),
+        )
+        task = asyncio.create_task(awaitable)
+        beats = 0
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=heartbeat_seconds)
+                if task in done:
+                    result = await task
+                    self._log_download_event(
+                        "info",
+                        "pdf_download_stage_done",
+                        f"Download stage {stage} finished.",
+                        context=self._article_trace_context(
+                            article,
+                            batch_id=batch_id,
+                            mode=mode,
+                            article_index=article_index,
+                            article_total=article_total,
+                            stage=stage,
+                            extra={
+                                **(extra_context or {}),
+                                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                            },
+                        ),
+                    )
+                    return result
+                beats += 1
+                self._log_download_event(
+                    "info",
+                    "pdf_download_stage_wait",
+                    f"Download stage {stage} still running.",
+                    context=self._article_trace_context(
+                        article,
+                        batch_id=batch_id,
+                        mode=mode,
+                        article_index=article_index,
+                        article_total=article_total,
+                        stage=stage,
+                        extra={
+                            **(extra_context or {}),
+                            "beat": beats,
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        },
+                    ),
+                )
+        except Exception as exc:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self._log_download_event(
+                "error",
+                "pdf_download_stage_error",
+                f"Download stage {stage} failed.",
+                context=self._article_trace_context(
+                    article,
+                    batch_id=batch_id,
+                    mode=mode,
+                    article_index=article_index,
+                    article_total=article_total,
+                    stage=stage,
+                    extra={
+                        **(extra_context or {}),
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "err": f"{type(exc).__name__}: {exc}",
+                    },
+                ),
+            )
+            raise
+
+    def _log_download_event(
+        self,
+        level: str,
+        event: str,
+        message: str,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        if self.event_log_service is None:
+            return
+        self.event_log_service.log(level, event, message, context=context)
+
+    @staticmethod
+    def _new_batch_id() -> str:
+        return uuid4().hex[:10]
+
+    @staticmethod
+    def _article_log_key(article: ArticleReference) -> str:
+        return (
+            article.pmid
+            or article.pmc_id
+            or article.doi
+            or (article.title or "article")[:48]
+        )
+
+    def _article_trace_context(
+        self,
+        article: ArticleReference,
+        *,
+        batch_id: str | None,
+        mode: str,
+        article_index: int | None,
+        article_total: int | None,
+        stage: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "batch": batch_id or "-",
+            "mode": mode,
+            "article": self._article_log_key(article),
+        }
+        if article_index is not None and article_total is not None:
+            context["idx"] = f"{article_index}/{article_total}"
+        if stage:
+            context["stage"] = stage
+        if extra:
+            context.update(extra)
+        return context
 
     def _browser_fallback_download_sync(
         self,
@@ -1257,13 +1811,27 @@ class PDFService:
         *,
         mode: str,
         stop_on_first_success: bool,
+        article: ArticleReference | None = None,
+        batch_id: str | None = None,
+        article_index: int | None = None,
+        article_total: int | None = None,
     ) -> tuple[_ProbeOutcome | None, list[_ProbeOutcome]]:
         if not candidates:
             return None, []
 
         semaphore = asyncio.Semaphore(self._candidate_concurrency(mode))
         tasks = [
-            asyncio.create_task(self._bounded_probe_candidate(candidate, semaphore, mode=mode))
+            asyncio.create_task(
+                self._bounded_probe_candidate(
+                    candidate,
+                    semaphore,
+                    mode=mode,
+                    article=article,
+                    batch_id=batch_id,
+                    article_index=article_index,
+                    article_total=article_total,
+                )
+            )
             for candidate in candidates
         ]
         outcomes: list[_ProbeOutcome] = []
@@ -1292,11 +1860,47 @@ class PDFService:
         semaphore: asyncio.Semaphore,
         *,
         mode: str,
+        article: ArticleReference | None,
+        batch_id: str | None,
+        article_index: int | None,
+        article_total: int | None,
     ) -> _ProbeOutcome:
         async with semaphore:
-            return await self._probe_candidate(candidate, mode=mode)
+            return await self._probe_candidate(
+                candidate,
+                mode=mode,
+                article=article,
+                batch_id=batch_id,
+                article_index=article_index,
+                article_total=article_total,
+            )
 
-    async def _probe_candidate(self, candidate: PDFCandidate, *, mode: str) -> _ProbeOutcome:
+    async def _probe_candidate(
+        self,
+        candidate: PDFCandidate,
+        *,
+        mode: str,
+        article: ArticleReference | None,
+        batch_id: str | None,
+        article_index: int | None,
+        article_total: int | None,
+    ) -> _ProbeOutcome:
+        started = time.monotonic()
+        if article is not None:
+            self._log_download_event(
+                "info",
+                "pdf_download_candidate_start",
+                "Download candidate probe started.",
+                context=self._article_trace_context(
+                    article,
+                    batch_id=batch_id,
+                    mode=mode,
+                    article_index=article_index,
+                    article_total=article_total,
+                    stage="candidate",
+                    extra={"source": candidate.source},
+                ),
+            )
         try:
             response = await self.http_client.get(
                 candidate.url,
@@ -1305,14 +1909,15 @@ class PDFService:
                 timeout=self._probe_timeout_seconds(mode, candidate.source),
             )
             content_type = response.headers.get("content-type", "").lower() or None
-            payload_bytes, payload_mode, content_kind, extension = self._extract_download_payload(
+            payload_bytes, payload_mode, content_kind, extension = await asyncio.to_thread(
+                self._extract_download_payload,
                 candidate.url,
                 content_type or "",
                 response.content,
             )
             if response.status_code != 200:
                 payload_bytes = None
-            return _ProbeOutcome(
+            outcome = _ProbeOutcome(
                 candidate=candidate,
                 status_code=response.status_code,
                 content_type=content_type,
@@ -1321,11 +1926,53 @@ class PDFService:
                 content_kind=content_kind,
                 extension=extension,
             )
+            if article is not None:
+                self._log_download_event(
+                    "info",
+                    "pdf_download_candidate_done",
+                    "Download candidate probe finished.",
+                    context=self._article_trace_context(
+                        article,
+                        batch_id=batch_id,
+                        mode=mode,
+                        article_index=article_index,
+                        article_total=article_total,
+                        stage="candidate",
+                        extra={
+                            "source": candidate.source,
+                            "ok": outcome.success,
+                            "code": response.status_code,
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        },
+                    ),
+                )
+            return outcome
         except Exception as exc:
-            return _ProbeOutcome(
+            outcome = _ProbeOutcome(
                 candidate=candidate,
                 error=f"{type(exc).__name__}: {exc}",
             )
+            if article is not None:
+                self._log_download_event(
+                    "warning",
+                    "pdf_download_candidate_done",
+                    "Download candidate probe failed.",
+                    context=self._article_trace_context(
+                        article,
+                        batch_id=batch_id,
+                        mode=mode,
+                        article_index=article_index,
+                        article_total=article_total,
+                        stage="candidate",
+                        extra={
+                            "source": candidate.source,
+                            "ok": False,
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                            "err": f"{type(exc).__name__}: {exc}",
+                        },
+                    ),
+                )
+            return outcome
 
     def _resolve_target_dir(self, download_dir: str | None) -> Path:
         if download_dir:
@@ -1473,6 +2120,30 @@ class PDFService:
             if pdf_bytes.startswith(b"%PDF"):
                 return pdf_bytes
         return None
+
+    @staticmethod
+    def _tgz_payload_has_pdf_entry(content: bytes) -> bool:
+        try:
+            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            preview = decompressor.decompress(content, 4 * 1024 * 1024)
+        except zlib.error:
+            return False
+
+        offset = 0
+        while offset + 512 <= len(preview):
+            header = preview[offset:offset + 512]
+            if header == b"\0" * 512:
+                break
+            name = header[:100].split(b"\0", 1)[0].decode("utf-8", errors="ignore").lower()
+            size_raw = header[124:136].split(b"\0", 1)[0].strip() or b"0"
+            try:
+                size = int(size_raw, 8)
+            except ValueError:
+                break
+            if name.endswith(".pdf"):
+                return True
+            offset += 512 + ((size + 511) // 512) * 512
+        return False
 
     @staticmethod
     def _decode_text(content: bytes) -> str:
@@ -1720,16 +2391,17 @@ class PDFService:
 
     @staticmethod
     def _download_concurrency(mode: str) -> int:
-        return 20 if mode == "fast" else 12
+        return 20 if mode == "fast" else 16
 
     @staticmethod
     def _candidate_concurrency(mode: str) -> int:
-        return 6 if mode == "fast" else 5
+        return 6 if mode == "fast" else 6
 
     @staticmethod
     def _is_fast_confidence_source(source: str) -> bool:
         return source in {
             "pmc_oa_pdf",
+            "pmc_direct",
             "crossref",
             "openalex",
             "citation_pdf_url",
@@ -1738,10 +2410,57 @@ class PDFService:
             "europepmc",
         }
 
+    @classmethod
+    def _rank_fast_candidates(cls, candidates: list[PDFCandidate]) -> list[PDFCandidate]:
+        priority = {
+            "pmc_oa_pdf": 0,
+            "pmc_direct": 1,
+            "crossref": 2,
+            "openalex": 3,
+            "citation_pdf_url": 4,
+            "europe_pmc": 5,
+            "europepmc": 5,
+            "unpaywall": 6,
+        }
+        preferred = [
+            candidate for candidate in candidates
+            if cls._is_fast_confidence_source(candidate.source)
+        ]
+        preferred.sort(key=lambda candidate: (priority.get(candidate.source, 99), candidate.url))
+        return preferred
+
+    @classmethod
+    def _download_probe_candidates(
+        cls,
+        article: ArticleReference,
+        candidates: list[PDFCandidate],
+        *,
+        mode: str,
+    ) -> list[PDFCandidate]:
+        if mode != "fast":
+            return candidates
+
+        preferred = cls._rank_fast_candidates(candidates)
+        if preferred:
+            shortlist = preferred[:4]
+            return shortlist
+
+        if article.pmc_id:
+            pmc_candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.source in {"pmc_oa_pdf", "pmc_direct"}
+            ]
+            if pmc_candidates:
+                return pmc_candidates[:2]
+
+        return candidates[:3]
+
+
     @staticmethod
     def _probe_timeout_seconds(mode: str, source: str) -> float:
         if source.startswith("pmc_oa"):
-            return 4.0 if mode == "fast" else 8.0
+            return 3.0 if mode == "fast" else 8.0
         if source in {
             "crossref",
             "openalex",
@@ -1753,5 +2472,37 @@ class PDFService:
             "doi_page",
             "doi_landing",
         }:
-            return 2.5 if mode == "fast" else 5.0
-        return 2.0 if mode == "fast" else 4.0
+            if mode == "fast" and source in {"openalex", "citation_pdf_url"}:
+                return 2.2
+            return 2.0 if mode == "fast" else 5.0
+        return 1.5 if mode == "fast" else 4.0
+
+    @staticmethod
+    def _quick_probe_range_header(source: str) -> str:
+        if source == "pmc_oa_tgz":
+            return f"bytes=0-{PDFService._quick_tgz_probe_max_bytes() - 1}"
+        return "bytes=0-65535"
+
+    @staticmethod
+    def _quick_probe_read_limit(source: str, content_type: str) -> int:
+        if "html" in content_type or "xml" in content_type or "text/plain" in content_type:
+            return 65536
+        if source in {"openalex", "citation_pdf_url", "crossref", "pmc_direct", "pmc_oa_pdf"}:
+            return 16384
+        return 8192
+
+    @staticmethod
+    def _quick_tgz_probe_max_bytes() -> int:
+        return 524288
+
+    @staticmethod
+    def _availability_cache_key(article: ArticleReference) -> str:
+        return "|".join(
+            [
+                article.pmid or "",
+                article.doi or "",
+                article.pmc_id or "",
+                article.title or "",
+                article.year or "",
+            ]
+        )

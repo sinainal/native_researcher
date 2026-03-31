@@ -51,7 +51,7 @@ async def verify_fast_availability(
 ) -> PDFAvailabilityResponse:
     service = get_pdf_service(request)
     try:
-        return await service.quick_availability(payload.articles[:24])
+        return await service.quick_availability(payload.articles[:50])
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

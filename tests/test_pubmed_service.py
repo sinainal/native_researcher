@@ -6,7 +6,7 @@ import asyncio
 
 import httpx
 
-from app.clients.ncbi import NcbiClient
+from app.clients.ncbi import NcbiClient, build_pubmed_query
 from app.core.config import Settings
 from app.schemas.pubmed import PubMedSearchRequest
 from app.services.pubmed_service import PubMedService
@@ -19,6 +19,12 @@ PUBMED_XML = """<?xml version="1.0"?>
     <MedlineCitation>
       <PMID>11</PMID>
       <Article>
+        <ArticleTitle>Article One</ArticleTitle>
+        <Journal>
+          <JournalIssue>
+            <PubDate><Year>2024</Year><Month>Jan</Month></PubDate>
+          </JournalIssue>
+        </Journal>
         <Abstract>
           <AbstractText>Abstract one.</AbstractText>
         </Abstract>
@@ -35,6 +41,12 @@ PUBMED_XML = """<?xml version="1.0"?>
     <MedlineCitation>
       <PMID>22</PMID>
       <Article>
+        <ArticleTitle>Article Two</ArticleTitle>
+        <Journal>
+          <JournalIssue>
+            <PubDate><Year>2023</Year></PubDate>
+          </JournalIssue>
+        </Journal>
         <Abstract>
           <AbstractText Label="RESULTS">Abstract two.</AbstractText>
         </Abstract>
@@ -58,6 +70,7 @@ def test_pubmed_service_uses_cache_and_history() -> None:
             calls.append(request.url.path)
             if request.url.path.endswith("/esearch.fcgi"):
                 assert request.url.params["usehistory"] == "y"
+                assert "free full text[sb]" in request.url.params["term"]
                 return httpx.Response(
                     200,
                     json={
@@ -65,17 +78,6 @@ def test_pubmed_service_uses_cache_and_history() -> None:
                             "count": "2",
                             "querykey": "1",
                             "webenv": "abc",
-                        }
-                    },
-                )
-            if request.url.path.endswith("/esummary.fcgi"):
-                return httpx.Response(
-                    200,
-                    json={
-                        "result": {
-                            "uids": ["11", "22"],
-                            "11": {"uid": "11", "title": "Article One", "pubdate": "2024 Jan"},
-                            "22": {"uid": "22", "title": "Article Two", "pubdate": "2023"},
                         }
                     },
                 )
@@ -101,12 +103,26 @@ def test_pubmed_service_uses_cache_and_history() -> None:
 
         assert first.meta.cache_hit is False
         assert second.meta.cache_hit is True
+        assert first.meta.oa_only is True
         assert len(first.articles) == 2
         assert first.articles[0].pmc_id == "PMC11"
         assert first.articles[1].doi == "10.1000/two"
         assert sum(path.endswith("/esearch.fcgi") for path in calls) == 1
-        assert sum(path.endswith("/esummary.fcgi") for path in calls) == 1
+        assert sum(path.endswith("/esummary.fcgi") for path in calls) == 0
         assert sum(path.endswith("/efetch.fcgi") for path in calls) == 1
         assert sum(path.endswith("/elink.fcgi") for path in calls) == 1
 
     asyncio.run(runner())
+
+
+def test_build_pubmed_query_applies_oa_filter_only_once() -> None:
+    assert build_pubmed_query("serotonin receptor", None, None, oa_only=True) == (
+        "(serotonin receptor) AND free full text[sb]"
+    )
+    assert build_pubmed_query("serotonin receptor AND free full text[sb]", None, None, oa_only=True) == (
+        "serotonin receptor AND free full text[sb]"
+    )
+    assert build_pubmed_query("serotonin receptor", 2020, 2024, oa_only=True) == (
+        '(serotonin receptor) AND free full text[sb] AND ("2020/01/01"[Date - Publication] : '
+        '"2024/12/31"[Date - Publication])'
+    )

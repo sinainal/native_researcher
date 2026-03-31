@@ -26,6 +26,7 @@ from app.services.helper_ai_service import HelperAIService
 from app.services.helper_log_service import HelperLogService
 from app.services.native_researcher_service import NativeResearcherService
 from app.services.pdf_service import PDFService
+from app.services.project_service import ProjectService
 from app.services.pubmed_service import PubMedService
 from app.utils.cache import TTLCache
 
@@ -61,6 +62,7 @@ def create_app(
             app.state.helper_service = injected_helper_service
             app.state.batch_llm_service = injected_batch_llm_service
             app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
+            app.state.project_service = ProjectService(resolved_settings.workspace_root)
             app.state.native_helper_service = NativeResearcherService(
                 thread_cache=TTLCache(
                     ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -86,6 +88,7 @@ def create_app(
                 timeout=timeout,
                 headers={"User-Agent": resolved_settings.request_user_agent},
             )
+        app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
         app.state.settings = resolved_settings
         app.state.pubmed_service = injected_pubmed_service or PubMedService(
             client=NcbiClient(ncbi_client, resolved_settings),  # type: ignore[arg-type]
@@ -101,6 +104,7 @@ def create_app(
                 ttl_seconds=resolved_settings.pdf_cache_ttl_seconds,
                 max_entries=resolved_settings.pdf_cache_max_entries,
             ),
+            event_log_service=app_event_log_service,
         )
         app.state.helper_service = injected_helper_service or HelperAIService(
             thread_cache=TTLCache(
@@ -110,7 +114,8 @@ def create_app(
             pubmed_service=app.state.pubmed_service,
             log_service=HelperLogService(resolved_settings.helper_log_path),
         )
-        app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
+        app.state.app_event_log_service = app_event_log_service
+        app.state.project_service = ProjectService(resolved_settings.workspace_root)
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -142,6 +147,7 @@ def create_app(
         app.state.helper_service = injected_helper_service
         app.state.batch_llm_service = injected_batch_llm_service
         app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
+        app.state.project_service = ProjectService(resolved_settings.workspace_root)
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,

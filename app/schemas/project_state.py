@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from app.schemas.article import Article
@@ -35,4 +37,7 @@ class ProjectStatePayload(BaseModel):
     detail_article_id: int | None = Field(default=None, ge=1)
     sidebar_panel: str = Field(default="queries", max_length=32)
     query_detail_id: str | None = Field(default=None, max_length=120)
+    downloadability_cache: dict[str, dict[str, Any]] = Field(default_factory=dict)
     query_history: list[ProjectQueryRecord] = Field(default_factory=list)
+    current_session_id: str | None = Field(default=None, max_length=120)
+    assistant_sessions: list[dict[str, Any]] = Field(default_factory=list)

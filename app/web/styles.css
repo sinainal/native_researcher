@@ -3165,6 +3165,18 @@ select {
   color: #26448a;
 }
 
+.native-toolbar-link-btn.is-active {
+  color: #1f3f86;
+}
+
+.native-toolbar-link-btn.is-active:not(:disabled) {
+  text-shadow: 0 0 0 rgba(0, 0, 0, 0);
+}
+
+#deepDownloadSelectedBtn.is-active {
+  color: #21468f;
+}
+
 .native-toolbar-link-btn:disabled {
   opacity: 0.38;
   cursor: default;
@@ -3685,6 +3697,121 @@ select {
   max-width: 220px;
   font-size: 0.8rem;
   line-height: 1.6;
+}
+
+.native-settings-shell {
+  min-height: 0;
+}
+
+.native-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.native-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(221, 228, 239, 0.88);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.native-settings-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.native-settings-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.native-settings-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #20304a;
+}
+
+.native-settings-description {
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: #71809a;
+}
+
+.native-settings-description code {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(219, 234, 254, 0.7);
+  color: #26448a;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
+.native-settings-note {
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: #60708b;
+}
+
+.native-settings-action {
+  width: 100%;
+  justify-content: center;
+}
+
+.native-settings-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.native-settings-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.native-settings-switch-ui {
+  position: relative;
+  width: 48px;
+  height: 28px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  box-shadow: inset 0 1px 3px rgba(15, 23, 42, 0.16);
+  transition: background .16s ease;
+}
+
+.native-settings-switch-ui::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+  transition: transform .16s ease;
+}
+
+.native-settings-switch input:checked + .native-settings-switch-ui {
+  background: #26448a;
+}
+
+.native-settings-switch input:checked + .native-settings-switch-ui::after {
+  transform: translateX(20px);
+}
+
+.native-settings-switch input:focus-visible + .native-settings-switch-ui {
+  outline: 0;
+  box-shadow: 0 0 0 4px rgba(96, 112, 139, 0.18);
 }
 
 .native-query-detail-card {
@@ -4984,6 +5111,62 @@ select {
   color: #111827;
 }
 
+.landing-minimal-head {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.landing-minimal-create-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.landing-minimal-create-input {
+  width: min(240px, 42vw);
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid rgba(225, 231, 240, 0.96);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #1f2937;
+  font: inherit;
+  font-size: 0.9rem;
+  letter-spacing: -0.02em;
+  outline: none;
+  transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+}
+
+.landing-minimal-create-input::placeholder {
+  color: #94a3b8;
+}
+
+.landing-minimal-create-input:focus {
+  border-color: rgba(191, 219, 254, 0.98);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 4px rgba(191, 219, 254, 0.18);
+}
+
+.landing-minimal-create {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #5f6f86;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  cursor: pointer;
+  transition: color .16s ease, opacity .16s ease;
+}
+
+.landing-minimal-create:hover {
+  color: #111827;
+}
+
 .landing-minimal-list {
   margin-top: 20px;
   display: flex;
@@ -4994,17 +5177,13 @@ select {
 .landing-minimal-project {
   width: 100%;
   min-height: 60px;
-  padding: 0 18px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
+  align-items: stretch;
+  gap: 8px;
   border: 1px solid rgba(225, 231, 240, 0.96);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.76);
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
   transition: border-color .16s ease, background .16s ease, transform .16s ease, box-shadow .16s ease;
 }
 
@@ -5013,6 +5192,38 @@ select {
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 28px rgba(148, 163, 184, 0.08);
   transform: translateY(-1px);
+}
+
+.landing-minimal-project-main,
+.landing-minimal-project-delete {
+  border: none;
+  background: transparent;
+  font: inherit;
+}
+
+.landing-minimal-project-main {
+  min-width: 0;
+  padding: 0 0 0 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.landing-minimal-project-delete {
+  padding: 0 18px 0 0;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  cursor: pointer;
+  transition: color .16s ease;
+}
+
+.landing-minimal-project-delete:hover {
+  color: #475569;
 }
 
 .landing-minimal-project-name {
@@ -5073,10 +5284,32 @@ select {
     border-radius: 22px;
   }
 
+  .landing-minimal-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .landing-minimal-create-form {
+    width: 100%;
+  }
+
+  .landing-minimal-create-input {
+    width: 100%;
+    min-width: 0;
+  }
+
   .landing-minimal-project {
     min-height: 56px;
-    padding: 0 14px;
     border-radius: 16px;
+  }
+
+  .landing-minimal-project-main {
+    padding-left: 14px;
+  }
+
+  .landing-minimal-project-delete {
+    padding-right: 14px;
   }
 }
 
@@ -5219,6 +5452,144 @@ select {
   justify-content: flex-end;
   gap: 10px;
   padding-top: 4px;
+}
+
+.deep-download-popup {
+  width: min(620px, calc(100vw - 40px));
+  max-height: min(72vh, 700px);
+}
+
+.deep-download-popup-head {
+  align-items: center;
+}
+
+.deep-download-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.deep-download-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.deep-download-stage {
+  color: #60708b;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.deep-download-progress-text {
+  margin-top: 6px;
+  color: #0f172a;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
+.deep-download-elapsed {
+  color: #64748b;
+  font-size: 0.86rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.deep-download-bar-shell {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.92);
+  overflow: hidden;
+}
+
+.deep-download-bar-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(84, 116, 197, 0.92), rgba(125, 152, 221, 0.92));
+  transition: width 180ms ease;
+}
+
+.deep-download-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.deep-download-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: #f5f7fb;
+  border: 1px solid #edf1f7;
+  color: #60708b;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.deep-download-current {
+  min-height: 24px;
+  color: #334155;
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.deep-download-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deep-download-recent-item {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.deep-download-recent-item.success {
+  background: rgba(241, 245, 249, 0.96);
+}
+
+.deep-download-recent-item.failed {
+  background: rgba(255, 247, 247, 0.94);
+}
+
+.deep-download-recent-item.queued {
+  background: rgba(247, 249, 252, 0.96);
+}
+
+.deep-download-recent-status {
+  color: #64748b;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.deep-download-recent-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 0.9rem;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.deep-download-actions {
+  padding-top: 0;
 }
 
 .native-results-card {

@@ -17,6 +17,7 @@ from app.utils.rate_limit import AsyncRateLimiter
 @dataclass
 class PubMedFetchResult:
     full_query: str
+    oa_only: bool
     total_results_found: int
     batch_size_used: int
     request_count: int
@@ -48,7 +49,13 @@ class NcbiClient:
             self.settings.pubmed_max_batch_size,
             requested_results,
         )
-        full_query = build_pubmed_query(query, year_start, year_end)
+        full_query = build_pubmed_query(
+            query,
+            year_start,
+            year_end,
+            oa_only=self.settings.pubmed_oa_only,
+        )
+        oa_only = pubmed_query_has_oa_filter(full_query)
 
         async def request_json(path: str, params: dict[str, str | int]) -> dict:
             nonlocal request_count
@@ -90,17 +97,20 @@ class NcbiClient:
             if not pmids:
                 return {}
             try:
-                xml_text = await request_text(
-                    "/elink.fcgi",
-                    {
-                        "dbfrom": "pubmed",
-                        "db": "pubmed",
-                        "id": ",".join(pmids),
-                        "linkname": "pubmed_pubmed",
-                        "retmode": "xml",
-                    },
+                xml_text = await asyncio.wait_for(
+                    request_text(
+                        "/elink.fcgi",
+                        {
+                            "dbfrom": "pubmed",
+                            "db": "pubmed",
+                            "id": ",".join(pmids),
+                            "linkname": "pubmed_pubmed",
+                            "retmode": "xml",
+                        },
+                    ),
+                    timeout=4.0,
                 )
-            except httpx.HTTPError:
+            except (asyncio.TimeoutError, httpx.HTTPError):
                 return {}
             return parse_related_articles_xml(xml_text)
 
@@ -120,6 +130,7 @@ class NcbiClient:
         if total_results_found == 0:
             return PubMedFetchResult(
                 full_query=full_query,
+                oa_only=oa_only,
                 total_results_found=0,
                 batch_size_used=batch_size_used,
                 request_count=request_count,
@@ -133,14 +144,6 @@ class NcbiClient:
         articles: list[Article] = []
 
         async def fetch_batch(retstart: int, current_batch: int, start_index: int) -> list[Article]:
-            summary_params = {
-                "db": "pubmed",
-                "query_key": query_key,
-                "WebEnv": webenv,
-                "retmode": "json",
-                "retstart": retstart,
-                "retmax": current_batch,
-            }
             fetch_params = {
                 "db": "pubmed",
                 "query_key": query_key,
@@ -151,7 +154,6 @@ class NcbiClient:
                 "retmax": current_batch,
             }
             try:
-                summary_data = await request_json("/esummary.fcgi", summary_params)
                 fetch_text = await request_text("/efetch.fcgi", fetch_params)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
@@ -166,8 +168,10 @@ class NcbiClient:
                     )
                     return [*left_articles, *right_articles]
                 raise
-            batch_articles = self._merge_summary_and_fetch(summary_data, fetch_text, start_index)
-            related_map = await request_related_map([article.pmid for article in batch_articles])
+            parsed_fetch = parse_pubmed_fetch_xml(fetch_text)
+            related_task = asyncio.create_task(request_related_map(list(parsed_fetch.keys())))
+            batch_articles = self._merge_summary_and_fetch(None, parsed_fetch, start_index)
+            related_map = await related_task
             for article in batch_articles:
                 article.related_articles = related_map.get(article.pmid, [])
             return batch_articles
@@ -190,6 +194,7 @@ class NcbiClient:
 
         return PubMedFetchResult(
             full_query=full_query,
+            oa_only=oa_only,
             total_results_found=total_results_found,
             batch_size_used=batch_size_used,
             request_count=request_count,
@@ -204,11 +209,10 @@ class NcbiClient:
         return params
 
     def _merge_summary_and_fetch(
-        self, summary_data: dict, fetch_text: str, start_index: int
+        self, summary_data: dict | None, parsed_fetch: dict[str, dict[str, object]], start_index: int
     ) -> list[Article]:
-        parsed_fetch = parse_pubmed_fetch_xml(fetch_text)
-        result = summary_data.get("result", {})
-        uids = result.get("uids", [])
+        result = (summary_data or {}).get("result", {})
+        uids = result.get("uids", []) or list(parsed_fetch.keys())
         articles: list[Article] = []
         for offset, uid in enumerate(uids, start=1):
             summary = result.get(uid, {})
@@ -217,9 +221,9 @@ class NcbiClient:
                 Article(
                     id=start_index + offset,
                     pmid=uid,
-                    title=summary.get("title", "Title not available"),
+                    title=details.get("title") or summary.get("title") or "Title not available",
                     abstract=(details.get("abstract") or "").strip(),
-                    year=extract_year(summary.get("pubdate", "")),
+                    year=extract_year(str(details.get("publication_date") or summary.get("pubdate") or "")),
                     journal=details.get("journal") or summary.get("fulljournalname"),
                     publication_date=(details.get("publication_date") or summary.get("pubdate") or None),
                     article_type=details.get("article_type"),
@@ -322,17 +326,39 @@ class NcbiClient:
             return None
 
 
-def build_pubmed_query(query: str, year_start: int | None, year_end: int | None) -> str:
+def pubmed_query_has_oa_filter(query: str) -> bool:
+    normalized = query.strip().lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "free full text[sb]",
+            '"free full text"[sb]',
+            "loattrfree full text[sb]",
+            "open access[filter]",
+        )
+    )
+
+
+def build_pubmed_query(
+    query: str,
+    year_start: int | None,
+    year_end: int | None,
+    *,
+    oa_only: bool = False,
+) -> str:
+    base_query = query.strip()
+    if oa_only and not pubmed_query_has_oa_filter(base_query):
+        base_query = f"({base_query}) AND free full text[sb]"
     if year_start is None and year_end is None:
-        return query.strip()
+        return base_query
     if year_start is not None and year_end is not None:
         return (
-            f'{query.strip()} AND ("{year_start}/01/01"[Date - Publication] : '
+            f'{base_query} AND ("{year_start}/01/01"[Date - Publication] : '
             f'"{year_end}/12/31"[Date - Publication])'
         )
     if year_start is not None:
-        return f'{query.strip()} AND ("{year_start}/01/01"[Date - Publication] : "3000"[Date - Publication])'
-    return f'{query.strip()} AND ("1000/01/01"[Date - Publication] : "{year_end}/12/31"[Date - Publication])'
+        return f'{base_query} AND ("{year_start}/01/01"[Date - Publication] : "3000"[Date - Publication])'
+    return f'{base_query} AND ("1000/01/01"[Date - Publication] : "{year_end}/12/31"[Date - Publication])'
 
 
 def extract_year(pubdate: str) -> str | None:

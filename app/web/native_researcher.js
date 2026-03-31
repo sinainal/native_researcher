@@ -7,12 +7,14 @@ const state = {
   projectRenaming: false,
   projectRenameSaving: false,
   projectDownloads: [],
+  downloadabilityCache: {},
   downloadabilityById: {},
   downloadabilityRunId: 0,
   queryHistory: [],
   activeQueryId: null,
   queryDetailId: null,
   citationRunId: 0,
+  citationsLoading: false,
   selectedIds: new Set(),
   sortKey: null,
   sortDirection: "asc",
@@ -25,10 +27,11 @@ const state = {
   thinkingLevel: localStorage.getItem("native_researcher_thinking_level") || "off",
   assistantStreamAbort: null,
   assistantSessions: [],
-  currentSessionId: localStorage.getItem("native_researcher_chat_session_id") || null,
+  currentSessionId: null,
   sidebarOpen: localStorage.getItem("native_researcher_sidebar_open") !== "false",
   chatHistoryExpanded: false,
   chatHistoryOpen: false,
+  deepDownloadJob: null,
 };
 
 const els = {
@@ -46,10 +49,12 @@ const els = {
   sidebarToggleBtn: document.getElementById("sidebarToggleBtn"),
   sidebarQueriesBtn: document.getElementById("sidebarQueriesBtn"),
   sidebarDownloadsBtn: document.getElementById("sidebarDownloadsBtn"),
+  sidebarSettingsBtn: document.getElementById("sidebarSettingsBtn"),
   sidebarPanelKicker: document.getElementById("sidebarPanelKicker"),
   sidebarPanelTitle: document.getElementById("sidebarPanelTitle"),
   sidebarQueriesPanel: document.getElementById("sidebarQueriesPanel"),
   sidebarDownloadsPanel: document.getElementById("sidebarDownloadsPanel"),
+  sidebarSettingsPanel: document.getElementById("sidebarSettingsPanel"),
   chatHistoryList: document.getElementById("chatHistoryList"),
   newChatTriggers: document.querySelectorAll(".new-chat-trigger"),
   workspaceQueryCount: document.getElementById("workspaceQueryCount"),
@@ -80,6 +85,23 @@ const els = {
   assistantApiKeyInput: document.getElementById("assistantApiKeyInput"),
   ncbiApiKeyInput: document.getElementById("ncbiApiKeyInput"),
   unpaywallEmailInput: document.getElementById("unpaywallEmailInput"),
+  workspaceSettingsState: document.getElementById("workspaceSettingsState"),
+  pubmedOaOnlyToggle: document.getElementById("pubmedOaOnlyToggle"),
+  pubmedOaOnlyStatus: document.getElementById("pubmedOaOnlyStatus"),
+  sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
+  deepDownloadOverlay: document.getElementById("deepDownloadOverlay"),
+  deepDownloadPopup: document.getElementById("deepDownloadPopup"),
+  deepDownloadClose: document.getElementById("deepDownloadClose"),
+  deepDownloadDoneBtn: document.getElementById("deepDownloadDoneBtn"),
+  deepDownloadStage: document.getElementById("deepDownloadStage"),
+  deepDownloadProgressText: document.getElementById("deepDownloadProgressText"),
+  deepDownloadElapsed: document.getElementById("deepDownloadElapsed"),
+  deepDownloadBarFill: document.getElementById("deepDownloadBarFill"),
+  deepDownloadSuccessCount: document.getElementById("deepDownloadSuccessCount"),
+  deepDownloadRetryCount: document.getElementById("deepDownloadRetryCount"),
+  deepDownloadFailedCount: document.getElementById("deepDownloadFailedCount"),
+  deepDownloadCurrent: document.getElementById("deepDownloadCurrent"),
+  deepDownloadRecent: document.getElementById("deepDownloadRecent"),
   assistantSendBtn: document.getElementById("assistantSendBtn"),
   assistantModelBtn: document.getElementById("assistantModelBtn"),
   assistantModelLabel: document.getElementById("assistantModelLabel"),
@@ -118,11 +140,10 @@ const assistantModelThinkingSupport = {
 };
 
 const assistantModelStorageKey = "native_researcher_model";
-const assistantSessionStorageKey = "native_researcher_chat_sessions";
-const assistantCurrentSessionStorageKey = "native_researcher_chat_session_id";
 const assistantSidebarStorageKey = "native_researcher_sidebar_open";
 const activeProjectStorageKey = "native_researcher_active_project";
 const sidebarPanelStorageKey = "native_researcher_sidebar_panel";
+const pubmedOaOnlyStorageKey = "native_researcher_pubmed_oa_only";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
@@ -144,6 +165,7 @@ const runtime = {
   apiKey: "",
   ncbiApiKey: "",
   unpaywallEmail: "",
+  pubmedOaOnly: localStorage.getItem(pubmedOaOnlyStorageKey) !== "false",
   assistantModel: stateModel,
 };
 
@@ -216,6 +238,12 @@ function bindAppErrorLogging() {
   });
 }
 
+function clearLegacyAssistantStorage() {
+  localStorage.removeItem("native_researcher_chat_sessions");
+  localStorage.removeItem("native_researcher_chat_session_id");
+  localStorage.removeItem("native_researcher_thread_id");
+}
+
 function currentProjectParam() {
   return new URLSearchParams(window.location.search).get("project")?.trim() || "";
 }
@@ -250,6 +278,34 @@ function formatRelativeTime(value) {
   return `${diffMonths}mo`;
 }
 
+function formatElapsedClock(startedAt) {
+  if (!startedAt) return "00:00";
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+async function runConcurrentQueue(items, concurrency, handler) {
+  const source = Array.isArray(items) ? items : [];
+  if (!source.length) return;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < source.length) {
+      const index = cursor;
+      cursor += 1;
+      const item = source[index];
+      if (item === undefined) return;
+      await handler(item, index);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), source.length) }, () => worker()),
+  );
+}
+
 function renderProjectDownloads() {
   if (!els.workspaceDownloadList || !els.workspaceDownloadCount) return;
   const items = Array.isArray(state.projectDownloads) ? state.projectDownloads : [];
@@ -277,16 +333,21 @@ function sidebarPanelMeta(panel) {
   if (panel === "downloads") {
     return { kicker: "Library", title: "Downloads" };
   }
+  if (panel === "settings") {
+    return { kicker: "Controls", title: "Settings" };
+  }
   return { kicker: "History", title: "Queries" };
 }
 
 function setSidebarPanel(panel) {
-  state.sidebarPanel = panel === "downloads" ? "downloads" : "queries";
+  state.sidebarPanel = panel === "downloads" || panel === "settings" ? panel : "queries";
   localStorage.setItem(sidebarPanelStorageKey, state.sidebarPanel);
   els.sidebarQueriesBtn?.classList.toggle("is-active", state.sidebarPanel === "queries");
   els.sidebarDownloadsBtn?.classList.toggle("is-active", state.sidebarPanel === "downloads");
+  els.sidebarSettingsBtn?.classList.toggle("is-active", state.sidebarPanel === "settings");
   if (els.sidebarQueriesPanel) els.sidebarQueriesPanel.hidden = state.sidebarPanel !== "queries";
   if (els.sidebarDownloadsPanel) els.sidebarDownloadsPanel.hidden = state.sidebarPanel !== "downloads";
+  if (els.sidebarSettingsPanel) els.sidebarSettingsPanel.hidden = state.sidebarPanel !== "settings";
   const meta = sidebarPanelMeta(state.sidebarPanel);
   if (els.sidebarPanelKicker) els.sidebarPanelKicker.textContent = meta.kicker;
   if (els.sidebarPanelTitle) els.sidebarPanelTitle.textContent = meta.title;
@@ -429,13 +490,17 @@ function upsertActiveQueryRecord() {
 
 function projectStatePayload() {
   upsertActiveQueryRecord();
+  persistAssistantSessions({ scheduleSave: false });
   return {
     active_query_id: state.activeQueryId,
     selected_ids: [...state.selectedIds],
     detail_article_id: state.detailArticleId,
     sidebar_panel: state.sidebarPanel,
     query_detail_id: state.queryDetailId || state.activeQueryId,
+    downloadability_cache: cloneJson(state.downloadabilityCache),
     query_history: cloneJson(state.queryHistory),
+    current_session_id: state.currentSessionId,
+    assistant_sessions: cloneJson(state.assistantSessions),
   };
 }
 
@@ -492,21 +557,47 @@ async function loadProjectState() {
   if (!state.projectId) return;
   try {
     const payload = await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}/state`);
+    const restoredSelectedIds = new Set(Array.isArray(payload.selected_ids) ? payload.selected_ids : []);
+    const restoredDetailArticleId = Number.isInteger(payload.detail_article_id) ? payload.detail_article_id : null;
     state.queryHistory = Array.isArray(payload.query_history) ? payload.query_history : [];
     state.activeQueryId = payload.active_query_id || state.queryHistory[0]?.id || null;
     state.queryDetailId = payload.query_detail_id || state.activeQueryId;
+    state.downloadabilityCache = payload.downloadability_cache && typeof payload.downloadability_cache === "object"
+      ? payload.downloadability_cache
+      : {};
+    state.selectedIds = new Set();
+    state.detailArticleId = null;
+    applyAssistantProjectState(payload);
     setSidebarPanel(payload.sidebar_panel || state.sidebarPanel);
     renderQueryHistory();
     if (state.activeQueryId) {
       restoreQueryRecord(state.activeQueryId);
-      state.selectedIds = new Set(Array.isArray(payload.selected_ids) ? payload.selected_ids : []);
-      state.detailArticleId = Number.isInteger(payload.detail_article_id) ? payload.detail_article_id : null;
+      state.selectedIds = restoredSelectedIds;
+      state.detailArticleId = restoredDetailArticleId;
+      renderResults();
+    } else {
+      state.lastSearchPayload = null;
+      state.lastPubmedResponse = null;
+      applyArticleDataset({ meta: null, articles: [] }, { persist: false });
+      if (els.query) {
+        els.query.value = "";
+        autoResizeTextarea(els.query);
+      }
       renderResults();
     }
   } catch (error) {
     state.queryHistory = [];
     state.activeQueryId = null;
     state.queryDetailId = null;
+    state.downloadabilityCache = {};
+    state.selectedIds = new Set();
+    state.detailArticleId = null;
+    state.lastSearchPayload = null;
+    state.lastPubmedResponse = null;
+    applyArticleDataset({ meta: null, articles: [] }, { persist: false });
+    resetAssistantProjectState();
+    renderAssistantMessages();
+    renderChatHistory();
     renderQueryHistory();
     trackAppEvent("error", "project_state_load_failed", error.message || "Project state could not be loaded.", {
       project_id: state.projectId || "",
@@ -556,6 +647,21 @@ function updateProjectUI() {
   document.title = `${projectName} — Native Researcher`;
 }
 
+function renderSettingsPanel() {
+  const enabled = Boolean(runtime.pubmedOaOnly);
+  if (els.workspaceSettingsState) {
+    els.workspaceSettingsState.textContent = enabled ? "On" : "Off";
+  }
+  if (els.pubmedOaOnlyToggle) {
+    els.pubmedOaOnlyToggle.checked = enabled;
+  }
+  if (els.pubmedOaOnlyStatus) {
+    els.pubmedOaOnlyStatus.textContent = enabled
+      ? "OA filter is active. Every PubMed search adds free full text[sb]."
+      : "OA filter is off. PubMed queries run exactly as written.";
+  }
+}
+
 function setApiKeysDialogOpen(next) {
   const open = Boolean(next);
   els.apiKeysPopup?.classList.toggle("is-open", open);
@@ -568,10 +674,15 @@ function applyApiKeyValues(payload = {}) {
   runtime.apiKey = payload.assistant_api_key || localStorage.getItem("researcher2_api_key") || "";
   runtime.ncbiApiKey = payload.ncbi_api_key || "";
   runtime.unpaywallEmail = payload.unpaywall_email || "";
+  runtime.pubmedOaOnly = payload.pubmed_oa_only !== undefined
+    ? Boolean(payload.pubmed_oa_only)
+    : localStorage.getItem(pubmedOaOnlyStorageKey) !== "false";
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
+  localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
   if (els.ncbiApiKeyInput) els.ncbiApiKeyInput.value = runtime.ncbiApiKey;
   if (els.unpaywallEmailInput) els.unpaywallEmailInput.value = runtime.unpaywallEmail;
+  renderSettingsPanel();
 }
 
 async function loadApiKeys() {
@@ -579,25 +690,158 @@ async function loadApiKeys() {
   applyApiKeyValues(payload);
 }
 
-async function saveApiKeys() {
+async function saveApiKeys(overrides = {}, options = {}) {
+  const { closeDialog = true } = options;
   const payload = await fetchJson("/app/api-keys", {
     method: "PUT",
     body: JSON.stringify({
-      assistant_api_key: els.assistantApiKeyInput?.value || "",
-      ncbi_api_key: els.ncbiApiKeyInput?.value || "",
-      unpaywall_email: els.unpaywallEmailInput?.value || "",
+      assistant_api_key: runtime.apiKey,
+      ncbi_api_key: runtime.ncbiApiKey,
+      unpaywall_email: runtime.unpaywallEmail,
+      pubmed_oa_only: runtime.pubmedOaOnly,
+      ...overrides,
     }),
   });
   applyApiKeyValues(payload);
   trackAppEvent("info", "api_keys_saved_ui", "API keys updated from the native UI.", {
     has_ncbi_api_key: Boolean(runtime.ncbiApiKey),
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
+    pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
   });
-  setApiKeysDialogOpen(false);
+  if (closeDialog) {
+    setApiKeysDialogOpen(false);
+  }
+}
+
+function renderDeepDownloadDialog() {
+  const job = state.deepDownloadJob;
+  if (!job) return;
+  if (els.deepDownloadStage) {
+    if (job.running && job.phase === "fast") {
+      els.deepDownloadStage.textContent = `Fast pass ${Math.min(job.fastProcessed, job.fastTotal)}/${job.fastTotal}`;
+    } else if (job.running && job.phase === "deep") {
+      els.deepDownloadStage.textContent = `Deep retry ${Math.min(job.deepProcessed, job.deepTotal)}/${job.deepTotal}`;
+    } else if (job.running) {
+      els.deepDownloadStage.textContent = "Preparing download";
+    } else {
+      els.deepDownloadStage.textContent = job.failedCount ? "Download finished with gaps" : "Download complete";
+    }
+  }
+  if (els.deepDownloadProgressText) {
+    els.deepDownloadProgressText.textContent = `${job.completedCount}/${job.total}`;
+  }
+  if (els.deepDownloadElapsed) {
+    els.deepDownloadElapsed.textContent = formatElapsedClock(job.startedAt);
+  }
+  if (els.deepDownloadBarFill) {
+    const ratio = job.total ? Math.max(0, Math.min(1, job.completedCount / job.total)) : 0;
+    els.deepDownloadBarFill.style.width = `${ratio * 100}%`;
+  }
+  if (els.deepDownloadSuccessCount) {
+    els.deepDownloadSuccessCount.textContent = String(job.successCount);
+  }
+  if (els.deepDownloadRetryCount) {
+    els.deepDownloadRetryCount.textContent = String(job.retryCount);
+  }
+  if (els.deepDownloadFailedCount) {
+    els.deepDownloadFailedCount.textContent = String(job.failedCount);
+  }
+  if (els.deepDownloadCurrent) {
+    els.deepDownloadCurrent.textContent = job.currentTitle || "Waiting for selected papers.";
+  }
+  if (els.deepDownloadRecent) {
+    els.deepDownloadRecent.innerHTML = job.recentItems.length
+      ? job.recentItems
+        .map((item) => `
+          <div class="deep-download-recent-item ${item.tone}">
+            <span class="deep-download-recent-status">${escapeHtml(item.label)}</span>
+            <span class="deep-download-recent-title">${escapeHtml(item.title)}</span>
+          </div>
+        `)
+        .join("")
+      : "";
+  }
+  if (els.deepDownloadClose) {
+    els.deepDownloadClose.disabled = Boolean(job.running);
+  }
+  if (els.deepDownloadDoneBtn) {
+    els.deepDownloadDoneBtn.disabled = Boolean(job.running);
+    els.deepDownloadDoneBtn.textContent = job.running ? "Running…" : "Done";
+  }
+}
+
+function stopDeepDownloadClock() {
+  const job = state.deepDownloadJob;
+  if (!job?.clockId) return;
+  clearInterval(job.clockId);
+  job.clockId = null;
+}
+
+function setDeepDownloadDialogOpen(next) {
+  const open = Boolean(next);
+  els.deepDownloadPopup?.classList.toggle("is-open", open);
+  els.deepDownloadOverlay?.classList.toggle("is-open", open);
+  if (els.deepDownloadPopup) els.deepDownloadPopup.hidden = !open;
+  if (els.deepDownloadOverlay) els.deepDownloadOverlay.hidden = !open;
+  if (!open) {
+    stopDeepDownloadClock();
+    state.deepDownloadJob = null;
+    return;
+  }
+  renderDeepDownloadDialog();
+}
+
+function pushDeepDownloadRecent(label, title, tone) {
+  const job = state.deepDownloadJob;
+  if (!job) return;
+  job.recentItems.unshift({
+    label,
+    title: title || "Untitled article",
+    tone,
+  });
+  job.recentItems = job.recentItems.slice(0, 6);
+}
+
+function startDeepDownloadJob(chosen, fastTotal) {
+  stopDeepDownloadClock();
+  state.deepDownloadJob = {
+    running: true,
+    phase: "fast",
+    total: chosen.length,
+    completedCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    retryCount: 0,
+    fastProcessed: 0,
+    fastTotal,
+    deepProcessed: 0,
+    deepTotal: 0,
+    currentTitle: "Preparing selected papers…",
+    recentItems: [],
+    startedAt: Date.now(),
+    clockId: null,
+  };
+  setDeepDownloadDialogOpen(true);
+  state.deepDownloadJob.clockId = window.setInterval(() => {
+    renderDeepDownloadDialog();
+  }, 1000);
+  renderDeepDownloadDialog();
 }
 
 function applyActiveProject(project) {
   if (!project?.id) return;
+  const projectChanged = Boolean(state.projectId && state.projectId !== project.id);
+  if (projectChanged) {
+    if (state.assistantStreamAbort) {
+      state.assistantStreamAbort.abort();
+      state.assistantStreamAbort = null;
+    }
+    state.downloadabilityCache = {};
+    state.downloadabilityById = {};
+    resetAssistantProjectState();
+    renderAssistantMessages();
+    renderChatHistory();
+  }
   state.projectId = project.id;
   state.projectPath = project.project_path || null;
   state.projectName = project.name || "Project";
@@ -915,43 +1159,44 @@ function createAssistantSession(seed = {}) {
   };
 }
 
-function persistAssistantSessions() {
+function resetAssistantProjectState() {
+  state.assistantSessions = [];
+  state.currentSessionId = null;
+  state.assistantThreadId = null;
+  state.assistantMessages = [];
+  state.chatHistoryExpanded = false;
+  state.chatHistoryOpen = false;
+}
+
+function persistAssistantSessions({ scheduleSave = true } = {}) {
   const nextSessions = state.assistantSessions
     .filter(sessionHasContent)
     .slice(0, 24)
     .map((item) => createAssistantSession(item));
   state.assistantSessions = nextSessions;
-  localStorage.setItem(assistantSessionStorageKey, JSON.stringify(nextSessions));
-  if (state.currentSessionId && nextSessions.some((item) => item.id === state.currentSessionId)) {
-    localStorage.setItem(assistantCurrentSessionStorageKey, state.currentSessionId);
-  } else {
-    localStorage.removeItem(assistantCurrentSessionStorageKey);
+  if (!state.currentSessionId || !nextSessions.some((item) => item.id === state.currentSessionId)) {
+    state.currentSessionId = nextSessions[0]?.id || null;
   }
+  if (scheduleSave) scheduleProjectStateSave();
 }
 
-function loadStoredAssistantSessions() {
-  let parsedSessions = [];
-  try {
-    const raw = localStorage.getItem(assistantSessionStorageKey);
-    parsedSessions = raw ? JSON.parse(raw) : [];
-  } catch (_error) {
-    parsedSessions = [];
-  }
-  state.assistantSessions = Array.isArray(parsedSessions)
-    ? parsedSessions.map((item) => createAssistantSession(item))
-      .filter(sessionHasContent)
+function applyAssistantProjectState(payload = {}) {
+  const parsedSessions = Array.isArray(payload.assistant_sessions)
+    ? payload.assistant_sessions.map((item) => createAssistantSession(item)).filter(sessionHasContent)
     : [];
-  if (!state.assistantSessions.length) {
-    state.currentSessionId = null;
-    state.assistantThreadId = null;
-    localStorage.removeItem("native_researcher_thread_id");
-    localStorage.removeItem(assistantCurrentSessionStorageKey);
-    return;
-  }
-
+  state.assistantSessions = parsedSessions;
+  state.currentSessionId = payload.current_session_id || null;
   if (!state.currentSessionId || !state.assistantSessions.some((item) => item.id === state.currentSessionId)) {
     state.currentSessionId = state.assistantSessions[0]?.id || null;
   }
+  state.chatHistoryExpanded = false;
+  state.assistantThreadId = currentAssistantSession()?.threadId || null;
+  state.assistantMessages = Array.isArray(currentAssistantSession()?.messages)
+    ? currentAssistantSession().messages.map((item) => cloneJson(item))
+    : [];
+  setChatHistoryOpen(false);
+  renderAssistantMessages();
+  renderChatHistory();
 }
 
 function syncCurrentSession({ persist = true } = {}) {
@@ -967,7 +1212,6 @@ function syncCurrentSession({ persist = true } = {}) {
   state.assistantSessions.splice(index, 1);
   state.assistantSessions.unshift(session);
   state.currentSessionId = session.id;
-  localStorage.setItem("native_researcher_thread_id", session.threadId || "");
   renderChatHistory();
   if (persist) persistAssistantSessions();
 }
@@ -982,7 +1226,6 @@ function switchAssistantSession(sessionId) {
   state.currentSessionId = session.id;
   state.assistantThreadId = session.threadId || null;
   state.assistantMessages = Array.isArray(session.messages) ? session.messages.map((item) => cloneJson(item)) : [];
-  localStorage.setItem("native_researcher_thread_id", state.assistantThreadId || "");
   renderAssistantMessages();
   renderChatHistory();
   persistAssistantSessions();
@@ -995,7 +1238,6 @@ function createNewAssistantChat() {
   state.currentSessionId = null;
   state.assistantThreadId = null;
   state.assistantMessages = [];
-  localStorage.removeItem("native_researcher_thread_id");
   setChatHistoryOpen(false);
   renderAssistantMessages();
   renderChatHistory();
@@ -1129,6 +1371,7 @@ function articleTypeLabel(article) {
 
 function citationLabel(article) {
   if (Number.isInteger(article.citation_count)) return String(article.citation_count);
+  if (state.citationsLoading && (article.pmid || article.doi)) return "…";
   return "-";
 }
 
@@ -1172,6 +1415,50 @@ function getDownloadability(articleId) {
   };
 }
 
+function setArticleDownloadability(articleId, next) {
+  const current = getDownloadability(articleId);
+  state.downloadabilityById[articleId] = {
+    ...current,
+    ...next,
+  };
+}
+
+function persistableDownloadabilityInfo(info) {
+  if (!info || !info.status) return null;
+  if (info.status === "loading" || info.status === "failed") return null;
+  return {
+    status: info.status,
+    label: info.label || "",
+    detail: info.detail || "",
+    openUrl: info.openUrl || null,
+  };
+}
+
+function rememberArticleDownloadability(article, info) {
+  const cacheKey = articleIdentityKey(article);
+  const stableInfo = persistableDownloadabilityInfo(info);
+  if (!cacheKey) return;
+  const previous = state.downloadabilityCache[cacheKey] || null;
+  if (!stableInfo) {
+    if (previous) {
+      delete state.downloadabilityCache[cacheKey];
+      scheduleProjectStateSave();
+    }
+    return;
+  }
+  if (
+    previous
+    && previous.status === stableInfo.status
+    && previous.label === stableInfo.label
+    && previous.detail === stableInfo.detail
+    && previous.openUrl === stableInfo.openUrl
+  ) {
+    return;
+  }
+  state.downloadabilityCache[cacheKey] = stableInfo;
+  scheduleProjectStateSave();
+}
+
 function downloadabilityDisplay(articleId) {
   const info = getDownloadability(articleId);
   if (info.status === "loading") {
@@ -1213,22 +1500,28 @@ function renderDownloadabilityCell(article) {
 function seedDownloadability(articles) {
   const source = Array.isArray(articles) ? articles : [];
   state.downloadabilityById = Object.fromEntries(
-    source.map((article) => [
-      article.id,
-      article.pmc_id || article.doi
-        ? {
-          status: "loading",
-          label: downloadabilityLabels.loading,
-          detail: "Verifying quick download path.",
-          openUrl: null,
-        }
-        : {
-          status: "unavailable",
-          label: downloadabilityLabels.unavailable,
-          detail: "No DOI or PMC signal.",
-          openUrl: null,
-        },
-    ]),
+    source.map((article) => {
+      const cached = state.downloadabilityCache[articleIdentityKey(article)] || null;
+      if (cached) {
+        return [article.id, { ...cached }];
+      }
+      return [
+        article.id,
+        article.pmc_id || article.doi
+          ? {
+            status: "loading",
+            label: downloadabilityLabels.loading,
+            detail: "Verifying quick download path.",
+            openUrl: null,
+          }
+          : {
+            status: "unavailable",
+            label: downloadabilityLabels.unavailable,
+            detail: "No DOI or PMC signal.",
+            openUrl: null,
+          },
+      ];
+    }),
   );
 }
 
@@ -1238,48 +1531,67 @@ function applyVerifiedDownloadability(payload) {
   const current = getDownloadability(article.id);
   if (current.status === "downloaded") return;
   if (payload.ready) {
-    state.downloadabilityById[article.id] = {
+    const next = {
       status: "high",
       label: downloadabilityLabels.high,
       detail: payload.detail || "Fast verification confirmed a downloadable PDF.",
       openUrl: null,
     };
+    state.downloadabilityById[article.id] = next;
+    rememberArticleDownloadability(article, next);
     return;
   }
-  state.downloadabilityById[article.id] = {
+  const next = {
     status: "unavailable",
     label: downloadabilityLabels.unavailable,
     detail: payload.detail || "Fast verification did not find a downloadable PDF.",
     openUrl: null,
   };
+  state.downloadabilityById[article.id] = next;
+  rememberArticleDownloadability(article, next);
 }
 
 async function verifyDownloadabilityInBackground() {
   if (!state.allArticles.length) return;
   const runId = Date.now();
   state.downloadabilityRunId = runId;
-  const queue = state.allArticles.filter((article) => article.doi || article.pmc_id);
-  const chunkSize = 6;
-  for (let index = 0; index < queue.length; index += chunkSize) {
-    if (state.downloadabilityRunId !== runId) return;
-    const chunk = queue.slice(index, index + chunkSize);
-    try {
-      const data = await fetchJson("/pdf/availability/fast", {
-        method: "POST",
-        body: JSON.stringify({
-          articles: chunk.map(articleReference),
-        }),
-      });
+  const queue = state.allArticles.filter(
+    (article) => (article.doi || article.pmc_id) && getDownloadability(article.id).status === "loading",
+  );
+  const chunkSize = 50;
+  const workerCount = 2;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < queue.length) {
       if (state.downloadabilityRunId !== runId) return;
-      (data.items || []).forEach(applyVerifiedDownloadability);
-      scheduleResultsRender();
-    } catch (error) {
-      trackAppEvent("error", "pdf_availability_verify_failed", error.message || "Fast availability check failed.", {
-        project_id: state.projectId || "",
-      });
-      return;
+      const start = cursor;
+      cursor += chunkSize;
+      const chunk = queue.slice(start, start + chunkSize);
+      if (!chunk.length) return;
+      try {
+        const data = await fetchJson("/pdf/availability/fast", {
+          method: "POST",
+          body: JSON.stringify({
+            articles: chunk.map(articleReference),
+          }),
+        });
+        if (state.downloadabilityRunId !== runId) return;
+        (data.items || []).forEach(applyVerifiedDownloadability);
+        scheduleResultsRender();
+      } catch (error) {
+        trackAppEvent("error", "pdf_availability_verify_failed", error.message || "Fast availability check failed.", {
+          project_id: state.projectId || "",
+          chunk_start: start,
+          chunk_size: chunk.length,
+        });
+      }
     }
   }
+
+  await Promise.all(
+    Array.from({ length: Math.min(workerCount, Math.ceil(queue.length / chunkSize)) }, () => worker()),
+  );
 }
 
 async function requestArticleDownload(article, mode) {
@@ -1293,6 +1605,50 @@ async function requestArticleDownload(article, mode) {
     }),
   });
   return data.results?.[0] || null;
+}
+
+async function requestBatchDownload(articles, mode) {
+  const batch = Array.isArray(articles) ? articles.filter(Boolean) : [];
+  if (!batch.length) {
+    return {
+      total: 0,
+      success_count: 0,
+      failed_count: 0,
+      results: [],
+    };
+  }
+  return fetchJson("/pdf/download", {
+    method: "POST",
+    body: JSON.stringify({
+      articles: batch.map(articleReference),
+      download_dir: projectDownloadDir(),
+      max_articles: batch.length,
+      mode,
+    }),
+  });
+}
+
+function applyDownloadResultState(article, result) {
+  if (!article) return;
+  if (result?.success) {
+    const next = {
+      status: "downloaded",
+      label: downloadabilityLabels.downloaded,
+      detail: result.file_path ? "PDF downloaded. Open it with the PDF button." : "PDF downloaded.",
+      openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
+    };
+    setArticleDownloadability(article.id, next);
+    rememberArticleDownloadability(article, next);
+    return true;
+  }
+  const next = {
+    status: "failed",
+    label: downloadabilityLabels.failed,
+    detail: result?.error || "PDF download failed.",
+    openUrl: null,
+  };
+  setArticleDownloadability(article.id, next);
+  return false;
 }
 
 async function downloadSingleArticle(articleId) {
@@ -1328,13 +1684,7 @@ async function downloadSingleArticle(articleId) {
       });
       result = await requestArticleDownload(article, "balanced");
     }
-    if (result?.success) {
-      state.downloadabilityById[article.id] = {
-        status: "downloaded",
-        label: downloadabilityLabels.downloaded,
-        detail: result.file_path ? "PDF downloaded. Open it with the PDF button." : "PDF downloaded.",
-        openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
-      };
+    if (applyDownloadResultState(article, result)) {
       trackAppEvent("info", "pdf_downloaded", article.title || "PDF downloaded.", {
         article_id: article.id,
         pmid: article.pmid || "",
@@ -1346,24 +1696,13 @@ async function downloadSingleArticle(articleId) {
         pmid: article.pmid || "",
         article_id: article.id,
       });
-      state.downloadabilityById[article.id] = {
-        status: "failed",
-        label: downloadabilityLabels.failed,
-        detail: result?.error || "PDF download failed.",
-        openUrl: null,
-      };
     }
   } catch (error) {
     trackAppEvent("error", "pdf_download_failed", error.message || "PDF download failed.", {
       pmid: article.pmid || "",
       article_id: article.id,
     });
-    state.downloadabilityById[article.id] = {
-      status: "failed",
-      label: downloadabilityLabels.failed,
-      detail: error.message || "PDF download failed.",
-      openUrl: null,
-    };
+    applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
   }
 
   scheduleResultsRender();
@@ -1383,85 +1722,237 @@ function articleIdentityKey(article) {
 
 function applyBatchDownloadResults(chosen, results) {
   const chosenByKey = new Map(chosen.map((article) => [articleIdentityKey(article), article]));
+  const seenKeys = new Set();
+  const successes = [];
+  const failures = [];
   (Array.isArray(results) ? results : []).forEach((result) => {
-    const article = chosenByKey.get(articleIdentityKey(result.article));
+    const key = articleIdentityKey(result.article);
+    const article = chosenByKey.get(key);
     if (!article) return;
-    if (result.success) {
-      state.downloadabilityById[article.id] = {
-        status: "downloaded",
-        label: downloadabilityLabels.downloaded,
-        detail: result.file_path ? "PDF downloaded. Open it with the PDF button." : "PDF downloaded.",
-        openUrl: result.file_path ? buildFileOpenUrl(result.file_path) : null,
-      };
-      return;
+    seenKeys.add(key);
+    if (applyDownloadResultState(article, result)) {
+      successes.push({ article, result });
+    } else {
+      failures.push({ article, result });
     }
-    state.downloadabilityById[article.id] = {
-      status: "failed",
-      label: downloadabilityLabels.failed,
-      detail: result.error || "PDF download failed.",
-      openUrl: null,
-    };
+  });
+  chosen.forEach((article) => {
+    const key = articleIdentityKey(article);
+    if (seenKeys.has(key)) return;
+    const result = { success: false, error: "Download result was not returned." };
+    applyDownloadResultState(article, result);
+    failures.push({ article, result });
   });
   scheduleResultsRender();
+  return { successes, failures };
 }
 
 async function downloadSelectedFast() {
   const chosen = activeArticles();
   if (!chosen.length) return;
-  for (const article of chosen) {
-    await downloadSingleArticle(article.id);
+  chosen.forEach((article) => {
+    const current = getDownloadability(article.id);
+    setArticleDownloadability(article.id, {
+      status: "loading",
+      label: "Downloading",
+      detail: "Fast batch in progress.",
+      openUrl: current.openUrl || null,
+    });
+  });
+  scheduleResultsRender();
+
+  try {
+    const data = await requestBatchDownload(chosen, "fast");
+    const { successes, failures } = applyBatchDownloadResults(chosen, data.results || []);
+    successes.forEach(({ article }) => {
+      trackAppEvent("info", "pdf_downloaded", article.title || "PDF downloaded.", {
+        article_id: article.id,
+        pmid: article.pmid || "",
+        project_id: state.projectId || "",
+      });
+    });
+    failures.forEach(({ article, result }) => {
+      trackAppEvent("error", "pdf_download_failed", result?.error || "PDF download failed.", {
+        article_id: article.id,
+        pmid: article.pmid || "",
+        project_id: state.projectId || "",
+      });
+    });
+    await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
+  } catch (error) {
+    chosen.forEach((article) => {
+      applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
+    });
+    trackAppEvent("error", "pdf_batch_download_failed", error.message || "Fast batch download failed.", {
+      project_id: state.projectId || "",
+      selected_count: chosen.length,
+      mode: "fast",
+    });
+    scheduleResultsRender();
   }
 }
 
 async function downloadSelectedArticles(mode = "balanced") {
   const chosen = activeArticles();
   if (!chosen.length) return;
-
-  chosen.forEach((article) => {
-    state.downloadabilityById[article.id] = {
-      ...(getDownloadability(article.id) || {}),
+  if (state.deepDownloadJob?.running) return;
+  const fastQueue = chosen.filter((article) => isDownloadReadyStatus(getDownloadability(article.id).status));
+  const fastIds = new Set(fastQueue.map((article) => article.id));
+  const deepQueue = chosen.filter((article) => !fastIds.has(article.id));
+  startDeepDownloadJob(chosen, fastQueue.length);
+  fastQueue.forEach((article) => {
+    const current = getDownloadability(article.id);
+    setArticleDownloadability(article.id, {
       status: "loading",
       label: "Downloading",
-      detail: "Deep download in progress.",
-      openUrl: getDownloadability(article.id).openUrl || null,
-    };
+      detail: "Fast pass in progress.",
+      openUrl: current.openUrl || null,
+    });
+  });
+  deepQueue.forEach((article) => {
+    setArticleDownloadability(article.id, {
+      status: "loading",
+      label: "Queued",
+      detail: "Queued for deep retry.",
+      openUrl: null,
+    });
   });
   scheduleResultsRender();
 
+  let retryQueue = [...deepQueue];
   try {
-    const data = await fetchJson("/pdf/download", {
-      method: "POST",
-      body: JSON.stringify({
-        articles: chosen.map(articleReference),
-        download_dir: projectDownloadDir(),
-        max_articles: chosen.length,
-        mode,
-      }),
+    const job = state.deepDownloadJob;
+    if (job && fastQueue.length) {
+      job.currentTitle = `Running fast pass for ${fastQueue.length} selected papers…`;
+      renderDeepDownloadDialog();
+    }
+    let fastApplied = { successes: [], failures: [] };
+    if (fastQueue.length) {
+      const fastData = await requestBatchDownload(fastQueue, "fast");
+      fastApplied = applyBatchDownloadResults(fastQueue, fastData.results || []);
+      retryQueue = [...deepQueue, ...fastApplied.failures.map(({ article }) => article)];
+    }
+    if (job) {
+      job.fastProcessed = fastQueue.length;
+      job.successCount = fastApplied.successes.length;
+      job.completedCount = fastApplied.successes.length;
+      job.retryCount = retryQueue.length;
+    }
+    fastApplied.successes.forEach(({ article }) => {
+      pushDeepDownloadRecent("Fast", article.title, "success");
     });
-    applyBatchDownloadResults(chosen, data.results || []);
-    trackAppEvent("info", "pdf_batch_download_completed", `Batch complete: ${data.success_count}/${data.total}`, {
-      project_id: state.projectId || "",
-      mode,
-      success_count: data.success_count,
-      failed_count: data.failed_count,
-    });
-    await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
-  } catch (error) {
-    chosen.forEach((article) => {
-      state.downloadabilityById[article.id] = {
-        status: "failed",
-        label: downloadabilityLabels.failed,
-        detail: error.message || "PDF download failed.",
+    fastApplied.failures.forEach(({ article }) => {
+      setArticleDownloadability(article.id, {
+        status: "loading",
+        label: "Retrying",
+        detail: "Queued for deep retry.",
         openUrl: null,
-      };
+      });
+      pushDeepDownloadRecent("Queued", article.title, "queued");
     });
-    trackAppEvent("error", "pdf_batch_download_failed", error.message || "Batch PDF download failed.", {
+    renderDeepDownloadDialog();
+    scheduleResultsRender();
+  } catch (error) {
+    retryQueue = [...deepQueue, ...fastQueue];
+    fastQueue.forEach((article) => {
+      setArticleDownloadability(article.id, {
+        status: "loading",
+        label: "Retrying",
+        detail: error.message || "Queued for deep retry.",
+        openUrl: null,
+      });
+      pushDeepDownloadRecent("Queued", article.title, "queued");
+    });
+    if (state.deepDownloadJob) {
+      state.deepDownloadJob.fastProcessed = fastQueue.length;
+      state.deepDownloadJob.retryCount = retryQueue.length;
+      state.deepDownloadJob.currentTitle = "Fast pass stalled, escalating to deep retry…";
+      renderDeepDownloadDialog();
+    }
+    trackAppEvent("error", "pdf_fast_batch_failed", error.message || "Fast batch download failed.", {
       project_id: state.projectId || "",
-      mode,
-      selected_count: chosen.length,
+      selected_count: fastQueue.length,
     });
     scheduleResultsRender();
   }
+
+  if (state.deepDownloadJob) {
+    state.deepDownloadJob.phase = "deep";
+    state.deepDownloadJob.deepTotal = retryQueue.length;
+    state.deepDownloadJob.retryCount = retryQueue.length;
+    state.deepDownloadJob.currentTitle = retryQueue.length
+      ? "Retrying unresolved papers…"
+      : "All selected papers downloaded in the fast pass.";
+    renderDeepDownloadDialog();
+  }
+
+  if (retryQueue.length) {
+    retryQueue.forEach((article) => {
+      setArticleDownloadability(article.id, {
+        status: "loading",
+        label: "Downloading",
+        detail: "Deep retry in progress.",
+        openUrl: null,
+      });
+    });
+    scheduleResultsRender();
+    try {
+      const deepData = await requestBatchDownload(retryQueue, mode);
+      const deepApplied = applyBatchDownloadResults(retryQueue, deepData.results || []);
+      if (state.deepDownloadJob) {
+        state.deepDownloadJob.deepProcessed = retryQueue.length;
+        state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount + retryQueue.length;
+        state.deepDownloadJob.successCount += deepApplied.successes.length;
+        state.deepDownloadJob.failedCount += deepApplied.failures.length;
+        state.deepDownloadJob.retryCount = 0;
+      }
+      deepApplied.successes.forEach(({ article }) => {
+        pushDeepDownloadRecent("Deep", article.title, "success");
+      });
+      deepApplied.failures.forEach(({ article }) => {
+        pushDeepDownloadRecent("Failed", article.title, "failed");
+      });
+      renderDeepDownloadDialog();
+    } catch (error) {
+      retryQueue.forEach((article) => {
+        applyDownloadResultState(article, { success: false, error: error.message || "PDF download failed." });
+        pushDeepDownloadRecent("Failed", article.title, "failed");
+      });
+      if (state.deepDownloadJob) {
+        state.deepDownloadJob.deepProcessed = retryQueue.length;
+        state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount + retryQueue.length;
+        state.deepDownloadJob.failedCount += retryQueue.length;
+        state.deepDownloadJob.retryCount = 0;
+      }
+      renderDeepDownloadDialog();
+      scheduleResultsRender();
+      trackAppEvent("error", "pdf_deep_batch_failed", error.message || "Deep batch download failed.", {
+        project_id: state.projectId || "",
+        retry_count: retryQueue.length,
+        mode,
+      });
+    }
+  } else if (state.deepDownloadJob) {
+    state.deepDownloadJob.completedCount = state.deepDownloadJob.successCount;
+  }
+
+  if (state.deepDownloadJob) {
+    state.deepDownloadJob.running = false;
+    state.deepDownloadJob.phase = "done";
+    state.deepDownloadJob.currentTitle = state.deepDownloadJob.failedCount
+      ? "Download finished. Some papers still need manual follow-up."
+      : "All selected papers are ready.";
+    stopDeepDownloadClock();
+    renderDeepDownloadDialog();
+  }
+  trackAppEvent("info", "pdf_batch_download_completed", `Deep flow complete: ${state.deepDownloadJob?.successCount || 0}/${chosen.length}`, {
+    project_id: state.projectId || "",
+    mode,
+    success_count: state.deepDownloadJob?.successCount || 0,
+    failed_count: state.deepDownloadJob?.failedCount || 0,
+    selected_count: chosen.length,
+  });
+  await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
 }
 
 function compactList(items, limit = 8) {
@@ -1719,6 +2210,7 @@ function renderMeta(meta) {
     ["Requests", meta.request_count],
     ["Duration", `${meta.elapsed_ms} ms`],
     ["Cache", meta.cache_hit ? "hit" : "miss"],
+    ["OA", meta.oa_only ? "on" : "off"],
   ];
   els.metaStrip.innerHTML = chips
     .map(([label, value]) => `<span class="meta-chip">${label}: ${value}</span>`)
@@ -1726,15 +2218,18 @@ function renderMeta(meta) {
 }
 
 function updateCounters() {
+  const hasSelection = state.selectedIds.size > 0;
   els.articleCount.textContent = String(state.articles.length);
   els.selectedCount.textContent = String(state.selectedIds.size);
   els.selectAllBtn.disabled = state.articles.length === 0;
-  els.clearSelectionBtn.disabled = state.selectedIds.size === 0;
+  els.clearSelectionBtn.disabled = !hasSelection;
   if (els.quickDownloadSelectedBtn) {
-    els.quickDownloadSelectedBtn.disabled = state.selectedIds.size === 0;
+    els.quickDownloadSelectedBtn.disabled = !hasSelection;
+    els.quickDownloadSelectedBtn.classList.toggle("is-active", hasSelection);
   }
   if (els.deepDownloadSelectedBtn) {
-    els.deepDownloadSelectedBtn.disabled = state.selectedIds.size === 0;
+    els.deepDownloadSelectedBtn.disabled = !hasSelection;
+    els.deepDownloadSelectedBtn.classList.toggle("is-active", hasSelection);
   }
 }
 
@@ -1742,44 +2237,67 @@ async function enrichCitationsInBackground() {
   if (!state.allArticles.length) return;
   const runId = Date.now();
   state.citationRunId = runId;
+  state.citationsLoading = true;
   const queue = [...state.allArticles];
   const chunkSize = 10;
+  const workerCount = 4;
+  let cursor = 0;
 
-  for (let index = 0; index < queue.length; index += chunkSize) {
-    if (state.citationRunId !== runId) return;
-    const chunk = queue.slice(index, index + chunkSize);
-    try {
-      const data = await fetchJson("/pubmed/citations", {
-        method: "POST",
-        body: JSON.stringify({
-          articles: chunk.map(articleReference),
-        }),
-      });
+  async function worker() {
+    while (cursor < queue.length) {
       if (state.citationRunId !== runId) return;
-      const byKey = new Map(
-        (data.items || []).map((item) => [item.pmid || item.doi, item.citation_count]),
-      );
-      state.allArticles = state.allArticles.map((article) => {
-        const key = article.pmid || article.doi;
-        if (!key || !byKey.has(key)) return article;
-        return {
-          ...article,
-          citation_count: byKey.get(key),
-        };
-      });
-      state.articles = [...state.allArticles];
-      if (state.lastPubmedResponse) {
-        state.lastPubmedResponse = {
-          ...state.lastPubmedResponse,
-          articles: cloneJson(state.allArticles),
-        };
+      const start = cursor;
+      cursor += chunkSize;
+      const chunk = queue.slice(start, start + chunkSize);
+      if (!chunk.length) return;
+      try {
+        const data = await fetchJson("/pubmed/citations", {
+          method: "POST",
+          body: JSON.stringify({
+            articles: chunk.map(articleReference),
+          }),
+        });
+        if (state.citationRunId !== runId) return;
+        const byKey = new Map(
+          (data.items || []).map((item) => [item.pmid || item.doi, item.citation_count]),
+        );
+        state.allArticles = state.allArticles.map((article) => {
+          const key = article.pmid || article.doi;
+          if (!key || !byKey.has(key)) return article;
+          return {
+            ...article,
+            citation_count: byKey.get(key),
+          };
+        });
+        state.articles = [...state.allArticles];
+        if (state.lastPubmedResponse) {
+          state.lastPubmedResponse = {
+            ...state.lastPubmedResponse,
+            articles: cloneJson(state.allArticles),
+          };
+        }
+        applyArticleSort();
+        renderResults();
+        upsertActiveQueryRecord();
+        scheduleProjectStateSave();
+      } catch (error) {
+        trackAppEvent("error", "pubmed_citation_enrich_failed", error.message || "Citation enrichment failed.", {
+          project_id: state.projectId || "",
+          chunk_start: start,
+          chunk_size: chunk.length,
+        });
       }
-      applyArticleSort();
+    }
+  }
+
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(workerCount, Math.ceil(queue.length / chunkSize)) }, () => worker()),
+    );
+  } finally {
+    if (state.citationRunId === runId) {
+      state.citationsLoading = false;
       renderResults();
-      upsertActiveQueryRecord();
-      scheduleProjectStateSave();
-    } catch (_error) {
-      return;
     }
   }
 }
@@ -1904,23 +2422,27 @@ async function runSearch() {
   trackAppEvent("info", "pubmed_search_started", payload.query, {
     project_id: state.projectId || "",
     max_results: payload.max_results,
+    pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
   });
   try {
     const response = await fetchJson("/pubmed/search", {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    state.citationsLoading = response.articles?.length > 0;
     applyArticleDataset(response);
     trackAppEvent("info", "pubmed_search_completed", `${response.meta?.fetched_results || 0} articles`, {
       project_id: state.projectId || "",
       fetched_results: response.meta?.fetched_results || 0,
       elapsed_ms: response.meta?.elapsed_ms || 0,
+      pubmed_oa_only: Boolean(response.meta?.oa_only),
     });
     void enrichCitationsInBackground();
   } catch (error) {
     state.lastPubmedResponse = null;
     state.allArticles = [];
     state.articles = [];
+    state.citationsLoading = false;
     state.selectedIds.clear();
     state.detailArticleId = null;
     state.downloadabilityById = {};
@@ -2177,9 +2699,10 @@ function pushAssistantMessage(message) {
 }
 
 function applyAssistantActions(actions) {
-  if (!Array.isArray(actions) || !actions.length) return;
+  let applied = false;
+  if (!Array.isArray(actions) || !actions.length) return false;
   actions.forEach((action) => {
-    if (action.name !== "search_pubmed" || !action.details) return;
+    if (action.name !== "search_pubmed" || action.status === "error" || !action.details) return;
     const details = action.details;
     const articles = Array.isArray(details.articles) ? details.articles : [];
     const meta = details.meta || null;
@@ -2200,11 +2723,14 @@ function applyAssistantActions(actions) {
       article_type: typeof details.article_type === "string" ? details.article_type : null,
       use_cache: true,
     };
+    state.citationsLoading = articles.length > 0;
     applyArticleDataset({ articles, meta });
+    applied = true;
     if (articles.length) {
       void enrichCitationsInBackground();
     }
   });
+  return applied;
 }
 
 async function sendAssistantMessage() {
@@ -2244,6 +2770,7 @@ async function sendAssistantMessage() {
     liveThinking: "",
     thinkingEnabled: effectiveThinkingLevel() !== "off",
   });
+  let searchAppliedDuringStream = false;
   els.assistantInput.value = "";
   autoResizeTextarea(els.assistantInput);
 
@@ -2269,7 +2796,6 @@ async function sendAssistantMessage() {
       (event) => {
         if (event.type === "start" && event.thread_id) {
           state.assistantThreadId = event.thread_id;
-          localStorage.setItem("native_researcher_thread_id", event.thread_id);
           syncCurrentSession();
           return;
         }
@@ -2303,6 +2829,9 @@ async function sendAssistantMessage() {
             event.action || {},
             event.call_id,
           );
+          if (applyAssistantActions([event.action || {}])) {
+            searchAppliedDuringStream = true;
+          }
           scheduleAssistantMessageUpdate(pendingMessage);
           syncCurrentSession();
           return;
@@ -2315,7 +2844,9 @@ async function sendAssistantMessage() {
             ? `Article IDs: ${event.response.used_article_ids.join(", ")}`
             : "";
           pendingMessage.actions = event.response?.executed_actions || pendingMessage.actions;
-          applyAssistantActions(event.response?.executed_actions || []);
+          if (!searchAppliedDuringStream) {
+            applyAssistantActions(event.response?.executed_actions || []);
+          }
           scheduleAssistantMessageUpdate(pendingMessage);
           syncCurrentSession();
           return;
@@ -2446,7 +2977,40 @@ function bindEvents() {
   });
   els.apiKeysForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveApiKeys();
+    await saveApiKeys({
+      assistant_api_key: els.assistantApiKeyInput?.value || "",
+      ncbi_api_key: els.ncbiApiKeyInput?.value || "",
+      unpaywall_email: els.unpaywallEmailInput?.value || "",
+    });
+  });
+  els.pubmedOaOnlyToggle?.addEventListener("change", async () => {
+    const nextValue = Boolean(els.pubmedOaOnlyToggle?.checked);
+    if (els.pubmedOaOnlyToggle) els.pubmedOaOnlyToggle.disabled = true;
+    try {
+      await saveApiKeys({ pubmed_oa_only: nextValue }, { closeDialog: false });
+      trackAppEvent("info", "pubmed_oa_setting_updated", "PubMed OA search setting updated.", {
+        pubmed_oa_only: nextValue,
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "pubmed_oa_setting_failed", error.message || "PubMed OA setting could not be saved.", {
+        pubmed_oa_only: nextValue,
+      });
+    } finally {
+      if (els.pubmedOaOnlyToggle) els.pubmedOaOnlyToggle.disabled = false;
+    }
+  });
+  els.deepDownloadOverlay?.addEventListener("click", () => {
+    if (state.deepDownloadJob?.running) return;
+    setDeepDownloadDialogOpen(false);
+  });
+  els.deepDownloadClose?.addEventListener("click", () => {
+    if (state.deepDownloadJob?.running) return;
+    setDeepDownloadDialogOpen(false);
+  });
+  els.deepDownloadDoneBtn?.addEventListener("click", () => {
+    if (state.deepDownloadJob?.running) return;
+    setDeepDownloadDialogOpen(false);
   });
 
   els.sidebarToggleBtn?.addEventListener("click", () => {
@@ -2457,6 +3021,12 @@ function bindEvents() {
   });
   els.sidebarDownloadsBtn?.addEventListener("click", () => {
     setSidebarPanel("downloads");
+  });
+  els.sidebarSettingsBtn?.addEventListener("click", () => {
+    setSidebarPanel("settings");
+  });
+  els.sidebarOpenApiKeysBtn?.addEventListener("click", () => {
+    setApiKeysDialogOpen(true);
   });
   els.assistantHistoryToggleBtn?.addEventListener("click", () => {
     setChatHistoryOpen(!state.chatHistoryOpen);
@@ -2517,7 +3087,8 @@ function bindEvents() {
 
 async function init() {
   bindAppErrorLogging();
-  loadStoredAssistantSessions();
+  clearLegacyAssistantStorage();
+  resetAssistantProjectState();
   updateProjectUI();
   renderProjectDownloads();
   renderQueryHistory();
@@ -2529,14 +3100,8 @@ async function init() {
   bindEvents();
   setSidebarOpen(state.sidebarOpen, { immediate: true });
   setSidebarPanel(state.sidebarPanel);
-  if (state.currentSessionId) {
-    switchAssistantSession(state.currentSessionId);
-  } else {
-    state.assistantThreadId = null;
-    state.assistantMessages = [];
-    renderAssistantMessages();
-    renderChatHistory();
-  }
+  renderAssistantMessages();
+  renderChatHistory();
   setAssistantOpen(true);
   setChatHistoryOpen(false);
   await Promise.all([loadHealth(), loadBootstrap(), ensureActiveProject()]);

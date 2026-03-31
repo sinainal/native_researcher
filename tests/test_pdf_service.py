@@ -771,3 +771,233 @@ def test_pdf_service_expands_browser_candidates_for_publishers(tmp_path) -> None
         )
     finally:
         asyncio.run(mock_client.aclose())
+
+
+def test_pdf_service_quick_availability_marks_pmc_direct_pdf_ready(tmp_path) -> None:
+    async def runner() -> None:
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            if "pmc/utils/oa/oa.fcgi" in str(request.url):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/xml; charset=utf-8"},
+                    text=(
+                        "<OA><records><record id='PMC555'>"
+                        "<link format='tgz' href='ftp://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC555.tar.gz' />"
+                        "</record></records></OA>"
+                    ),
+                )
+            if str(request.url) == "https://pmc.ncbi.nlm.nih.gov/articles/PMC555/pdf/":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/pdf"},
+                    content=b"%PDF-1.7 pmc direct preview",
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            response = await service.quick_availability(
+                [ArticleReference(title="PMC OA Article", year="2024", pmc_id="PMC555")]
+            )
+
+        assert response.items[0].ready is True
+        assert response.items[0].source == "pmc_direct"
+        assert requests == [
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=PMC555",
+            "https://pmc.ncbi.nlm.nih.gov/articles/PMC555/pdf/",
+        ]
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_quick_availability_requires_pdf_signature(tmp_path) -> None:
+    async def runner() -> None:
+        article = ArticleReference(title="Misleading PDF", year="2024", doi="10.1000/fake")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://files.example.org/not-really.pdf":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/pdf"},
+                    content=b"<html>not actually a pdf</html>",
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+
+            async def fake_resolve(_article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
+                return PDFResolveResponse(
+                    article=article,
+                    cache_hit=False,
+                    candidates=[PDFCandidate(source="crossref", url="https://files.example.org/not-really.pdf")],
+                )
+
+            service.resolve = fake_resolve  # type: ignore[method-assign]
+            response = await service.quick_availability([article])
+
+        assert response.items[0].ready is False
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_quick_availability_marks_tgz_with_pdf_ready(tmp_path) -> None:
+    async def runner() -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            image_bytes = b"not-a-pdf" * 1024
+            image_info = tarfile.TarInfo(name="PMC777/figure1.jpg")
+            image_info.size = len(image_bytes)
+            archive.addfile(image_info, io.BytesIO(image_bytes))
+
+            pdf_bytes = b"%PDF-1.7 package document"
+            pdf_info = tarfile.TarInfo(name="PMC777/article.pdf")
+            pdf_info.size = len(pdf_bytes)
+            archive.addfile(pdf_info, io.BytesIO(pdf_bytes))
+        archive_bytes = buffer.getvalue()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == "https://pmc.ncbi.nlm.nih.gov/articles/PMC777/pdf/":
+                return httpx.Response(403, headers={"content-type": "text/html"}, text="<html>blocked</html>")
+            if url == "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC777.tar.gz":
+                return httpx.Response(
+                    206,
+                    headers={"content-type": "application/x-gzip"},
+                    content=archive_bytes,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            
+            async def fake_resolve(_article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
+                return PDFResolveResponse(
+                    article=ArticleReference(title="PMC Package Article", year="2024", pmc_id="PMC777"),
+                    cache_hit=False,
+                    candidates=[
+                        PDFCandidate(source="pmc_direct", url="https://pmc.ncbi.nlm.nih.gov/articles/PMC777/pdf/"),
+                        PDFCandidate(source="pmc_oa_tgz", url="https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC777.tar.gz"),
+                        PDFCandidate(source="openalex", url="https://files.example.org/placeholder"),
+                    ],
+                )
+
+            service.resolve = fake_resolve  # type: ignore[method-assign]
+            response = await service.quick_availability(
+                [ArticleReference(title="PMC Package Article", year="2024", pmc_id="PMC777")]
+            )
+
+        assert response.items[0].ready is True
+        assert response.items[0].source == "pmc_oa_tgz"
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_quick_availability_rejects_tgz_without_pdf(tmp_path) -> None:
+    async def runner() -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            image_bytes = b"image-bytes" * 1024
+            image_info = tarfile.TarInfo(name="PMC778/figure1.jpg")
+            image_info.size = len(image_bytes)
+            archive.addfile(image_info, io.BytesIO(image_bytes))
+        archive_bytes = buffer.getvalue()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/oa/oa.fcgi" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/xml; charset=utf-8"},
+                    text=(
+                        "<OA><records><record id='PMC778'>"
+                        "<link format='tgz' href='ftp://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC778.tar.gz' />"
+                        "</record></records></OA>"
+                    ),
+                )
+            if url == "https://pmc.ncbi.nlm.nih.gov/articles/PMC778/pdf/":
+                return httpx.Response(403, headers={"content-type": "text/html"}, text="<html>blocked</html>")
+            if url == "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_package/aa/bb/PMC778.tar.gz":
+                return httpx.Response(
+                    206,
+                    headers={"content-type": "application/x-gzip"},
+                    content=archive_bytes,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            response = await service.quick_availability(
+                [ArticleReference(title="PMC Image Package", year="2024", pmc_id="PMC778")]
+            )
+
+        assert response.items[0].ready is False
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_quick_availability_accepts_html_fulltext(tmp_path) -> None:
+    async def runner() -> None:
+        article = ArticleReference(title="HTML Fulltext", year="2024", doi="10.1000/html")
+        body = " ".join(["Introduction methods results discussion conclusion references serotonin receptor"] * 140)
+        html = f"<html><body><article>{body}</article></body></html>"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://files.example.org/fulltext":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+
+            async def fake_resolve(_article: ArticleReference, *, mode: str = "fast") -> PDFResolveResponse:
+                return PDFResolveResponse(
+                    article=article,
+                    cache_hit=False,
+                    candidates=[PDFCandidate(source="openalex", url="https://files.example.org/fulltext")],
+                )
+
+            service.resolve = fake_resolve  # type: ignore[method-assign]
+            response = await service.quick_availability([article])
+
+        assert response.items[0].ready is True
+        assert response.items[0].source == "openalex"
+
+    asyncio.run(runner())

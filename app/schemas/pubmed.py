@@ -37,6 +37,7 @@ class PubMedSearchMeta(BaseModel):
     request_count: int
     elapsed_ms: int
     cache_hit: bool
+    oa_only: bool = False
 
 
 class PubMedSearchResponse(BaseModel):

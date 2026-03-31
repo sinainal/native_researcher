@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -185,6 +187,7 @@ def test_api_endpoints() -> None:
                 assistant_api_key_path=temp_root / "assistant_api_key.txt",
                 ncbi_api_key_path=temp_root / "ncbi_api",
                 unpaywall_email_path=temp_root / "unpaywall_email",
+                pubmed_oa_only_path=temp_root / "pubmed_oa_only",
             )
             app = create_app(
                 settings=settings,
@@ -209,6 +212,7 @@ def test_api_endpoints() -> None:
                 assert "Native Researcher" in native.text
                 assert "Searcher AI" in native.text
                 assert "Article Results" in native.text
+                assert "Always OA Search" in native.text
 
                 legacy = await client.get("/researcher_2")
                 assert legacy.status_code == 200
@@ -234,6 +238,7 @@ def test_api_endpoints() -> None:
                     "api_key": "",
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
+                    "pubmed_oa_only": True,
                 }
 
                 api_keys = await client.get("/app/api-keys")
@@ -242,6 +247,7 @@ def test_api_endpoints() -> None:
                     "assistant_api_key": "",
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
+                    "pubmed_oa_only": True,
                 }
 
                 update_api_keys = await client.put(
@@ -250,6 +256,7 @@ def test_api_endpoints() -> None:
                         "assistant_api_key": "assistant-secret",
                         "ncbi_api_key": "ncbi-secret",
                         "unpaywall_email": "me@example.com",
+                        "pubmed_oa_only": False,
                     },
                 )
                 assert update_api_keys.status_code == 200
@@ -257,6 +264,7 @@ def test_api_endpoints() -> None:
                     "assistant_api_key": "assistant-secret",
                     "ncbi_api_key": "ncbi-secret",
                     "unpaywall_email": "me@example.com",
+                    "pubmed_oa_only": False,
                 }
 
                 projects = await client.get("/app/projects")
@@ -281,6 +289,62 @@ def test_api_endpoints() -> None:
                 assert create_second_default_project.json()["id"] == "project-2"
                 assert create_second_default_project.json()["name"] == "Project 2"
 
+                workspace_db = settings.workspace_root / ".native_researcher.db"
+                assert workspace_db.exists()
+
+                legacy_dir = settings.workspace_root / "projects" / "legacy-review"
+                legacy_dir.mkdir(parents=True, exist_ok=True)
+                for relative in ("pdfs", "derived", "indexes", "exports", "notes"):
+                    (legacy_dir / relative).mkdir(parents=True, exist_ok=True)
+                (legacy_dir / "project.json").write_text(
+                    json.dumps(
+                        {
+                            "id": "legacy-review",
+                            "name": "Legacy Review",
+                            "description": "Imported from disk",
+                            "created_at": "2026-03-20T10:00:00+00:00",
+                            "updated_at": "2026-03-20T10:00:00+00:00",
+                        },
+                        ensure_ascii=True,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                (legacy_dir / "state.json").write_text(
+                    json.dumps(
+                        {
+                            "active_query_id": "legacy_q",
+                            "selected_ids": [],
+                            "detail_article_id": None,
+                            "sidebar_panel": "queries",
+                            "query_detail_id": "legacy_q",
+                            "query_history": [
+                                {
+                                    "id": "legacy_q",
+                                    "title": "legacy serotonin",
+                                    "created_at": "2026-03-20T10:00:00+00:00",
+                                    "updated_at": "2026-03-20T10:00:00+00:00",
+                                    "search_payload": {
+                                        "query": "legacy serotonin",
+                                        "year_start": None,
+                                        "year_end": None,
+                                        "max_results": 5,
+                                        "batch_size": None,
+                                        "min_cite": None,
+                                        "article_type": None,
+                                        "use_cache": True,
+                                    },
+                                    "meta": None,
+                                    "articles": [],
+                                }
+                            ],
+                        },
+                        ensure_ascii=True,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+
                 project_pdf_dir = settings.workspace_root / "projects" / "project-1" / "pdfs" / "year_2025"
                 project_pdf_dir.mkdir(parents=True, exist_ok=True)
                 sample_pdf = project_pdf_dir / "sample-paper.pdf"
@@ -288,12 +352,18 @@ def test_api_endpoints() -> None:
 
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200
-                assert len(projects.json()["projects"]) == 3
+                assert len(projects.json()["projects"]) == 4
                 assert {item["name"] for item in projects.json()["projects"]} == {
                     "Neuro Evidence Map",
                     "Project 1",
                     "Project 2",
+                    "Legacy Review",
                 }
+
+                legacy_state = await client.get("/app/projects/legacy-review/state")
+                assert legacy_state.status_code == 200
+                assert legacy_state.json()["active_query_id"] == "legacy_q"
+                assert legacy_state.json()["query_history"][0]["title"] == "legacy serotonin"
 
                 project = await client.get("/app/projects/project-1")
                 assert project.status_code == 200
@@ -316,6 +386,36 @@ def test_api_endpoints() -> None:
                         "detail_article_id": 1,
                         "sidebar_panel": "queries",
                         "query_detail_id": "qry_1",
+                        "downloadability_cache": {
+                            "123": {
+                                "status": "high",
+                                "label": "Ready",
+                                "detail": "Fast verification confirmed a downloadable PDF.",
+                                "openUrl": None,
+                            }
+                        },
+                        "current_session_id": "chat_1",
+                        "assistant_sessions": [
+                            {
+                                "id": "chat_1",
+                                "threadId": "thread_123",
+                                "title": "NDM summary",
+                                "preview": "Summarise NDM inhibitor evidence",
+                                "updatedAt": "2026-03-27T12:00:00+00:00",
+                                "messages": [
+                                    {
+                                        "id": "msg_1",
+                                        "role": "user",
+                                        "text": "Summarise NDM inhibitor evidence",
+                                        "pending": False,
+                                        "thinking": "",
+                                        "thinkingEnabled": False,
+                                        "meta": "",
+                                        "actions": [],
+                                    }
+                                ],
+                            }
+                        ],
                         "query_history": [
                             {
                                 "id": "qry_1",
@@ -369,6 +469,20 @@ def test_api_endpoints() -> None:
                 assert saved_state.status_code == 200
                 assert saved_state.json()["active_query_id"] == "qry_1"
                 assert saved_state.json()["query_history"][0]["title"] == "ndm inhibitor"
+                assert saved_state.json()["current_session_id"] == "chat_1"
+                assert saved_state.json()["assistant_sessions"][0]["threadId"] == "thread_123"
+                assert saved_state.json()["downloadability_cache"]["123"]["status"] == "high"
+
+                with sqlite3.connect(workspace_db) as conn:
+                    assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 4
+                    assert conn.execute(
+                        "SELECT COUNT(*) FROM project_queries WHERE project_id = ?",
+                        ("project-1",),
+                    ).fetchone()[0] == 1
+                    assert conn.execute(
+                        "SELECT COUNT(*) FROM project_documents WHERE project_id = ?",
+                        ("project-1",),
+                    ).fetchone()[0] == 1
 
                 touched_project = await client.post("/app/projects/project-1/touch")
                 assert touched_project.status_code == 200
@@ -387,6 +501,24 @@ def test_api_endpoints() -> None:
                     item["name"] == "Docking Review"
                     for item in project_list_after_rename.json()["projects"]
                 )
+
+                deleted_project = await client.delete("/app/projects/project-2")
+                assert deleted_project.status_code == 200
+                assert deleted_project.json()["id"] == "project-2"
+                assert not (settings.workspace_root / "projects" / "project-2").exists()
+
+                projects_after_delete = await client.get("/app/projects")
+                assert projects_after_delete.status_code == 200
+                assert all(
+                    item["id"] != "project-2"
+                    for item in projects_after_delete.json()["projects"]
+                )
+
+                with sqlite3.connect(workspace_db) as conn:
+                    assert conn.execute(
+                        "SELECT COUNT(*) FROM projects WHERE id = ?",
+                        ("project-2",),
+                    ).fetchone()[0] == 0
 
                 app_event = await client.post(
                     "/app/events",

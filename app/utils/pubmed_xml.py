@@ -91,9 +91,11 @@ def parse_pubmed_fetch_xml(xml_text: str) -> dict[str, dict[str, object]]:
                 authors.append(full_name)
         journal = _text_content(article.find(".//Article/Journal/Title")) or None
         publication_date = _text_content(article.find(".//Article/Journal/JournalIssue/PubDate")) or None
+        title = _text_content(article.find(".//Article/ArticleTitle")) or None
         references = article.findall(".//PubmedData/ReferenceList/Reference")
 
         parsed[pmid] = {
+            "title": title,
             "abstract": "\n".join(abstract_parts).strip(),
             "doi": doi,
             "pmc_id": pmc_id,

@@ -45,10 +45,11 @@ async def health() -> dict[str, str]:
 
 
 @router.get("/app/bootstrap")
-async def bootstrap(request: Request) -> dict[str, str]:
+async def bootstrap(request: Request) -> dict[str, str | bool]:
     settings = request.app.state.settings
     return {
         "api_key": settings.assistant_api_key or "",
         "ncbi_api_key": settings.ncbi_api_key or "",
         "unpaywall_email": settings.unpaywall_email or "",
+        "pubmed_oa_only": settings.pubmed_oa_only,
     }

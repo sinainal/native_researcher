@@ -2452,6 +2452,23 @@ select {
   vertical-align: top;
 }
 
+.native-results-card .title-cell {
+  min-width: 0;
+}
+
+.table-title-main {
+  color: #22324e;
+  line-height: 1.55;
+  font-weight: 600;
+}
+
+.table-title-sub {
+  margin-top: 4px;
+  color: #7a889f;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 .native-results-card .article-row:hover td {
   background: rgba(248, 250, 255, 0.92);
 }
@@ -3483,6 +3500,11 @@ select {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 
 .native-query-quick-card {
@@ -3523,14 +3545,17 @@ select {
 
 .native-query-quick-actions {
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .native-query-quick-field {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex: 1 1 96px;
+  min-width: 0;
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -3538,12 +3563,33 @@ select {
   color: #7f8ea6;
 }
 
+.native-query-quick-field-wide {
+  flex: 1 1 180px;
+}
+
 .native-query-quick-max {
-  width: 72px;
+  width: 100%;
   padding: 9px 10px;
   border: 1px solid rgba(205, 216, 232, 0.96);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.96);
+}
+
+.native-query-quick-select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 10px;
+  border: 1px solid rgba(205, 216, 232, 0.96);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #20304a;
+}
+
+.native-query-quick-select:focus,
+.native-query-quick-max:focus {
+  outline: 0;
+  border-color: #4f6fb0;
+  box-shadow: 0 0 0 4px rgba(79, 111, 176, 0.12);
 }
 
 .native-query-quick-status {
@@ -3582,14 +3628,26 @@ select {
 }
 
 .native-workspace-library {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: auto;
   display: flex;
   flex-direction: column;
   border: 1px dashed #dbe3ee;
   border-radius: 18px;
   background: linear-gradient(180deg, #f9fbff, #f4f7fb);
   overflow: hidden;
+}
+
+.native-query-history-shell {
+  flex: 0 0 auto;
+  min-height: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.native-query-history-panel {
+  min-height: auto;
 }
 
 .native-workspace-library-head {
@@ -3620,10 +3678,10 @@ select {
 }
 
 .native-workspace-library-list {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: auto;
   padding: 8px;
-  overflow: auto;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -3739,8 +3797,9 @@ select {
 
 .native-settings-row {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-items: stretch;
+  justify-content: flex-start;
+  flex-direction: column;
   gap: 14px;
 }
 
@@ -3775,6 +3834,69 @@ select {
   font-size: 0.76rem;
   line-height: 1.55;
   color: #60708b;
+}
+
+.native-settings-field {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.native-settings-field-wide {
+  min-width: 0;
+}
+
+.native-settings-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #60708b;
+}
+
+.native-settings-number {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(194, 206, 224, 0.92);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.95);
+  color: #20304a;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+.native-settings-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(194, 206, 224, 0.92);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.95);
+  color: #20304a;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+.native-settings-number:focus {
+  outline: none;
+  border-color: rgba(59, 130, 246, 0.68);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+}
+
+.native-settings-select:focus {
+  outline: none;
+  border-color: rgba(59, 130, 246, 0.68);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
 }
 
 .native-settings-action {
@@ -3832,6 +3954,9 @@ select {
 }
 
 .native-query-detail-card {
+  flex: 0 0 auto;
+  max-height: none;
+  overflow: visible;
   border: 1px solid #e3e9f3;
   border-radius: 18px;
   background: linear-gradient(180deg, #fafcff, #f6f8fc);

@@ -64,39 +64,49 @@
         </div>
         <div id="sidebarQueriesPanel" class="native-sidebar-panel-body">
           <div class="native-query-quick-card">
-            <div class="native-query-quick-title">Quick PubMed Query</div>
-            <div class="native-query-quick-copy">Run a small OA-aware search directly from the sidebar.</div>
+            <div class="native-query-quick-title">Quick Search</div>
+            <div class="native-query-quick-copy">Run a small search directly from the sidebar and choose the primary search source.</div>
             <textarea
               id="sidebarQuickQuery"
               class="native-query-quick-input"
               rows="3"
-              placeholder="Paste a PubMed query"
+              placeholder="Paste a literature query"
             ></textarea>
             <div class="native-query-quick-actions">
+              <label class="native-query-quick-field native-query-quick-field-wide" for="sidebarQuickSearchResource">
+                <span>Source</span>
+                <select id="sidebarQuickSearchResource" class="native-query-quick-select">
+                  <option value="openalex">OpenAlex</option>
+                  <option value="pubmed">PubMed</option>
+                  <option value="europe_pmc">Europe PMC</option>
+                </select>
+              </label>
               <label class="native-query-quick-field" for="sidebarQuickMaxResults">
                 <span>Max</span>
                 <input id="sidebarQuickMaxResults" class="native-query-quick-max" type="number" value="5" min="1" max="50">
               </label>
               <button id="sidebarQuickSearchBtn" class="btn btn-primary btn-sm" type="button">Run Query</button>
             </div>
-            <div id="sidebarQuickStatus" class="native-query-quick-status">Uses the same OA-aware PubMed search and downloader.</div>
+            <div id="sidebarQuickStatus" class="native-query-quick-status">Uses the selected primary search source from the workspace.</div>
           </div>
-          <div class="native-workspace-library">
-            <div class="native-workspace-library-head">
-              <div class="native-workspace-library-label">Queries</div>
-              <div id="workspaceQueryCount" class="native-workspace-library-count">0</div>
-            </div>
-            <div id="workspaceQueryList" class="native-workspace-library-list">
-              <div class="native-workspace-library-empty">
-                <div class="native-workspace-library-empty-title">No queries yet</div>
-                <div class="native-workspace-library-empty-copy">Search history for this project will appear here.</div>
+          <div class="native-query-history-shell">
+            <div class="native-workspace-library native-query-history-panel">
+              <div class="native-workspace-library-head">
+                <div class="native-workspace-library-label">Queries</div>
+                <div id="workspaceQueryCount" class="native-workspace-library-count">0</div>
+              </div>
+              <div id="workspaceQueryList" class="native-workspace-library-list">
+                <div class="native-workspace-library-empty">
+                  <div class="native-workspace-library-empty-title">No queries yet</div>
+                  <div class="native-workspace-library-empty-copy">Search history for this project will appear here.</div>
+                </div>
               </div>
             </div>
-          </div>
-          <div id="workspaceQueryDetail" class="native-query-detail-card">
-            <div class="native-workspace-library-empty">
-              <div class="native-workspace-library-empty-title">Query details</div>
-              <div class="native-workspace-library-empty-copy">Select a saved query to inspect the exact request and result metadata.</div>
+            <div id="workspaceQueryDetail" class="native-query-detail-card">
+              <div class="native-workspace-library-empty">
+                <div class="native-workspace-library-empty-title">Query details</div>
+                <div class="native-workspace-library-empty-copy">Select a saved query to inspect the exact request and result metadata.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -135,6 +145,40 @@
                   </label>
                 </div>
                 <div id="pubmedOaOnlyStatus" class="native-settings-note">OA filter is active for all PubMed searches.</div>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">AI Primary Search Resource</div>
+                    <div class="native-settings-description">
+                      Controls which source Searcher AI uses for literature search tool calls.
+                    </div>
+                  </div>
+                  <label class="native-settings-field native-settings-field-wide" for="aiPrimarySearchResourceInput">
+                    <span>Source</span>
+                    <select id="aiPrimarySearchResourceInput" class="native-settings-select">
+                      <option value="openalex">OpenAlex</option>
+                      <option value="pubmed">PubMed</option>
+                      <option value="europe_pmc">Europe PMC</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="aiPrimarySearchResourceStatus" class="native-settings-note">Searcher AI uses OpenAlex for search tool calls.</div>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">Batch Download Workers</div>
+                    <div class="native-settings-description">
+                      Controls how many selected articles download in parallel. Higher values are faster but may reduce stability on some publisher hosts.
+                    </div>
+                  </div>
+                  <label class="native-settings-field" for="downloadWorkerCountInput">
+                    <span>Workers</span>
+                    <input id="downloadWorkerCountInput" class="native-settings-number" type="number" value="4" min="1" max="8" step="1">
+                  </label>
+                </div>
+                <div id="downloadWorkerCountStatus" class="native-settings-note">Batch downloads use 4 parallel workers.</div>
               </div>
               <button id="sidebarOpenApiKeysBtn" class="btn btn-ghost btn-sm native-settings-action" type="button">Open API Keys</button>
             </div>
@@ -248,7 +292,7 @@
                   <td colspan="9" class="empty-cell">
                     <div class="native-empty-state">
                       <div class="native-empty-state-title">No search yet</div>
-                      <div class="native-empty-state-copy">Start with a topic.</div>
+                      <div class="native-empty-state-copy">Start with a topic. Default search covers the most recent 5 years.</div>
                     </div>
                   </td>
                 </tr>
@@ -349,6 +393,11 @@
     <input id="yearStart" type="number">
     <input id="yearEnd" type="number">
     <input id="maxResults" type="number" value="50" min="1" max="250">
+    <select id="searchResource">
+      <option value="openalex">OpenAlex</option>
+      <option value="pubmed">PubMed</option>
+      <option value="europe_pmc">Europe PMC</option>
+    </select>
     <button id="searchBtn" type="button">Search</button>
   </div>
   <div id="detailPopupOverlay" class="detail-popup-overlay" hidden></div>

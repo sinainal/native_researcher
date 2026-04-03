@@ -11,6 +11,7 @@ import httpx
 from app.core.config import Settings
 from app.schemas.article import ArticleReference
 from app.schemas.pdf import PDFCandidate, PDFDownloadRequest, PDFDownloadResult, PDFResolveResponse
+from app.services.new_method_exact_bridge import ExactNewMethodBridge
 from app.services.pdf_service import PDFService
 from app.utils.cache import TTLCache
 
@@ -81,6 +82,123 @@ def test_pdf_service_downloads_from_crossref_first(tmp_path) -> None:
         assert any("paper.pdf" in call for call in calls)
 
     asyncio.run(runner())
+
+
+def test_exact_bridge_uses_nature_direct_pdf_fast_path(tmp_path) -> None:
+    async def runner() -> None:
+        calls: list[tuple[str, str | None]] = []
+        pdf_bytes = b"%PDF-1.7 nature direct pdf"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((str(request.url), request.headers.get("range")))
+            if str(request.url) == "https://www.nature.com/articles/s41598-026-45504-2.pdf":
+                if request.headers.get("range"):
+                    return httpx.Response(
+                        206,
+                        headers={
+                            "content-type": "application/pdf",
+                            "content-range": f"bytes 0-{len(pdf_bytes) - 1}/{len(pdf_bytes)}",
+                        },
+                        content=pdf_bytes,
+                    )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/pdf"},
+                    content=pdf_bytes,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        bridge = ExactNewMethodBridge(transport=httpx.MockTransport(handler))
+        result = await bridge.run(
+            ArticleReference(title="Nature OA", year="2026", doi="10.1038/s41598-026-45504-2"),
+            output_dir=tmp_path,
+            mode="fast",
+            budget_seconds=20.0,
+        )
+
+        assert result["success"] is True
+        assert result["source"] == "nature_direct_pdf"
+        assert result["file_path"] is not None
+        assert calls == [
+            ("https://www.nature.com/articles/s41598-026-45504-2.pdf", "bytes=0-16383"),
+            ("https://www.nature.com/articles/s41598-026-45504-2.pdf", None),
+        ]
+
+    asyncio.run(runner())
+
+
+def test_exact_bridge_uses_nature_html_fast_fallback(tmp_path) -> None:
+    async def runner() -> None:
+        calls: list[tuple[str, str | None]] = []
+        article_url = "https://www.nature.com/articles/s41467-026-71180-x"
+        pdf_url = f"{article_url}.pdf"
+        html_body = (
+            "<html><head>"
+            "<meta name='citation_title' content='Nature communications article' />"
+            f"<meta name='citation_pdf_url' content='{pdf_url}' />"
+            "</head><body>"
+            + ("full text content " * 1200)
+            + "</body></html>"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((str(request.url), request.headers.get("range")))
+            if str(request.url) == pdf_url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html_body,
+                )
+            if str(request.url) == article_url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text=html_body,
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        bridge = ExactNewMethodBridge(transport=httpx.MockTransport(handler))
+        result = await bridge.run(
+            ArticleReference(title="Nature communications OA", year="2026", doi="10.1038/s41467-026-71180-x"),
+            output_dir=tmp_path,
+            mode="fast",
+            budget_seconds=20.0,
+        )
+
+        assert result["success"] is True
+        assert result["source"] == "nature_html_fulltext"
+        assert result["file_path"] is not None
+        assert result["file_path"].endswith(".html")
+        assert calls == [
+            (pdf_url, "bytes=0-16383"),
+            (article_url, None),
+        ]
+
+    asyncio.run(runner())
+
+
+def test_pdf_service_download_concurrency_throttles_nature_dominant_fast_batches() -> None:
+    articles = [
+        ArticleReference(doi="10.1038/s41598-026-45504-2"),
+        ArticleReference(doi="10.1038/s42003-026-09928-w"),
+        ArticleReference(doi="10.1038/s41467-026-71180-x"),
+        ArticleReference(doi="10.1038/s41598-026-44174-4"),
+        ArticleReference(doi="10.1007/s44445-026-00156-w"),
+    ]
+
+    assert PDFService._download_concurrency_for_articles("fast", articles) == 2
+
+
+def test_pdf_service_download_concurrency_keeps_default_for_mixed_fast_batches() -> None:
+    articles = [
+        ArticleReference(doi="10.1000/a"),
+        ArticleReference(doi="10.1001/b"),
+        ArticleReference(doi="10.1002/c"),
+        ArticleReference(doi="10.1038/s41598-026-45504-2"),
+        ArticleReference(doi="10.1007/s44445-026-00156-w"),
+    ]
+
+    assert PDFService._download_concurrency_for_articles("fast", articles) == 5
 
 
 def test_pdf_service_downloads_from_pmc_oa_package(tmp_path) -> None:

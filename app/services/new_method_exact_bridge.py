@@ -68,9 +68,16 @@ class ExactNewMethodBridge:
             downloader = self._make_downloader(mode=mode, output_dir=Path(temp_dir), budget_seconds=60.0)
             try:
                 all_candidates: list[Any] = []
+                fast_direct_candidates: list[Any] = []
                 if article_ref.pmc_id:
                     pmc_candidates = await downloader._pmc_oa_candidates(article_ref.pmc_id)
                     all_candidates.extend(pmc_candidates)
+
+                if article_ref.doi and mode == "fast":
+                    fast_direct_candidates = downloader._dedupe_candidates(
+                        downloader._nature_direct_candidates(article_ref.doi)
+                    )
+                    all_candidates.extend(fast_direct_candidates)
 
                 if article_ref.doi:
                     if mode == "fast":
@@ -78,7 +85,9 @@ class ExactNewMethodBridge:
                             downloader._crossref_candidates(article_ref.doi),
                             downloader._openalex_candidates(article_ref.doi),
                             downloader._doaj_candidates(article_ref.doi),
-                            downloader._ncbi_linkout_candidates(article_ref.pmid) if article_ref.pmid else asyncio.sleep(0, result=[]),
+                            asyncio.sleep(0, result=[]) if fast_direct_candidates else (
+                                downloader._ncbi_linkout_candidates(article_ref.pmid) if article_ref.pmid else asyncio.sleep(0, result=[])
+                            ),
                             downloader._europe_pmc_candidates(article_ref) if article_ref.pmc_id else asyncio.sleep(0, result=[]),
                         )
                         all_candidates.extend(crossref_candidates)

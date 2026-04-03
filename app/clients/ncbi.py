@@ -234,6 +234,8 @@ class NcbiClient:
                     reference_count=int(details.get("reference_count") or 0),
                     doi=details.get("doi"),
                     pmc_id=details.get("pmc_id"),
+                    issn_l=details.get("issn_l"),
+                    issns=list(details.get("issns") or []),
                 )
             )
         return articles

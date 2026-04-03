@@ -23,6 +23,12 @@ class Article(BaseModel):
     reference_count: int = 0
     doi: str | None = None
     pmc_id: str | None = None
+    issn_l: str | None = None
+    issns: list[str] = Field(default_factory=list)
+    journal_quartile: str | None = None
+    journal_metric_year: int | None = None
+    journal_sjr: float | None = None
+    journal_metrics_source: str | None = None
 
 
 class ArticleReference(BaseModel):

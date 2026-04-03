@@ -29,6 +29,17 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     return default
 
 
+def _default_journal_metrics_url() -> str:
+    return "https://zenodo.org/api/records/15206056/files/Scimago%20Journal%20Rank%202023.xlsx/content"
+
+
+def _normalize_search_resource(value: str | None, default: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"openalex", "pubmed", "europe_pmc"}:
+        return normalized
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Native Researcher"
@@ -47,13 +58,17 @@ class Settings:
     ncbi_api_key_path: Path = APP_ROOT / "ncbi_api"
     unpaywall_email_path: Path = APP_ROOT / "unpaywall_email"
     pubmed_oa_only_path: Path = APP_ROOT / "pubmed_oa_only"
+    ai_primary_search_resource_path: Path = APP_ROOT / "ai_primary_search_resource"
     unpaywall_email: str | None = None
     ncbi_api_key: str | None = None
     pubmed_oa_only: bool = True
+    ai_primary_search_resource: str = "openalex"
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
     pubmed_default_batch_size: int = 250
     pubmed_max_batch_size: int = 250
     pubmed_requests_per_second: float = 3.0
+    openalex_requests_per_second: float = 5.0
+    europe_pmc_requests_per_second: float = 4.0
     search_cache_ttl_seconds: int = 900
     search_cache_max_entries: int = 128
     helper_cache_ttl_seconds: int = 7200
@@ -66,6 +81,9 @@ class Settings:
     pdf_candidate_download_concurrency: int = 5
     pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
+    journal_metrics_enabled: bool = True
+    journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
+    journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
     download_root: Path = Path("downloads")
     workspace_root: Path = Path("workspace")
 
@@ -75,6 +93,9 @@ class Settings:
         ncbi_api_key_path = Path(os.getenv("NCBI_API_KEY_FILE", str(APP_ROOT / "ncbi_api")))
         unpaywall_email_path = Path(os.getenv("UNPAYWALL_EMAIL_FILE", str(APP_ROOT / "unpaywall_email")))
         pubmed_oa_only_path = Path(os.getenv("PUBMED_OA_ONLY_FILE", str(APP_ROOT / "pubmed_oa_only")))
+        ai_primary_search_resource_path = Path(
+            os.getenv("AI_PRIMARY_SEARCH_RESOURCE_FILE", str(APP_ROOT / "ai_primary_search_resource"))
+        )
         assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_secret_file(assistant_api_key_path)
         api_key = os.getenv("NCBI_API_KEY") or _read_secret_file(ncbi_api_key_path)
         unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_secret_file(unpaywall_email_path)
@@ -82,9 +103,14 @@ class Settings:
             os.getenv("PUBMED_OA_ONLY") or _read_secret_file(pubmed_oa_only_path),
             True,
         )
+        ai_primary_search_resource = _normalize_search_resource(
+            os.getenv("AI_PRIMARY_SEARCH_RESOURCE") or _read_secret_file(ai_primary_search_resource_path),
+            "openalex",
+        )
         default_rps = 10.0 if api_key else 3.0
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", "workspace"))
+        journal_metrics_enabled = _parse_bool(os.getenv("JOURNAL_METRICS_ENABLED"), True)
         return cls(
             debug=os.getenv("DEBUG", "false").lower() == "true",
             http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
@@ -101,9 +127,11 @@ class Settings:
             ncbi_api_key_path=ncbi_api_key_path,
             unpaywall_email_path=unpaywall_email_path,
             pubmed_oa_only_path=pubmed_oa_only_path,
+            ai_primary_search_resource_path=ai_primary_search_resource_path,
             unpaywall_email=unpaywall_email,
             ncbi_api_key=api_key,
             pubmed_oa_only=pubmed_oa_only,
+            ai_primary_search_resource=ai_primary_search_resource,
             request_user_agent=os.getenv(
                 "REQUEST_USER_AGENT",
                 "NativeResearcher/0.1 (FastAPI Searcher AI Service)",
@@ -112,6 +140,12 @@ class Settings:
             pubmed_max_batch_size=int(os.getenv("PUBMED_MAX_BATCH_SIZE", "250")),
             pubmed_requests_per_second=float(
                 os.getenv("PUBMED_REQUESTS_PER_SECOND", str(default_rps))
+            ),
+            openalex_requests_per_second=float(
+                os.getenv("OPENALEX_REQUESTS_PER_SECOND", "5")
+            ),
+            europe_pmc_requests_per_second=float(
+                os.getenv("EUROPE_PMC_REQUESTS_PER_SECOND", "4")
             ),
             search_cache_ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "900")),
             search_cache_max_entries=int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "128")),
@@ -130,6 +164,15 @@ class Settings:
             ),
             pdf_resolve_requests_per_second=float(
                 os.getenv("PDF_RESOLVE_REQUESTS_PER_SECOND", "20")
+            ),
+            journal_metrics_enabled=journal_metrics_enabled,
+            journal_metrics_bootstrap_url=os.getenv(
+                "JOURNAL_METRICS_BOOTSTRAP_URL",
+                _default_journal_metrics_url(),
+            ),
+            journal_metrics_source_name=os.getenv(
+                "JOURNAL_METRICS_SOURCE_NAME",
+                "scimago_sjr_2023_zenodo",
             ),
             download_root=download_root,
             workspace_root=workspace_root,

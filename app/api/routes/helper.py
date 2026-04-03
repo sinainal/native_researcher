@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas.helper import HelperChatRequest, HelperChatResponse, HelperResetRequest
-from app.services.helper_ai_service import HelperAIService
+from app.services.agent.helper_ai_service import HelperAIService
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 

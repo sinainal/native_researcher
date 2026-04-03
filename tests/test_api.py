@@ -188,6 +188,7 @@ def test_api_endpoints() -> None:
                 ncbi_api_key_path=temp_root / "ncbi_api",
                 unpaywall_email_path=temp_root / "unpaywall_email",
                 pubmed_oa_only_path=temp_root / "pubmed_oa_only",
+                ai_primary_search_resource_path=temp_root / "ai_primary_search_resource",
             )
             app = create_app(
                 settings=settings,
@@ -248,6 +249,7 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
                     "pubmed_oa_only": True,
+                    "ai_primary_search_resource": "openalex",
                 }
 
                 update_api_keys = await client.put(
@@ -257,6 +259,7 @@ def test_api_endpoints() -> None:
                         "ncbi_api_key": "ncbi-secret",
                         "unpaywall_email": "me@example.com",
                         "pubmed_oa_only": False,
+                        "ai_primary_search_resource": "pubmed",
                     },
                 )
                 assert update_api_keys.status_code == 200
@@ -265,6 +268,7 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "ncbi-secret",
                     "unpaywall_email": "me@example.com",
                     "pubmed_oa_only": False,
+                    "ai_primary_search_resource": "pubmed",
                 }
 
                 projects = await client.get("/app/projects")

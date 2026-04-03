@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import ipaddress
+import math
 import re
 import tarfile
 import tempfile
@@ -597,7 +598,7 @@ class PDFService:
         target_dir.mkdir(parents=True, exist_ok=True)
         articles = request.articles[: request.max_articles] if request.max_articles else request.articles
         exact_mode = self._exact_mode(request.mode)
-        semaphore = asyncio.Semaphore(self._download_concurrency(exact_mode))
+        semaphore = asyncio.Semaphore(self._download_concurrency_for_articles(exact_mode, articles))
         batch_id = self._new_batch_id()
         batch_started = time.monotonic()
         self._log_download_event(
@@ -711,7 +712,7 @@ class PDFService:
         target_dir.mkdir(parents=True, exist_ok=True)
 
         exact_mode = self._exact_mode(mode)
-        semaphore = asyncio.Semaphore(self._download_concurrency(exact_mode))
+        semaphore = asyncio.Semaphore(self._download_concurrency_for_articles(exact_mode, articles))
         batch_id = self._new_batch_id()
         batch_started = time.monotonic()
         self._log_download_event(
@@ -3029,6 +3030,21 @@ class PDFService:
     @staticmethod
     def _download_concurrency(mode: str) -> int:
         return 20 if mode == "fast" else 16
+
+    @classmethod
+    def _download_concurrency_for_articles(cls, mode: str, articles: list[ArticleReference]) -> int:
+        batch_size = max(1, len(articles))
+        base = min(cls._download_concurrency(mode), batch_size)
+        if mode != "fast":
+            return base
+        nature_count = sum(
+            1
+            for article in articles
+            if (article.doi or "").lower().startswith("10.1038/")
+        )
+        if nature_count >= max(2, math.ceil(batch_size * 0.6)):
+            return min(2, batch_size)
+        return base
 
     @staticmethod
     def _candidate_concurrency(mode: str) -> int:

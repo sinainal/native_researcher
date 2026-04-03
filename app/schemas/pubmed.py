@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.article import ArticleReference
 from app.schemas.article import Article
+
+SearchResource = Literal["openalex", "pubmed", "europe_pmc"]
 
 
 class PubMedSearchRequest(BaseModel):
@@ -17,6 +21,7 @@ class PubMedSearchRequest(BaseModel):
     min_cite: int | None = Field(default=None, ge=0, le=1000000)
     article_type: str | None = Field(default=None, min_length=1, max_length=200)
     use_cache: bool = True
+    preferred_source: SearchResource = "openalex"
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "PubMedSearchRequest":
@@ -38,6 +43,9 @@ class PubMedSearchMeta(BaseModel):
     elapsed_ms: int
     cache_hit: bool
     oa_only: bool = False
+    primary_source: str | None = None
+    sources_used: list[str] = Field(default_factory=list)
+    fallback_used: bool = False
 
 
 class PubMedSearchResponse(BaseModel):

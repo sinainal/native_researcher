@@ -1,6 +1,8 @@
 const state = {
   allArticles: [],
   articles: [],
+  datasetRevision: 0,
+  projectStateLoadToken: 0,
   projectId: null,
   projectPath: null,
   projectName: "Project",
@@ -43,6 +45,7 @@ const els = {
   yearStart: document.getElementById("yearStart"),
   yearEnd: document.getElementById("yearEnd"),
   maxResults: document.getElementById("maxResults"),
+  searchResource: document.getElementById("searchResource"),
   searchBtn: document.getElementById("searchBtn"),
   chatSidebar: document.getElementById("chatSidebar"),
   sidebarToggleBtn: document.getElementById("sidebarToggleBtn"),
@@ -61,6 +64,7 @@ const els = {
   workspaceQueryDetail: document.getElementById("workspaceQueryDetail"),
   sidebarQuickQuery: document.getElementById("sidebarQuickQuery"),
   sidebarQuickMaxResults: document.getElementById("sidebarQuickMaxResults"),
+  sidebarQuickSearchResource: document.getElementById("sidebarQuickSearchResource"),
   sidebarQuickSearchBtn: document.getElementById("sidebarQuickSearchBtn"),
   sidebarQuickStatus: document.getElementById("sidebarQuickStatus"),
   workspaceDownloadCount: document.getElementById("workspaceDownloadCount"),
@@ -90,6 +94,10 @@ const els = {
   workspaceSettingsState: document.getElementById("workspaceSettingsState"),
   pubmedOaOnlyToggle: document.getElementById("pubmedOaOnlyToggle"),
   pubmedOaOnlyStatus: document.getElementById("pubmedOaOnlyStatus"),
+  aiPrimarySearchResourceInput: document.getElementById("aiPrimarySearchResourceInput"),
+  aiPrimarySearchResourceStatus: document.getElementById("aiPrimarySearchResourceStatus"),
+  downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
+  downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
   assistantSendBtn: document.getElementById("assistantSendBtn"),
   assistantModelBtn: document.getElementById("assistantModelBtn"),
@@ -133,6 +141,8 @@ const assistantSidebarStorageKey = "native_researcher_sidebar_open";
 const activeProjectStorageKey = "native_researcher_active_project";
 const sidebarPanelStorageKey = "native_researcher_sidebar_panel";
 const pubmedOaOnlyStorageKey = "native_researcher_pubmed_oa_only";
+const downloadWorkersStorageKey = "native_researcher_download_workers";
+const searchResourceStorageKey = "native_researcher_search_resource";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
@@ -155,8 +165,33 @@ const runtime = {
   ncbiApiKey: "",
   unpaywallEmail: "",
   pubmedOaOnly: localStorage.getItem(pubmedOaOnlyStorageKey) !== "false",
+  downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
+  searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "openalex"),
+  aiPrimarySearchResource: "openalex",
   assistantModel: stateModel,
 };
+
+function clampDownloadWorkers(value) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return 4;
+  return Math.min(8, Math.max(1, parsed));
+}
+
+function normalizeSearchResource(value, fallback = "openalex") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["openalex", "pubmed", "europe_pmc"].includes(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function searchResourceLabel(value) {
+  const normalized = normalizeSearchResource(value, "openalex");
+  if (normalized === "openalex") return "OpenAlex";
+  if (normalized === "pubmed") return "PubMed";
+  if (normalized === "europe_pmc") return "Europe PMC";
+  return "OpenAlex";
+}
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
 
@@ -379,6 +414,11 @@ function renderQueryDetail() {
     record.search_payload?.year_end ? `to ${record.search_payload.year_end}` : "",
     record.search_payload?.article_type ? record.search_payload.article_type : "",
   ].filter(Boolean).join(" · ");
+  const requestedSource = searchResourceLabel(record.search_payload?.preferred_source || "openalex");
+  const actualSource = searchResourceLabel(meta.primary_source || record.search_payload?.preferred_source || "openalex");
+  const sourcesUsed = Array.isArray(meta.sources_used) && meta.sources_used.length
+    ? meta.sources_used.map((item) => searchResourceLabel(item)).join(", ")
+    : actualSource;
   els.workspaceQueryDetail.innerHTML = `
     <div class="native-query-detail-header">
       <div class="native-query-detail-kicker">Query Details</div>
@@ -401,6 +441,14 @@ function renderQueryDetail() {
       <div class="native-query-detail-item">
         <div class="native-query-detail-label">Requests</div>
         <div class="native-query-detail-value">${escapeHtml(String(meta.request_count ?? 0))} requests · ${escapeHtml(String(meta.elapsed_ms ?? 0))} ms</div>
+      </div>
+      <div class="native-query-detail-item">
+        <div class="native-query-detail-label">Source</div>
+        <div class="native-query-detail-value">${escapeHtml(requestedSource)} requested · ${escapeHtml(actualSource)} used</div>
+      </div>
+      <div class="native-query-detail-item">
+        <div class="native-query-detail-label">Database</div>
+        <div class="native-query-detail-value">${escapeHtml(sourcesUsed)}</div>
       </div>
       <div class="native-query-detail-item">
         <div class="native-query-detail-label">Filters</div>
@@ -459,8 +507,13 @@ function syncSidebarQuickControls() {
     const nextMax = normalizedNumber(els.maxResults, 20);
     els.sidebarQuickMaxResults.value = String(nextMax);
   }
+  if (els.searchResource && els.sidebarQuickSearchResource) {
+    const nextResource = normalizeSearchResource(els.searchResource.value || runtime.searchResource, "openalex");
+    els.searchResource.value = nextResource;
+    els.sidebarQuickSearchResource.value = nextResource;
+  }
   if (els.sidebarQuickStatus) {
-    els.sidebarQuickStatus.textContent = "Uses the same OA-aware PubMed search and downloader.";
+    els.sidebarQuickStatus.textContent = `Uses the same search stack. Primary source: ${searchResourceLabel(runtime.searchResource)}.`;
   }
 }
 
@@ -562,6 +615,9 @@ function restoreQueryRecord(queryId) {
     els.yearStart.value = record.search_payload.year_start ? String(record.search_payload.year_start) : "";
     els.yearEnd.value = record.search_payload.year_end ? String(record.search_payload.year_end) : "";
     els.maxResults.value = String(record.search_payload.max_results || 50);
+    runtime.searchResource = normalizeSearchResource(record.search_payload.preferred_source, runtime.searchResource || "openalex");
+    localStorage.setItem(searchResourceStorageKey, runtime.searchResource);
+    if (els.searchResource) els.searchResource.value = runtime.searchResource;
     autoResizeTextarea(els.query);
   }
   syncSidebarQuickControls();
@@ -571,8 +627,18 @@ function restoreQueryRecord(queryId) {
 
 async function loadProjectState() {
   if (!state.projectId) return;
+  const projectId = state.projectId;
+  const loadToken = ++state.projectStateLoadToken;
+  const datasetRevision = state.datasetRevision;
   try {
     const payload = await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}/state`);
+    if (
+      projectId !== state.projectId
+      || loadToken !== state.projectStateLoadToken
+      || datasetRevision !== state.datasetRevision
+    ) {
+      return;
+    }
     const restoredSelectedIds = new Set(Array.isArray(payload.selected_ids) ? payload.selected_ids : []);
     const restoredDetailArticleId = Number.isInteger(payload.detail_article_id) ? payload.detail_article_id : null;
     state.queryHistory = Array.isArray(payload.query_history) ? payload.query_history : [];
@@ -600,6 +666,13 @@ async function loadProjectState() {
       renderResults();
     }
   } catch (error) {
+    if (
+      projectId !== state.projectId
+      || loadToken !== state.projectStateLoadToken
+      || datasetRevision !== state.datasetRevision
+    ) {
+      return;
+    }
     state.queryHistory = [];
     state.activeQueryId = null;
     state.queryDetailId = null;
@@ -664,7 +737,7 @@ function updateProjectUI() {
 function renderSettingsPanel() {
   const enabled = Boolean(runtime.pubmedOaOnly);
   if (els.workspaceSettingsState) {
-    els.workspaceSettingsState.textContent = enabled ? "On" : "Off";
+    els.workspaceSettingsState.textContent = `${enabled ? "OA" : "Custom"} · ${searchResourceLabel(runtime.aiPrimarySearchResource)} · x${runtime.downloadWorkers}`;
   }
   if (els.pubmedOaOnlyToggle) {
     els.pubmedOaOnlyToggle.checked = enabled;
@@ -673,6 +746,25 @@ function renderSettingsPanel() {
     els.pubmedOaOnlyStatus.textContent = enabled
       ? "OA filter is active. Every PubMed search adds free full text[sb]."
       : "OA filter is off. PubMed queries run exactly as written.";
+  }
+  if (els.downloadWorkerCountInput) {
+    els.downloadWorkerCountInput.value = String(runtime.downloadWorkers);
+  }
+  if (els.downloadWorkerCountStatus) {
+    els.downloadWorkerCountStatus.textContent = `Batch downloads use ${runtime.downloadWorkers} parallel worker${runtime.downloadWorkers === 1 ? "" : "s"}.`;
+  }
+  if (els.aiPrimarySearchResourceInput) {
+    els.aiPrimarySearchResourceInput.value = normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex");
+  }
+  if (els.aiPrimarySearchResourceStatus) {
+    const label = searchResourceLabel(runtime.aiPrimarySearchResource);
+    els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
+  }
+  if (els.searchResource) {
+    els.searchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
+  }
+  if (els.sidebarQuickSearchResource) {
+    els.sidebarQuickSearchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
   }
 }
 
@@ -691,6 +783,10 @@ function applyApiKeyValues(payload = {}) {
   runtime.pubmedOaOnly = payload.pubmed_oa_only !== undefined
     ? Boolean(payload.pubmed_oa_only)
     : localStorage.getItem(pubmedOaOnlyStorageKey) !== "false";
+  runtime.aiPrimarySearchResource = normalizeSearchResource(
+    payload.ai_primary_search_resource,
+    runtime.aiPrimarySearchResource || "openalex",
+  );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
@@ -713,6 +809,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
       ncbi_api_key: runtime.ncbiApiKey,
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
+      ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
       ...overrides,
     }),
   });
@@ -721,6 +818,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
     has_ncbi_api_key: Boolean(runtime.ncbiApiKey),
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
+    ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1268,6 +1366,97 @@ function articleTypeLabel(article) {
   return article.article_type || article.article_types?.[0] || "-";
 }
 
+function currentSearchSource() {
+  return normalizeSearchResource(
+    state.lastPubmedResponse?.meta?.primary_source
+      || state.lastSearchPayload?.preferred_source
+      || runtime.searchResource,
+    "openalex",
+  );
+}
+
+function currentSearchSourceLabel() {
+  return searchResourceLabel(currentSearchSource());
+}
+
+function currentSearchSourcesUsed() {
+  const used = state.lastPubmedResponse?.meta?.sources_used;
+  if (Array.isArray(used) && used.length) {
+    return used.map((item) => searchResourceLabel(item)).join(", ");
+  }
+  return currentSearchSourceLabel();
+}
+
+function detailFieldPresentation(field) {
+  const source = currentSearchSource();
+  if (source === "openalex") {
+    switch (field) {
+      case "mesh":
+        return {
+          label: "Primary Topic",
+          title: "Primary Topic",
+          empty: "Primary topic not available.",
+        };
+      case "keywords":
+        return {
+          label: "Topics",
+          title: "Topics",
+          empty: "Topics not available.",
+        };
+      case "related_articles":
+        return {
+          label: "Related Works",
+          title: "Related Works",
+          empty: "Related works not available.",
+        };
+      default:
+        break;
+    }
+  }
+  switch (field) {
+    case "mesh":
+      return {
+        label: "MeSH",
+        title: "MeSH",
+        empty: "MeSH terms not available.",
+      };
+    case "keywords":
+      return {
+        label: "Keywords",
+        title: "Keywords",
+        empty: "Keywords not available.",
+      };
+    case "related_articles":
+      return {
+        label: "Related Articles",
+        title: "Related Articles",
+        empty: "No related articles found.",
+      };
+    default:
+      return {
+        label: field,
+        title: field,
+        empty: "Not available.",
+      };
+  }
+}
+
+function articleTitleMeta(article) {
+  const bits = [article.journal || "", article.publication_date || ""].filter(Boolean);
+  return bits.join(" · ");
+}
+
+function journalQuartileLabel(article) {
+  return article.journal_quartile || "-";
+}
+
+function journalQuartileSubtext(article) {
+  const bits = [];
+  if (typeof article.journal_sjr === "number") bits.push(`SJR ${article.journal_sjr.toFixed(3)}`);
+  if (Number.isInteger(article.journal_metric_year)) bits.push(String(article.journal_metric_year));
+  return bits.join(" · ");
+}
+
 function citationLabel(article) {
   if (Number.isInteger(article.citation_count)) return String(article.citation_count);
   if (state.citationsLoading && (article.pmid || article.doi)) return "…";
@@ -1512,7 +1701,11 @@ function applyDownloadResultState(article, result) {
     };
     setArticleDownloadability(article.id, next);
     rememberArticleDownloadability(article, next);
-    return true;
+    return { status: "success", info: next };
+  }
+  const current = getDownloadability(article.id);
+  if (current.status === "downloaded" && current.openUrl) {
+    return { status: "preserved", info: current };
   }
   const next = {
     status: "failed",
@@ -1521,7 +1714,7 @@ function applyDownloadResultState(article, result) {
     openUrl: null,
   };
   setArticleDownloadability(article.id, next);
-  return false;
+  return { status: "failed", info: next };
 }
 
 async function downloadSingleArticle(articleId) {
@@ -1540,7 +1733,8 @@ async function downloadSingleArticle(articleId) {
 
   try {
     const result = await requestArticleDownload(article);
-    if (applyDownloadResultState(article, result)) {
+    const outcome = applyDownloadResultState(article, result);
+    if (outcome.status === "success" || outcome.status === "preserved") {
       trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
         article_id: article.id,
         pmid: article.pmid || "",
@@ -1554,11 +1748,20 @@ async function downloadSingleArticle(articleId) {
       });
     }
   } catch (error) {
-    trackAppEvent("error", "pdf_download_failed", error.message || "Download failed.", {
-      pmid: article.pmid || "",
-      article_id: article.id,
-    });
-    applyDownloadResultState(article, { success: false, error: error.message || "Download failed." });
+    const result = { success: false, error: error.message || "Download failed." };
+    const outcome = applyDownloadResultState(article, result);
+    if (outcome.status === "success" || outcome.status === "preserved") {
+      trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
+        article_id: article.id,
+        pmid: article.pmid || "",
+        project_id: state.projectId || "",
+      });
+    } else {
+      trackAppEvent("error", "pdf_download_failed", result.error, {
+        pmid: article.pmid || "",
+        article_id: article.id,
+      });
+    }
   }
 
   scheduleResultsRender();
@@ -1586,7 +1789,8 @@ function applyBatchDownloadResults(chosen, results) {
     const article = chosenByKey.get(key);
     if (!article) return;
     seenKeys.add(key);
-    if (applyDownloadResultState(article, result)) {
+    const outcome = applyDownloadResultState(article, result);
+    if (outcome.status === "success" || outcome.status === "preserved") {
       successes.push({ article, result });
     } else {
       failures.push({ article, result });
@@ -1596,8 +1800,12 @@ function applyBatchDownloadResults(chosen, results) {
     const key = articleIdentityKey(article);
     if (seenKeys.has(key)) return;
     const result = { success: false, error: "Download result was not returned." };
-    applyDownloadResultState(article, result);
-    failures.push({ article, result });
+    const outcome = applyDownloadResultState(article, result);
+    if (outcome.status === "success" || outcome.status === "preserved") {
+      successes.push({ article, result });
+    } else {
+      failures.push({ article, result });
+    }
   });
   scheduleResultsRender();
   return { successes, failures };
@@ -1609,7 +1817,7 @@ async function downloadSelectedArticles() {
     return isDownloadReadyStatus(current.status) || current.status === "downloaded";
   });
   if (!chosen.length) return;
-  const concurrency = 1;
+  const concurrency = clampDownloadWorkers(runtime.downloadWorkers);
   const singleTimeoutMs = 65000;
   const originalBatchLabel = els.quickDownloadSelectedBtn?.textContent || "Download Selected";
   if (els.quickDownloadSelectedBtn) {
@@ -1632,6 +1840,8 @@ async function downloadSelectedArticles() {
     const failures = [];
     let cursor = 0;
     let completed = 0;
+    const smallBatchMode = chosen.length <= 20;
+    const smallBatchSize = 5;
 
     const refreshDownloads = async () => {
       await Promise.allSettled([loadProjectDownloads(), touchProjectActivity()]);
@@ -1643,10 +1853,30 @@ async function downloadSelectedArticles() {
       }
     };
 
+    const recordBatchOutcomes = (entries, tracker) => {
+      entries.forEach(({ article, result }) => {
+        tracker.push({ article, result });
+        if (tracker === successes) {
+          trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        } else {
+          trackAppEvent("error", "pdf_download_failed", result?.error || "Download failed.", {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        }
+      });
+    };
+
     const processArticle = async (article, index) => {
       try {
         const result = await requestArticleDownload(article, { timeoutMs: singleTimeoutMs });
-        if (applyDownloadResultState(article, result)) {
+        const outcome = applyDownloadResultState(article, result);
+        if (outcome.status === "success" || outcome.status === "preserved") {
           successes.push({ article, result });
           trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
             article_id: article.id,
@@ -1663,13 +1893,22 @@ async function downloadSelectedArticles() {
         }
       } catch (singleError) {
         const result = { success: false, error: singleError.message || "Download failed." };
-        applyDownloadResultState(article, result);
-        failures.push({ article, result });
-        trackAppEvent("error", "pdf_download_failed", result.error, {
-          article_id: article.id,
-          pmid: article.pmid || "",
-          project_id: state.projectId || "",
-        });
+        const outcome = applyDownloadResultState(article, result);
+        if (outcome.status === "success" || outcome.status === "preserved") {
+          successes.push({ article, result });
+          trackAppEvent("info", "pdf_downloaded", article.title || "File downloaded.", {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        } else {
+          failures.push({ article, result });
+          trackAppEvent("error", "pdf_download_failed", result.error, {
+            article_id: article.id,
+            pmid: article.pmid || "",
+            project_id: state.projectId || "",
+          });
+        }
       }
       completed += 1;
       updateButtonLabel();
@@ -1677,6 +1916,24 @@ async function downloadSelectedArticles() {
       if (completed === chosen.length || completed % concurrency === 0 || index < concurrency) {
         await refreshDownloads();
       }
+    };
+
+    const processBatchChunk = async (chunk, chunkIndex) => {
+      try {
+        const response = await requestBatchDownload(chunk, { timeoutMs: 90000 });
+        const outcome = applyBatchDownloadResults(chunk, response?.results || []);
+        recordBatchOutcomes(outcome.successes, successes);
+        recordBatchOutcomes(outcome.failures, failures);
+      } catch (_batchError) {
+        for (let offset = 0; offset < chunk.length; offset += 1) {
+          await processArticle(chunk[offset], (chunkIndex * smallBatchSize) + offset);
+        }
+        return;
+      }
+      completed += chunk.length;
+      updateButtonLabel();
+      scheduleResultsRender();
+      await refreshDownloads();
     };
 
     const worker = async () => {
@@ -1689,7 +1946,14 @@ async function downloadSelectedArticles() {
     };
 
     updateButtonLabel();
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    if (smallBatchMode) {
+      for (let start = 0; start < chosen.length; start += smallBatchSize) {
+        const chunk = chosen.slice(start, start + smallBatchSize);
+        await processBatchChunk(chunk, Math.floor(start / smallBatchSize));
+      }
+    } else {
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    }
     await refreshDownloads();
   } catch (error) {
     chosen.forEach((article) => {
@@ -1717,6 +1981,7 @@ function compactList(items, limit = 8) {
 
 function detailMetaMarkup(article) {
   const lines = [];
+  lines.push(`Source ${currentSearchSourceLabel()}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
   if (article.doi) lines.push(`DOI ${article.doi}`);
@@ -1727,6 +1992,7 @@ function detailMetaMarkup(article) {
 function detailMetaText(article) {
   const lines = [];
   if (article.title) lines.push(article.title);
+  lines.push(`Source ${currentSearchSourceLabel()}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
   if (article.doi) lines.push(`DOI ${article.doi}`);
@@ -1746,44 +2012,72 @@ function detailPopupPayload(article, field) {
       return {
         eyebrow: "Article Detail",
         title: "Journal & Publication",
-        meta: article.title || "",
-        body: [article.journal || "-", article.publication_date || "-"].join("\n"),
+        meta: detailMetaText(article),
+        body: [
+          `Database Source: ${currentSearchSourceLabel()}`,
+          `Journal: ${article.journal || "-"}`,
+          `Publication: ${article.publication_date || "-"}`,
+          `Q Rank: ${journalQuartileLabel(article)}`,
+          `SJR: ${typeof article.journal_sjr === "number" ? article.journal_sjr.toFixed(3) : "-"}`,
+          `Metric Year: ${Number.isInteger(article.journal_metric_year) ? article.journal_metric_year : "-"}`,
+        ].join("\n"),
+      };
+    case "journal_metrics":
+      return {
+        eyebrow: "Journal Metrics",
+        title: article.journal || "Journal Rank",
+        meta: detailMetaText(article),
+        body: [
+          `Q Rank: ${journalQuartileLabel(article)}`,
+          `SJR: ${typeof article.journal_sjr === "number" ? article.journal_sjr.toFixed(3) : "-"}`,
+          `Metric Year: ${Number.isInteger(article.journal_metric_year) ? article.journal_metric_year : "-"}`,
+          `Metrics Source: ${article.journal_metrics_source || "-"}`,
+        ].join("\n"),
       };
     case "authors":
       return {
         eyebrow: "Article Detail",
         title: "Authors",
-        meta: article.title || "",
+        meta: detailMetaText(article),
         body: article.authors?.length ? article.authors.join("\n") : "Author information not available.",
       };
     case "mesh":
-      return {
-        eyebrow: "Article Detail",
-        title: "MeSH",
-        meta: article.title || "",
-        body: article.mesh_terms?.length ? article.mesh_terms.join(", ") : "MeSH terms not available.",
-      };
+      {
+        const presentation = detailFieldPresentation("mesh");
+        return {
+          eyebrow: "Article Detail",
+          title: presentation.title,
+          meta: detailMetaText(article),
+          body: article.mesh_terms?.length ? article.mesh_terms.join(", ") : presentation.empty,
+        };
+      }
     case "keywords":
-      return {
-        eyebrow: "Article Detail",
-        title: "Keywords",
-        meta: article.title || "",
-        body: article.keywords?.length ? article.keywords.join(", ") : "Keywords not available.",
-      };
+      {
+        const presentation = detailFieldPresentation("keywords");
+        return {
+          eyebrow: "Article Detail",
+          title: presentation.title,
+          meta: detailMetaText(article),
+          body: article.keywords?.length ? article.keywords.join(", ") : presentation.empty,
+        };
+      }
     case "article_types":
       return {
         eyebrow: "Article Detail",
         title: "Article Types",
-        meta: article.title || "",
+        meta: detailMetaText(article),
         body: article.article_types?.length ? article.article_types.join(", ") : "Article type information not available.",
       };
     case "related_articles":
-      return {
-        eyebrow: "Article Detail",
-        title: "Related Articles",
-        meta: article.title || "",
-        body: article.related_articles?.length ? article.related_articles.join("\n") : "No related articles found.",
-      };
+      {
+        const presentation = detailFieldPresentation("related_articles");
+        return {
+          eyebrow: "Article Detail",
+          title: presentation.title,
+          meta: detailMetaText(article),
+          body: article.related_articles?.length ? article.related_articles.join("\n") : presentation.empty,
+        };
+      }
     default:
       return {
         eyebrow: "Article Detail",
@@ -1832,6 +2126,9 @@ function detailBlockMarkup(article, field, label, text, subtext = "") {
 }
 
 function detailRowMarkup(article) {
+  const meshPresentation = detailFieldPresentation("mesh");
+  const keywordsPresentation = detailFieldPresentation("keywords");
+  const relatedPresentation = detailFieldPresentation("related_articles");
   const link = bestArticleLink(article);
   return `
     <tr class="detail-row">
@@ -1857,12 +2154,14 @@ function detailRowMarkup(article) {
             <div class="inline-abstract">${escapeHtml(article.abstract?.trim() || "Abstract not available.")}</div>
           </button>
           <div class="detail-grid">
+            ${detailBlockMarkup(article, "journal", "Database Source", currentSearchSourceLabel(), currentSearchSourcesUsed())}
             ${detailBlockMarkup(article, "journal", "Journal & Publication", article.journal || "-", article.publication_date || "-")}
+            ${detailBlockMarkup(article, "journal_metrics", "Q Rank", journalQuartileLabel(article), journalQuartileSubtext(article))}
             ${detailBlockMarkup(article, "authors", "Authors", compactList(article.authors, 10))}
-            ${detailBlockMarkup(article, "mesh", "MeSH", compactList(article.mesh_terms, 12))}
-            ${detailBlockMarkup(article, "keywords", "Keywords", compactList(article.keywords, 12))}
+            ${detailBlockMarkup(article, "mesh", meshPresentation.label, compactList(article.mesh_terms, 12))}
+            ${detailBlockMarkup(article, "keywords", keywordsPresentation.label, compactList(article.keywords, 12))}
             ${detailBlockMarkup(article, "article_types", "Article Types", compactList(article.article_types, 8))}
-            ${detailBlockMarkup(article, "related_articles", "Related Articles", compactList(article.related_articles, 8))}
+            ${detailBlockMarkup(article, "related_articles", relatedPresentation.label, compactList(article.related_articles, 8))}
           </div>
         </div>
       </td>
@@ -1948,9 +2247,15 @@ function renderMeta(meta) {
     els.metaStrip.innerHTML = "";
     return;
   }
+  const yearBits = [];
+  if (state.lastSearchPayload?.year_start) yearBits.push(`from ${state.lastSearchPayload.year_start}`);
+  if (state.lastSearchPayload?.year_end) yearBits.push(`to ${state.lastSearchPayload.year_end}`);
   const chips = [
     ["Total results", meta.total_results_found],
     ["Fetched", meta.fetched_results],
+    ["Database", currentSearchSourceLabel()],
+    ["Sources", currentSearchSourcesUsed()],
+    ["Years", yearBits.join(" ") || "last 5 years"],
     ["Batch", meta.batch_size_used],
     ["Requests", meta.request_count],
     ["Duration", `${meta.elapsed_ms} ms`],
@@ -2045,6 +2350,7 @@ async function enrichCitationsInBackground() {
 
 function applyArticleDataset(data, options = {}) {
   const { persist = true } = options;
+  state.datasetRevision += 1;
   state.lastPubmedResponse = data;
   state.allArticles = Array.isArray(data.articles) ? data.articles : [];
   state.articles = [...state.allArticles];
@@ -2072,7 +2378,7 @@ function renderResults() {
         <td colspan="9" class="empty-cell">
           <div class="native-empty-state">
             <div class="native-empty-state-title">No search yet</div>
-            <div class="native-empty-state-copy">Start with a topic in Searcher AI.</div>
+            <div class="native-empty-state-copy">Start with a topic in Searcher AI. Default search covers the most recent 5 years.</div>
           </div>
         </td>
       </tr>
@@ -2092,7 +2398,10 @@ function renderResults() {
           <td class="year-cell">${escapeHtml(article.year || "-")}</td>
           <td class="type-cell">${escapeHtml(articleTypeLabel(article))}</td>
           <td class="count-cell">${escapeHtml(citationLabel(article))}</td>
-          <td class="title-cell">${escapeHtml(article.title || "-")}</td>
+          <td class="title-cell">
+            <div class="table-title-main">${escapeHtml(article.title || "-")}</div>
+            <div class="table-title-sub">${escapeHtml(articleTitleMeta(article) || currentSearchSourceLabel())}</div>
+          </td>
           <td>${link ? `<a class="table-link" href="${link}" target="_blank" rel="noreferrer">Link</a>` : "-"}</td>
           <td>${renderDownloadabilityCell(article)}</td>
         </tr>
@@ -2153,16 +2462,21 @@ async function runSearch() {
     min_cite: null,
     article_type: null,
     use_cache: true,
+    preferred_source: normalizeSearchResource(
+      els.searchResource?.value || runtime.searchResource,
+      "openalex",
+    ),
   };
   if (!payload.query) {
-    throw new Error("PubMed query cannot be empty.");
+    throw new Error("Search query cannot be empty.");
   }
   els.searchBtn.disabled = true;
   state.lastSearchPayload = payload;
-  trackAppEvent("info", "pubmed_search_started", payload.query, {
+  trackAppEvent("info", "literature_search_started", payload.query, {
     project_id: state.projectId || "",
     max_results: payload.max_results,
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
+    preferred_source: payload.preferred_source,
   });
   try {
     const response = await fetchJson("/pubmed/search", {
@@ -2172,11 +2486,13 @@ async function runSearch() {
     state.citationsLoading = response.articles?.length > 0;
     applyArticleDataset(response);
     syncSidebarQuickControls();
-    trackAppEvent("info", "pubmed_search_completed", `${response.meta?.fetched_results || 0} articles`, {
+    trackAppEvent("info", "literature_search_completed", `${response.meta?.fetched_results || 0} articles`, {
       project_id: state.projectId || "",
       fetched_results: response.meta?.fetched_results || 0,
       elapsed_ms: response.meta?.elapsed_ms || 0,
       pubmed_oa_only: Boolean(response.meta?.oa_only),
+      primary_source: response.meta?.primary_source || "",
+      sources_used: response.meta?.sources_used || [],
     });
     void enrichCitationsInBackground();
   } catch (error) {
@@ -2201,16 +2517,28 @@ async function runSidebarQuickSearch() {
     throw new Error("Sidebar query cannot be empty.");
   }
   const maxResults = normalizedNumber(els.sidebarQuickMaxResults, 5);
+  const preferredSource = normalizeSearchResource(
+    els.sidebarQuickSearchResource?.value || runtime.searchResource,
+    "openalex",
+  );
   if (els.sidebarQuickSearchBtn) els.sidebarQuickSearchBtn.disabled = true;
-  if (els.sidebarQuickStatus) els.sidebarQuickStatus.textContent = "Running PubMed search…";
+  if (els.sidebarQuickStatus) {
+    els.sidebarQuickStatus.textContent = `Running ${searchResourceLabel(preferredSource)} search…`;
+  }
   els.query.value = query;
   els.maxResults.value = String(maxResults);
+  if (els.searchResource) {
+    els.searchResource.value = preferredSource;
+  }
+  runtime.searchResource = preferredSource;
+  localStorage.setItem(searchResourceStorageKey, preferredSource);
   autoResizeTextarea(els.query);
   autoResizeTextarea(els.sidebarQuickQuery);
   try {
     await runSearch();
     if (els.sidebarQuickStatus) {
-      els.sidebarQuickStatus.textContent = `${state.articles.length} articles loaded.`;
+      const actualSource = searchResourceLabel(state.lastPubmedResponse?.meta?.primary_source || preferredSource);
+      els.sidebarQuickStatus.textContent = `${state.articles.length} articles loaded via ${actualSource}.`;
     }
   } catch (error) {
     if (els.sidebarQuickStatus) {
@@ -2278,18 +2606,19 @@ function updateThinkingLabel() {
 
 function assistantActionLabel(action) {
   const details = action.details || {};
+  const sourceLabel = searchResourceLabel(details.meta?.primary_source || runtime.aiPrimarySearchResource || "openalex");
   const running = {
-    search_pubmed: "Searching PubMed",
+    search_pubmed: `Searching ${sourceLabel}`,
     get_article_details: "Reading article details",
     list_catalog_articles: "Scanning catalog",
   };
   const success = {
-    search_pubmed: details.retry_used ? "Broadened PubMed search" : "Searched PubMed",
+    search_pubmed: `Searched ${sourceLabel}`,
     get_article_details: "Read article details",
     list_catalog_articles: "Scanned catalog",
   };
   const error = {
-    search_pubmed: "PubMed search failed",
+    search_pubmed: `${sourceLabel} search failed`,
     get_article_details: "Article detail read failed",
     list_catalog_articles: "Catalog scan failed",
   };
@@ -2301,8 +2630,7 @@ function assistantActionLabel(action) {
 function assistantActionDetail(action) {
   const details = action.details || {};
   if (action.name === "search_pubmed") {
-    if (details.retry_used && details.retry_query) return details.retry_query;
-    return details.query || "Building PubMed query";
+    return details.query || "Building literature query";
   }
   if (action.name === "get_article_details") {
     const ids = details.requested_ids || details.returned_ids || details.ids || [];
@@ -2316,7 +2644,7 @@ function assistantActionDetail(action) {
 
 function assistantActionKindLabel(action) {
   const map = {
-    search_pubmed: "PubMed",
+    search_pubmed: "Search",
     get_article_details: "Evidence",
     list_catalog_articles: "Catalog",
   };
@@ -2672,7 +3000,7 @@ function bindEvents() {
     try {
       await runSearch();
     } catch (error) {
-      trackAppEvent("error", "pubmed_search_failed", error.message || "PubMed search failed.", {
+      trackAppEvent("error", "literature_search_failed", error.message || "Literature search failed.", {
         project_id: state.projectId || "",
       });
       pushAssistantMessage({ role: "assistant", text: `Search error: ${error.message}` });
@@ -2685,7 +3013,7 @@ function bindEvents() {
     try {
       await runSidebarQuickSearch();
     } catch (error) {
-      trackAppEvent("error", "sidebar_pubmed_search_failed", error.message || "Sidebar PubMed search failed.", {
+      trackAppEvent("error", "sidebar_literature_search_failed", error.message || "Sidebar literature search failed.", {
         project_id: state.projectId || "",
       });
       pushAssistantMessage({ role: "assistant", text: `Sidebar search error: ${error.message}` });
@@ -2775,6 +3103,40 @@ function bindEvents() {
     } finally {
       if (els.pubmedOaOnlyToggle) els.pubmedOaOnlyToggle.disabled = false;
     }
+  });
+  els.aiPrimarySearchResourceInput?.addEventListener("change", async () => {
+    const nextValue = normalizeSearchResource(els.aiPrimarySearchResourceInput?.value, "openalex");
+    if (els.aiPrimarySearchResourceInput) els.aiPrimarySearchResourceInput.disabled = true;
+    try {
+      runtime.aiPrimarySearchResource = nextValue;
+      await saveApiKeys({ ai_primary_search_resource: nextValue }, { closeDialog: false });
+      trackAppEvent("info", "ai_primary_search_resource_updated", "AI primary search resource updated.", {
+        ai_primary_search_resource: nextValue,
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "ai_primary_search_resource_failed", error.message || "AI primary search resource could not be saved.", {
+        ai_primary_search_resource: nextValue,
+      });
+    } finally {
+      if (els.aiPrimarySearchResourceInput) els.aiPrimarySearchResourceInput.disabled = false;
+    }
+  });
+  els.downloadWorkerCountInput?.addEventListener("change", () => {
+    const nextValue = clampDownloadWorkers(els.downloadWorkerCountInput?.value);
+    runtime.downloadWorkers = nextValue;
+    localStorage.setItem(downloadWorkersStorageKey, String(nextValue));
+    renderSettingsPanel();
+    trackAppEvent("info", "download_worker_setting_updated", "Batch download worker count updated.", {
+      download_workers: nextValue,
+    });
+  });
+  els.sidebarQuickSearchResource?.addEventListener("change", () => {
+    const nextValue = normalizeSearchResource(els.sidebarQuickSearchResource?.value, "openalex");
+    runtime.searchResource = nextValue;
+    localStorage.setItem(searchResourceStorageKey, nextValue);
+    if (els.searchResource) els.searchResource.value = nextValue;
+    syncSidebarQuickControls();
   });
   els.sidebarToggleBtn?.addEventListener("click", () => {
     setSidebarOpen(!state.sidebarOpen);

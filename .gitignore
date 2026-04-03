@@ -15,5 +15,7 @@ __pycache__/
 api_key.txt
 ncbi_api
 unpaywall_email
+ai_primary_search_resource
+pubmed_oa_only
 
 .DS_Store

@@ -90,6 +90,8 @@ def parse_pubmed_fetch_xml(xml_text: str) -> dict[str, dict[str, object]]:
             if full_name:
                 authors.append(full_name)
         journal = _text_content(article.find(".//Article/Journal/Title")) or None
+        issns = _list_texts(article.findall(".//Article/Journal/ISSN"))
+        issn_l = _text_content(article.find(".//MedlineJournalInfo/ISSNLinking")) or None
         publication_date = _text_content(article.find(".//Article/Journal/JournalIssue/PubDate")) or None
         title = _text_content(article.find(".//Article/ArticleTitle")) or None
         references = article.findall(".//PubmedData/ReferenceList/Reference")
@@ -107,5 +109,7 @@ def parse_pubmed_fetch_xml(xml_text: str) -> dict[str, dict[str, object]]:
             "keywords": keywords,
             "mesh_terms": mesh_terms,
             "reference_count": len(references),
+            "issn_l": issn_l,
+            "issns": issns,
         }
     return parsed

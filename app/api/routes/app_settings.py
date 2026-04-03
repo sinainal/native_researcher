@@ -45,6 +45,13 @@ def _read_bool_value(path: Path, default: bool) -> bool:
     return default
 
 
+def _normalize_search_resource(value: str | None, default: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"openalex", "pubmed", "europe_pmc"}:
+        return normalized
+    return default
+
+
 def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> None:
     settings = request.app.state.settings
     pubmed_rps = 10.0 if payload.ncbi_api_key.strip() else 3.0
@@ -52,6 +59,11 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
     object.__setattr__(settings, "ncbi_api_key", payload.ncbi_api_key.strip() or None)
     object.__setattr__(settings, "unpaywall_email", payload.unpaywall_email.strip() or None)
     object.__setattr__(settings, "pubmed_oa_only", payload.pubmed_oa_only)
+    object.__setattr__(
+        settings,
+        "ai_primary_search_resource",
+        _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
+    )
     object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
 
     pubmed_service = getattr(request.app.state, "pubmed_service", None)
@@ -70,6 +82,13 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
             settings.pubmed_oa_only_path,
             bool(getattr(settings, "pubmed_oa_only", True)),
         ),
+        ai_primary_search_resource=_normalize_search_resource(
+            _read_value(settings.ai_primary_search_resource_path),
+            _normalize_search_resource(
+                getattr(settings, "ai_primary_search_resource", "openalex"),
+                "openalex",
+            ),
+        ),
     )
 
 
@@ -87,6 +106,10 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
     _write_value(settings.ncbi_api_key_path, payload.ncbi_api_key)
     _write_value(settings.unpaywall_email_path, payload.unpaywall_email)
     _write_bool_value(settings.pubmed_oa_only_path, payload.pubmed_oa_only)
+    _write_value(
+        settings.ai_primary_search_resource_path,
+        _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
+    )
     next_payload = _current_payload(request)
     _apply_runtime_settings(request, next_payload)
     request.app.state.app_event_log_service.log(
@@ -98,6 +121,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
             "ncbi_api_key": bool(next_payload.ncbi_api_key),
             "unpaywall_email": bool(next_payload.unpaywall_email),
             "pubmed_oa_only": next_payload.pubmed_oa_only,
+            "ai_primary_search_resource": next_payload.ai_primary_search_resource,
         },
     )
     return next_payload

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas.helper import HelperChatRequest, HelperResetRequest
-from app.services.native_researcher_service import NativeResearcherService
+from app.services.agent.native_researcher_service import NativeResearcherService
 
 router = APIRouter(prefix="/native-assistant", tags=["native-assistant"])
 
@@ -59,4 +59,3 @@ async def native_reset(payload: HelperResetRequest, request: Request) -> dict[st
     service = get_native_service(request)
     service.reset(payload.thread_id)
     return {"ok": True}
-

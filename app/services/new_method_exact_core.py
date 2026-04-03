@@ -135,6 +135,9 @@ class SingleArticleDownloader:
     async def _with_outer_timeout(self, seconds: float, coro: Awaitable[Any]) -> Any:
         timeout_value = min(seconds, self._remaining_budget())
         if timeout_value <= 0:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
             raise TimeoutError("No remaining budget.")
         return await asyncio.wait_for(coro, timeout=timeout_value)
 
@@ -400,6 +403,20 @@ class SingleArticleDownloader:
                     candidates.extend(await self._landing_page_candidates_from_url("doaj", url, 17))
         return candidates
 
+    def _nature_direct_candidates(self, doi: str) -> list[Candidate]:
+        lower_doi = (doi or "").lower()
+        if not lower_doi.startswith("10.1038/"):
+            return []
+        _, _, suffix = doi.partition("/")
+        suffix = suffix.strip()
+        if not suffix:
+            return []
+        article_url = f"https://www.nature.com/articles/{quote(suffix, safe='-._~')}"
+        return [
+            Candidate("nature_direct_pdf", f"{article_url}.pdf", 8),
+            Candidate("nature_html_fulltext", article_url, 9),
+        ]
+
     def _dedupe_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
         best: dict[str, Candidate] = {}
         for candidate in candidates:
@@ -485,25 +502,34 @@ class SingleArticleDownloader:
     async def _probe_direct_pdf(self, candidate: Candidate) -> tuple[bool, bytes | None, str | None, int | None]:
         started = time.perf_counter()
         try:
-            response = await self._with_outer_timeout(
-                3.0,
-                self._download_client.get(
+            async def _fetch_probe() -> tuple[int, bytes, str, int | None, str]:
+                async with self._download_client.stream(
+                    "GET",
                     candidate.url,
                     headers={"Accept": "application/pdf,*/*", "Range": "bytes=0-16383"},
-                ),
-            )
-            body = response.content
-            content_type = (response.headers.get("content-type") or "").lower()
-            total_size: int | None = None
-            content_range = response.headers.get("content-range") or ""
-            match = re.search(r"/(\d+)$", content_range)
-            if match:
-                total_size = int(match.group(1))
-            if response.status_code in {200, 206} and ("pdf" in content_type or body.startswith(b"%PDF")):
-                self._log(step="probe", source=candidate.source, status="ok", started=started, url=candidate.url, status_code=response.status_code)
+                ) as response:
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    total_size: int | None = None
+                    content_range = response.headers.get("content-range") or ""
+                    match = re.search(r"/(\d+)$", content_range)
+                    if match:
+                        total_size = int(match.group(1))
+                    buffer = bytearray()
+                    read_limit = 16384
+                    if "html" in content_type:
+                        read_limit = 8192
+                    async for chunk in response.aiter_bytes():
+                        buffer.extend(chunk)
+                        if len(buffer) >= read_limit:
+                            break
+                    return response.status_code, bytes(buffer), content_type, total_size, str(response.url)
+
+            status_code, body, content_type, total_size, final_url = await self._with_outer_timeout(3.0, _fetch_probe())
+            if status_code in {200, 206} and ("pdf" in content_type or body.startswith(b"%PDF")):
+                self._log(step="probe", source=candidate.source, status="ok", started=started, url=final_url, status_code=status_code)
                 return True, body, content_type, total_size
-            detail = self._classify_non_pdf_response(body, content_type, response.status_code)
-            self._log(step="probe", source=candidate.source, status="reject", started=started, url=candidate.url, detail=detail, status_code=response.status_code)
+            detail = self._classify_non_pdf_response(body, content_type, status_code)
+            self._log(step="probe", source=candidate.source, status="reject", started=started, url=final_url, detail=detail, status_code=status_code)
             return False, None, content_type, total_size
         except Exception as exc:
             self._log(step="probe", source=candidate.source, status="error", started=started, url=candidate.url, detail=type(exc).__name__)
@@ -758,6 +784,8 @@ class SingleArticleDownloader:
 
         all_candidates: list[Candidate] = []
         checked_urls: set[str] = set()
+        precomputed_europe_candidates: list[Candidate] = []
+        fast_direct_candidates: list[Candidate] = []
         if article.pmc_id:
             pmc_candidates = await self._pmc_oa_candidates(article.pmc_id)
             all_candidates.extend(pmc_candidates)
@@ -788,6 +816,66 @@ class SingleArticleDownloader:
                             candidate_count=len(pmc_fast_candidates),
                             note=self._failure_note(),
                         )
+            if self.mode == "fast":
+                precomputed_europe_candidates = await self._europe_pmc_candidates(article)
+                europe_repo_fast_candidates = self._dedupe_candidates(
+                    [candidate for candidate in precomputed_europe_candidates if candidate.source == "europe_pmc_repo_pdf"]
+                )
+                for candidate in europe_repo_fast_candidates:
+                    checked_urls.add(candidate.url)
+                    candidate_ref, success, file_path, final_url = await self._download_candidate(candidate, article)
+                    if success:
+                        return self._success_result(
+                            article=article,
+                            started=started,
+                            candidate=candidate_ref,
+                            file_path=file_path,
+                            final_url=final_url,
+                            candidate_count=len(europe_repo_fast_candidates),
+                        )
+                    if self._remaining_budget() <= 0:
+                        return Result(
+                            article=asdict(article),
+                            mode=self.mode,
+                            success=False,
+                            source=None,
+                            url=None,
+                            file_path=None,
+                            total_ms=int((time.perf_counter() - started) * 1000),
+                            attempts=[asdict(item) for item in self.attempts],
+                            candidate_count=len(europe_repo_fast_candidates),
+                            note=self._failure_note(),
+                        )
+                all_candidates.extend(precomputed_europe_candidates)
+
+        if article.doi and self.mode == "fast":
+            fast_direct_candidates = self._dedupe_candidates(self._nature_direct_candidates(article.doi))
+            for candidate in fast_direct_candidates:
+                checked_urls.add(candidate.url)
+                candidate_ref, success, file_path, final_url = await self._download_candidate(candidate, article)
+                if success:
+                    return self._success_result(
+                        article=article,
+                        started=started,
+                        candidate=candidate_ref,
+                        file_path=file_path,
+                        final_url=final_url,
+                        candidate_count=len(fast_direct_candidates),
+                    )
+                if self._remaining_budget() <= 0:
+                    return Result(
+                        article=asdict(article),
+                        mode=self.mode,
+                        success=False,
+                        source=None,
+                        url=None,
+                        file_path=None,
+                        total_ms=int((time.perf_counter() - started) * 1000),
+                        attempts=[asdict(item) for item in self.attempts],
+                        candidate_count=len(fast_direct_candidates),
+                        note=self._failure_note(),
+                    )
+            all_candidates.extend(fast_direct_candidates)
 
         if article.doi:
             if self.mode == "fast":
@@ -795,8 +883,10 @@ class SingleArticleDownloader:
                     self._crossref_candidates(article.doi),
                     self._openalex_candidates(article.doi),
                     self._doaj_candidates(article.doi),
-                    self._ncbi_linkout_candidates(article.pmid) if article.pmid else asyncio.sleep(0, result=[]),
-                    self._europe_pmc_candidates(article) if article.pmc_id else asyncio.sleep(0, result=[]),
+                    asyncio.sleep(0, result=[]) if fast_direct_candidates else (
+                        self._ncbi_linkout_candidates(article.pmid) if article.pmid and not article.pmc_id else asyncio.sleep(0, result=[])
+                    ),
+                    asyncio.sleep(0, result=precomputed_europe_candidates) if article.pmc_id else asyncio.sleep(0, result=[]),
                 )
                 all_candidates.extend(crossref_candidates)
                 all_candidates.extend(openalex_candidates)
@@ -822,6 +912,34 @@ class SingleArticleDownloader:
             all_candidates.extend(await self._europe_pmc_candidates(article))
 
         candidates = self._dedupe_candidates(all_candidates)
+
+        if self.mode == "fast":
+            europe_repo_candidates = [candidate for candidate in candidates if candidate.source == "europe_pmc_repo_pdf"]
+            for candidate in europe_repo_candidates:
+                checked_urls.add(candidate.url)
+                candidate_ref, success, file_path, final_url = await self._download_candidate(candidate, article)
+                if success:
+                    return self._success_result(
+                        article=article,
+                        started=started,
+                        candidate=candidate_ref,
+                        file_path=file_path,
+                        final_url=final_url,
+                        candidate_count=len(candidates),
+                    )
+                if self._remaining_budget() <= 0:
+                    return Result(
+                        article=asdict(article),
+                        mode=self.mode,
+                        success=False,
+                        source=None,
+                        url=None,
+                        file_path=None,
+                        total_ms=int((time.perf_counter() - started) * 1000),
+                        attempts=[asdict(item) for item in self.attempts],
+                        candidate_count=len(candidates),
+                        note=self._failure_note(),
+                    )
 
         # Optimization choices:
         # 1. Prefer PMC OA package/pdf first, never try pmc_direct.

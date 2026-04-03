@@ -11,7 +11,7 @@ from typing import Iterator
 class WorkspaceDatabase:
     """Small SQLite wrapper for local workspace state."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -126,6 +126,38 @@ class WorkspaceDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_project_documents_updated
                     ON project_documents(project_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS journal_metrics (
+                    issn_l TEXT,
+                    issn TEXT,
+                    normalized_name TEXT NOT NULL,
+                    journal_name TEXT NOT NULL,
+                    metric_year INTEGER NOT NULL,
+                    best_quartile TEXT,
+                    sjr REAL,
+                    sourceid TEXT,
+                    categories TEXT NOT NULL DEFAULT '',
+                    areas TEXT NOT NULL DEFAULT '',
+                    source_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_journal_metrics_issn_l
+                    ON journal_metrics(issn_l);
+
+                CREATE INDEX IF NOT EXISTS idx_journal_metrics_issn
+                    ON journal_metrics(issn);
+
+                CREATE INDEX IF NOT EXISTS idx_journal_metrics_normalized_name
+                    ON journal_metrics(normalized_name);
+
+                CREATE TABLE IF NOT EXISTS journal_metrics_meta (
+                    source_name TEXT PRIMARY KEY,
+                    bootstrap_url TEXT NOT NULL,
+                    metric_year INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             if version < 2:
@@ -145,4 +177,6 @@ class WorkspaceDatabase:
                         conn.execute(statement)
                     except sqlite3.OperationalError:
                         pass
+            if version < 4:
+                pass
             conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")

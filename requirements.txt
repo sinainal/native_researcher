@@ -5,3 +5,5 @@ pydantic
 pytest
 playwright
 google-genai
+pandas
+openpyxl

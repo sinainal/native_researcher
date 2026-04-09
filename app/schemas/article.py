@@ -23,6 +23,8 @@ class Article(BaseModel):
     reference_count: int = 0
     doi: str | None = None
     pmc_id: str | None = None
+    oa_pdf_url: str | None = None
+    landing_page_url: str | None = None
     issn_l: str | None = None
     issns: list[str] = Field(default_factory=list)
     journal_quartile: str | None = None
@@ -34,6 +36,9 @@ class Article(BaseModel):
 class ArticleReference(BaseModel):
     title: str | None = None
     year: str | None = None
+    journal: str | None = None
     doi: str | None = None
     pmc_id: str | None = None
     pmid: str | None = None
+    oa_pdf_url: str | None = None
+    landing_page_url: str | None = None

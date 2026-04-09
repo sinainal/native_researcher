@@ -214,7 +214,7 @@ class PubMedService:
             "search": request.query.strip(),
             "per-page": min(max_results, 200),
             "select": (
-                "id,display_name,publication_year,publication_date,doi,ids,primary_location,"
+                "id,display_name,publication_year,publication_date,doi,ids,primary_location,best_oa_location,"
                 "authorships,cited_by_count,type,abstract_inverted_index,referenced_works_count,"
                 "primary_topic,topics,related_works"
             ),
@@ -266,8 +266,10 @@ class PubMedService:
 
     def _article_from_openalex(self, index: int, raw: dict[str, Any]) -> Article:
         ids = raw.get("ids") or {}
+        best_location = raw.get("best_oa_location") or {}
         primary_location = raw.get("primary_location") or {}
-        source = primary_location.get("source") or {}
+        location = best_location or primary_location
+        source = location.get("source") or {}
         authorships = raw.get("authorships") or []
         authors = [
             (authorship.get("author") or {}).get("display_name")
@@ -297,6 +299,8 @@ class PubMedService:
             reference_count=self._safe_int(raw.get("referenced_works_count")) or 0,
             doi=self._normalize_doi(raw.get("doi")),
             pmc_id=self._extract_pmcid(raw_pmcid),
+            oa_pdf_url=location.get("pdf_url"),
+            landing_page_url=location.get("landing_page_url"),
             issn_l=source_issn_l,
             issns=source_issns,
         )

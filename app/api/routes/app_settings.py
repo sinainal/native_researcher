@@ -52,6 +52,13 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
     return default
 
 
+def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"legacy", "article_downloader", "hybrid"}:
+        return normalized
+    return default
+
+
 def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> None:
     settings = request.app.state.settings
     pubmed_rps = 10.0 if payload.ncbi_api_key.strip() else 3.0
@@ -63,6 +70,11 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
         settings,
         "ai_primary_search_resource",
         _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
+    )
+    object.__setattr__(
+        settings,
+        "pdf_downloader_mode",
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "legacy"),
     )
     object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
 
@@ -89,6 +101,13 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
                 "openalex",
             ),
         ),
+        pdf_downloader_mode=_normalize_pdf_downloader_mode(
+            _read_value(settings.pdf_downloader_mode_path),
+            _normalize_pdf_downloader_mode(
+                getattr(settings, "pdf_downloader_mode", "legacy"),
+                "legacy",
+            ),
+        ),
     )
 
 
@@ -110,6 +129,10 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
         settings.ai_primary_search_resource_path,
         _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
     )
+    _write_value(
+        settings.pdf_downloader_mode_path,
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "legacy"),
+    )
     next_payload = _current_payload(request)
     _apply_runtime_settings(request, next_payload)
     request.app.state.app_event_log_service.log(
@@ -122,6 +145,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
             "unpaywall_email": bool(next_payload.unpaywall_email),
             "pubmed_oa_only": next_payload.pubmed_oa_only,
             "ai_primary_search_resource": next_payload.ai_primary_search_resource,
+            "pdf_downloader_mode": next_payload.pdf_downloader_mode,
         },
     )
     return next_payload

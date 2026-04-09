@@ -110,8 +110,10 @@ class FakePDFService:
         download_dir=None,
         save_files=True,
         mode="balanced",
+        downloader_mode=None,
         use_browser_fallback=False,
     ):
+        _ = download_dir, mode, downloader_mode, use_browser_fallback
         article = articles[0]
         return [
             PDFTestResult(
@@ -189,6 +191,7 @@ def test_api_endpoints() -> None:
                 unpaywall_email_path=temp_root / "unpaywall_email",
                 pubmed_oa_only_path=temp_root / "pubmed_oa_only",
                 ai_primary_search_resource_path=temp_root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=temp_root / "pdf_downloader_mode",
             )
             app = create_app(
                 settings=settings,
@@ -240,6 +243,7 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
                     "pubmed_oa_only": True,
+                    "pdf_downloader_mode": "legacy",
                 }
 
                 api_keys = await client.get("/app/api-keys")
@@ -250,6 +254,7 @@ def test_api_endpoints() -> None:
                     "unpaywall_email": "",
                     "pubmed_oa_only": True,
                     "ai_primary_search_resource": "openalex",
+                    "pdf_downloader_mode": "legacy",
                 }
 
                 update_api_keys = await client.put(
@@ -260,6 +265,7 @@ def test_api_endpoints() -> None:
                         "unpaywall_email": "me@example.com",
                         "pubmed_oa_only": False,
                         "ai_primary_search_resource": "pubmed",
+                        "pdf_downloader_mode": "article_downloader",
                     },
                 )
                 assert update_api_keys.status_code == 200
@@ -269,7 +275,22 @@ def test_api_endpoints() -> None:
                     "unpaywall_email": "me@example.com",
                     "pubmed_oa_only": False,
                     "ai_primary_search_resource": "pubmed",
+                    "pdf_downloader_mode": "article_downloader",
                 }
+
+                update_hybrid_mode = await client.put(
+                    "/app/api-keys",
+                    json={
+                        "assistant_api_key": "assistant-secret",
+                        "ncbi_api_key": "ncbi-secret",
+                        "unpaywall_email": "me@example.com",
+                        "pubmed_oa_only": False,
+                        "ai_primary_search_resource": "pubmed",
+                        "pdf_downloader_mode": "hybrid",
+                    },
+                )
+                assert update_hybrid_mode.status_code == 200
+                assert update_hybrid_mode.json()["pdf_downloader_mode"] == "hybrid"
 
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200

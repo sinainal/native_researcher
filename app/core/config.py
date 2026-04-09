@@ -40,6 +40,13 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
     return default
 
 
+def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"legacy", "article_downloader", "hybrid"}:
+        return normalized
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Native Researcher"
@@ -59,6 +66,7 @@ class Settings:
     unpaywall_email_path: Path = APP_ROOT / "unpaywall_email"
     pubmed_oa_only_path: Path = APP_ROOT / "pubmed_oa_only"
     ai_primary_search_resource_path: Path = APP_ROOT / "ai_primary_search_resource"
+    pdf_downloader_mode_path: Path = APP_ROOT / "pdf_downloader_mode"
     unpaywall_email: str | None = None
     ncbi_api_key: str | None = None
     pubmed_oa_only: bool = True
@@ -81,6 +89,7 @@ class Settings:
     pdf_candidate_download_concurrency: int = 5
     pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
+    pdf_downloader_mode: str = "legacy"
     journal_metrics_enabled: bool = True
     journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
     journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
@@ -96,6 +105,9 @@ class Settings:
         ai_primary_search_resource_path = Path(
             os.getenv("AI_PRIMARY_SEARCH_RESOURCE_FILE", str(APP_ROOT / "ai_primary_search_resource"))
         )
+        pdf_downloader_mode_path = Path(
+            os.getenv("PDF_DOWNLOADER_MODE_FILE", str(APP_ROOT / "pdf_downloader_mode"))
+        )
         assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_secret_file(assistant_api_key_path)
         api_key = os.getenv("NCBI_API_KEY") or _read_secret_file(ncbi_api_key_path)
         unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_secret_file(unpaywall_email_path)
@@ -106,6 +118,10 @@ class Settings:
         ai_primary_search_resource = _normalize_search_resource(
             os.getenv("AI_PRIMARY_SEARCH_RESOURCE") or _read_secret_file(ai_primary_search_resource_path),
             "openalex",
+        )
+        pdf_downloader_mode = _normalize_pdf_downloader_mode(
+            os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
+            "legacy",
         )
         default_rps = 10.0 if api_key else 3.0
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))
@@ -128,6 +144,7 @@ class Settings:
             unpaywall_email_path=unpaywall_email_path,
             pubmed_oa_only_path=pubmed_oa_only_path,
             ai_primary_search_resource_path=ai_primary_search_resource_path,
+            pdf_downloader_mode_path=pdf_downloader_mode_path,
             unpaywall_email=unpaywall_email,
             ncbi_api_key=api_key,
             pubmed_oa_only=pubmed_oa_only,
@@ -165,6 +182,7 @@ class Settings:
             pdf_resolve_requests_per_second=float(
                 os.getenv("PDF_RESOLVE_REQUESTS_PER_SECOND", "20")
             ),
+            pdf_downloader_mode=pdf_downloader_mode,
             journal_metrics_enabled=journal_metrics_enabled,
             journal_metrics_bootstrap_url=os.getenv(
                 "JOURNAL_METRICS_BOOTSTRAP_URL",

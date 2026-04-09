@@ -52,4 +52,5 @@ async def bootstrap(request: Request) -> dict[str, str | bool]:
         "ncbi_api_key": settings.ncbi_api_key or "",
         "unpaywall_email": settings.unpaywall_email or "",
         "pubmed_oa_only": settings.pubmed_oa_only,
+        "pdf_downloader_mode": settings.pdf_downloader_mode,
     }

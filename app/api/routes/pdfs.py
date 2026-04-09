@@ -90,6 +90,7 @@ async def test_pdf_pipeline(
             ArticleReference(
                 title=article.title,
                 year=article.year,
+                journal=article.journal,
                 doi=article.doi,
                 pmc_id=article.pmc_id,
                 pmid=article.pmid,
@@ -101,6 +102,7 @@ async def test_pdf_pipeline(
             download_dir=payload.download_dir,
             save_files=payload.save_files,
             mode=payload.mode,
+            downloader_mode=payload.downloader_mode,
             use_browser_fallback=payload.use_browser_fallback,
         )
         success_count = sum(1 for item in diagnostics if item.success)

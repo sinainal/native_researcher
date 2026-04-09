@@ -168,6 +168,25 @@
               <div class="native-settings-card">
                 <div class="native-settings-row">
                   <div class="native-settings-copy">
+                    <div class="native-settings-title">Download Methods</div>
+                    <div class="native-settings-description">
+                      Selects which downloader bridge the browser download flow uses for article fetches.
+                    </div>
+                  </div>
+                  <label class="native-settings-field native-settings-field-wide" for="pdfDownloaderModeInput">
+                    <span>Method</span>
+                    <select id="pdfDownloaderModeInput" class="native-settings-select">
+                      <option value="legacy">Legacy</option>
+                      <option value="hybrid">Hybrid</option>
+                      <option value="article_downloader">Article Downloader</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="pdfDownloaderModeStatus" class="native-settings-note">Browser downloads use the legacy downloader bridge.</div>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
                     <div class="native-settings-title">Batch Download Workers</div>
                     <div class="native-settings-description">
                       Controls how many selected articles download in parallel. Higher values are faster but may reduce stability on some publisher hosts.

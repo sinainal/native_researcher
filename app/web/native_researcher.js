@@ -96,6 +96,8 @@ const els = {
   pubmedOaOnlyStatus: document.getElementById("pubmedOaOnlyStatus"),
   aiPrimarySearchResourceInput: document.getElementById("aiPrimarySearchResourceInput"),
   aiPrimarySearchResourceStatus: document.getElementById("aiPrimarySearchResourceStatus"),
+  pdfDownloaderModeInput: document.getElementById("pdfDownloaderModeInput"),
+  pdfDownloaderModeStatus: document.getElementById("pdfDownloaderModeStatus"),
   downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
   downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
@@ -168,6 +170,7 @@ const runtime = {
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "openalex"),
   aiPrimarySearchResource: "openalex",
+  pdfDownloaderMode: "legacy",
   assistantModel: stateModel,
 };
 
@@ -191,6 +194,21 @@ function searchResourceLabel(value) {
   if (normalized === "pubmed") return "PubMed";
   if (normalized === "europe_pmc") return "Europe PMC";
   return "OpenAlex";
+}
+
+function normalizePdfDownloaderMode(value, fallback = "legacy") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["legacy", "hybrid", "article_downloader"].includes(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function pdfDownloaderModeLabel(value) {
+  const normalized = normalizePdfDownloaderMode(value, "legacy");
+  if (normalized === "hybrid") return "Hybrid";
+  if (normalized === "article_downloader") return "Article Downloader";
+  return "Legacy";
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -737,7 +755,7 @@ function updateProjectUI() {
 function renderSettingsPanel() {
   const enabled = Boolean(runtime.pubmedOaOnly);
   if (els.workspaceSettingsState) {
-    els.workspaceSettingsState.textContent = `${enabled ? "OA" : "Custom"} · ${searchResourceLabel(runtime.aiPrimarySearchResource)} · x${runtime.downloadWorkers}`;
+    els.workspaceSettingsState.textContent = `${enabled ? "OA" : "Custom"} · ${searchResourceLabel(runtime.aiPrimarySearchResource)} · ${pdfDownloaderModeLabel(runtime.pdfDownloaderMode)} · x${runtime.downloadWorkers}`;
   }
   if (els.pubmedOaOnlyToggle) {
     els.pubmedOaOnlyToggle.checked = enabled;
@@ -759,6 +777,13 @@ function renderSettingsPanel() {
   if (els.aiPrimarySearchResourceStatus) {
     const label = searchResourceLabel(runtime.aiPrimarySearchResource);
     els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
+  }
+  if (els.pdfDownloaderModeInput) {
+    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy");
+  }
+  if (els.pdfDownloaderModeStatus) {
+    const label = pdfDownloaderModeLabel(runtime.pdfDownloaderMode);
+    els.pdfDownloaderModeStatus.textContent = `Browser downloads use the ${label} bridge.`;
   }
   if (els.searchResource) {
     els.searchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
@@ -787,6 +812,10 @@ function applyApiKeyValues(payload = {}) {
     payload.ai_primary_search_resource,
     runtime.aiPrimarySearchResource || "openalex",
   );
+  runtime.pdfDownloaderMode = normalizePdfDownloaderMode(
+    payload.pdf_downloader_mode,
+    runtime.pdfDownloaderMode || "legacy",
+  );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
@@ -810,6 +839,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
       ...overrides,
     }),
   });
@@ -819,6 +849,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
     ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
+    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1480,9 +1511,12 @@ function articleReference(article) {
   return {
     title: article.title || null,
     year: article.year || null,
+    journal: article.journal || null,
     doi: article.doi || null,
     pmc_id: article.pmc_id || null,
     pmid: article.pmid || null,
+    oa_pdf_url: article.oa_pdf_url || null,
+    landing_page_url: article.landing_page_url || null,
   };
 }
 
@@ -1636,6 +1670,7 @@ async function requestArticleDownload(article, options = {}) {
         articles: [articleReference(article)],
         download_dir: projectDownloadDir(),
         max_articles: 1,
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
       }),
       signal: controller.signal,
     });
@@ -1676,6 +1711,7 @@ async function requestBatchDownload(articles, options = {}) {
         articles: batch.map(articleReference),
         download_dir: projectDownloadDir(),
         max_articles: batch.length,
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
       }),
       signal: controller.signal,
     });
@@ -3120,6 +3156,24 @@ function bindEvents() {
       });
     } finally {
       if (els.aiPrimarySearchResourceInput) els.aiPrimarySearchResourceInput.disabled = false;
+    }
+  });
+  els.pdfDownloaderModeInput?.addEventListener("change", async () => {
+    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "legacy");
+    if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = true;
+    try {
+      runtime.pdfDownloaderMode = nextValue;
+      await saveApiKeys({ pdf_downloader_mode: nextValue }, { closeDialog: false });
+      trackAppEvent("info", "pdf_downloader_mode_updated", "PDF downloader mode updated.", {
+        pdf_downloader_mode: nextValue,
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "pdf_downloader_mode_failed", error.message || "PDF downloader mode could not be saved.", {
+        pdf_downloader_mode: nextValue,
+      });
+    } finally {
+      if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = false;
     }
   });
   els.downloadWorkerCountInput?.addEventListener("change", () => {

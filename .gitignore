@@ -17,5 +17,6 @@ ncbi_api
 unpaywall_email
 ai_primary_search_resource
 pubmed_oa_only
+pdf_downloader_mode
 
 .DS_Store

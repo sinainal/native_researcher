@@ -60,6 +60,9 @@ class ExactNewMethodBridge:
             pmc_id=article.pmc_id,
             title=article.title,
             year=article.year,
+            journal=article.journal,
+            oa_pdf_url=article.oa_pdf_url,
+            landing_page_url=article.landing_page_url,
         )
 
     async def resolve_candidates(self, article: ArticleReference, *, mode: str = "fast") -> list[dict[str, Any]]:

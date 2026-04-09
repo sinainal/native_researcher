@@ -54,6 +54,9 @@ class ArticleRef:
     pmc_id: str | None = None
     title: str | None = None
     year: str | None = None
+    journal: str | None = None
+    oa_pdf_url: str | None = None
+    landing_page_url: str | None = None
 
 
 @dataclass
@@ -416,6 +419,15 @@ class SingleArticleDownloader:
             Candidate("nature_direct_pdf", f"{article_url}.pdf", 8),
             Candidate("nature_html_fulltext", article_url, 9),
         ]
+
+    def _article_metadata_candidates(self, article: ArticleRef) -> list[Candidate]:
+        url = (article.oa_pdf_url or "").strip()
+        if not url:
+            return []
+        normalized = self._normalize_candidate_url(url)
+        if "doi.org/" in normalized.lower():
+            return []
+        return [Candidate("article_oa_pdf", normalized, 9)]
 
     def _dedupe_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
         best: dict[str, Candidate] = {}
@@ -874,8 +886,11 @@ class SingleArticleDownloader:
                         attempts=[asdict(item) for item in self.attempts],
                         candidate_count=len(fast_direct_candidates),
                         note=self._failure_note(),
-                    )
+                        )
             all_candidates.extend(fast_direct_candidates)
+
+        article_metadata_candidates = self._article_metadata_candidates(article)
+        all_candidates.extend(article_metadata_candidates)
 
         if article.doi:
             if self.mode == "fast":

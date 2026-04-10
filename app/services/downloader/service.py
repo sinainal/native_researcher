@@ -2882,6 +2882,7 @@ class PDFService:
                 direct_targets.append(target)
             else:
                 fallback_targets.append(target)
+
         targets = direct_targets[:3]
         if not targets:
             targets = fallback_targets[:2]
@@ -3132,7 +3133,12 @@ class PDFService:
         for match in re.finditer(r'href=["\']([^"\']+)["\']', html, re.IGNORECASE):
             href = match.group(1)
             href_lower = href.lower()
-            if ".pdf" not in href_lower and "/pdf" not in href_lower and "type=printable" not in href_lower:
+            if (
+                ".pdf" not in href_lower
+                and "/pdf" not in href_lower
+                and "type=printable" not in href_lower
+                and "/download/file/" not in href_lower
+            ):
                 continue
             candidates.append(urljoin(base_url, href))
 

@@ -84,6 +84,86 @@ def test_pdf_service_downloads_from_crossref_first(tmp_path) -> None:
     asyncio.run(runner())
 
 
+def test_pdf_service_uses_openalex_pmc_location_without_article_pmcid(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "api.crossref.org/works/" in url:
+                return httpx.Response(200, json={"message": {"link": []}})
+            if "api.openalex.org/works" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "best_oa_location": None,
+                                "primary_location": None,
+                                "locations": [
+                                    {
+                                        "landing_page_url": "https://www.ncbi.nlm.nih.gov/pmc/articles/7003109",
+                                        "pdf_url": None,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+            if "oa.fcgi" in url and "PMC7003109" in url:
+                return httpx.Response(404)
+            if "europepmc.org/api/fulltextRepo" in url and "type=METADATA" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "version": 1,
+                        "files": [
+                            {
+                                "filename": "7003109.xml",
+                                "mimeType": "application/xml",
+                                "type": "xml",
+                            }
+                        ],
+                    },
+                )
+            if "europepmc.org/api/fulltextRepo" in url and "type=FILE" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/xml;charset=utf-8"},
+                    content=b"<full-text-retrieval-response>" + (b"x" * 800) + b"</full-text-retrieval-response>",
+                )
+            if "ncbi.nlm.nih.gov/pmc/articles/7003109" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text="<html><body><div>PMC landing</div></body></html>",
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        settings = Settings(download_root=tmp_path)
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            service = PDFService(
+                http_client=client,
+                settings=settings,
+                candidate_cache=TTLCache(ttl_seconds=60, max_entries=16),
+            )
+            response = await service.resolve(
+                ArticleReference(
+                    title="PMC from OpenAlex location",
+                    year="2019",
+                    journal="The Canadian Journal of Psychiatry",
+                    doi="10.1177/0706743719877031",
+                ),
+                downloader_mode="native",
+            )
+
+        sources = {candidate.source for candidate in response.candidates}
+        assert "openalex_landing" in sources
+        assert "openalex_pmc_direct" in sources
+        assert "europe_pmc_repo_xml" in sources
+
+    asyncio.run(runner())
+
+
 def test_exact_bridge_uses_nature_direct_pdf_fast_path(tmp_path) -> None:
     async def runner() -> None:
         calls: list[tuple[str, str | None]] = []

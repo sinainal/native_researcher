@@ -1160,6 +1160,9 @@ class PDFService:
         doaj_task: asyncio.Task[list[PDFCandidate]] | None = None
         ncbi_linkout_task: asyncio.Task[list[PDFCandidate]] | None = None
         article_landing_task: asyncio.Task[list[PDFCandidate]] | None = None
+        openalex_landing_tasks: list[asyncio.Task[list[PDFCandidate]]] = []
+        openalex_pmc_link_tasks: list[asyncio.Task[list[str]]] = []
+        openalex_pmc_repo_tasks: list[asyncio.Task[list[PDFCandidate]]] = []
 
         add_candidate("article_oa_pdf", article.oa_pdf_url)
         if article.landing_page_url:
@@ -1217,6 +1220,18 @@ class PDFService:
                 add_candidate("crossref_elsevier_xml", url)
             for url in doi_source_map.get("openalex", []):
                 add_candidate("openalex", url)
+            for url in doi_source_map.get("openalex_landing", []):
+                add_candidate("openalex_landing", url)
+                openalex_landing_tasks.append(
+                    asyncio.create_task(self._landing_page_candidates_from_url("openalex_landing", url))
+                )
+            for pmc_id in doi_source_map.get("openalex_pmc_ids", []):
+                normalized_pmc = pmc_id.upper()
+                add_candidate("openalex_pmc_direct", f"https://pmc.ncbi.nlm.nih.gov/articles/{normalized_pmc}/pdf/")
+                add_candidate("openalex_pmc_article", f"https://pmc.ncbi.nlm.nih.gov/articles/{normalized_pmc}/")
+                add_candidate("openalex_europe_pmc_pdf", f"https://europepmc.org/articles/{normalized_pmc}?pdf=render")
+                openalex_pmc_link_tasks.append(asyncio.create_task(self._pmc_oa_links(normalized_pmc)))
+                openalex_pmc_repo_tasks.append(asyncio.create_task(self._europe_pmc_repo_candidates(normalized_pmc)))
             for url in doi_source_map.get("citation_pdf_url", []):
                 add_candidate("citation_pdf_url", url)
             for url in doi_source_map.get("doi_page", []):
@@ -1240,6 +1255,19 @@ class PDFService:
 
         if article_landing_task is not None:
             for candidate in await article_landing_task:
+                add_candidate(candidate.source, candidate.url)
+
+        for task in openalex_pmc_link_tasks:
+            for url in await task:
+                source = "pmc_oa_tgz" if url.endswith(".tar.gz") else "pmc_oa_pdf"
+                add_candidate(source, url)
+
+        for task in openalex_pmc_repo_tasks:
+            for candidate in await task:
+                add_candidate(candidate.source, candidate.url)
+
+        for task in openalex_landing_tasks:
+            for candidate in await task:
                 add_candidate(candidate.source, candidate.url)
 
         return candidates
@@ -1975,14 +2003,14 @@ class PDFService:
             asyncio.create_task(self._europe_pmc_fulltext_links(doi=doi)) if mode == "balanced" else None
         )
         crossref_task = asyncio.create_task(self._crossref_source_map(doi))
-        openalex_task = asyncio.create_task(self._openalex_pdf_links(doi))
+        openalex_task = asyncio.create_task(self._openalex_source_map(doi))
         landing_task = asyncio.create_task(self._doi_landing_source_map(doi)) if mode == "balanced" else None
         if mode == "balanced":
             (
                 unpaywall_links,
                 europe_pmc_links,
                 crossref_map,
-                openalex_links,
+                openalex_map,
                 landing_map,
             ) = await asyncio.gather(
                 unpaywall_task,
@@ -1992,7 +2020,7 @@ class PDFService:
                 landing_task,
             )
         else:
-            crossref_map, openalex_links = await asyncio.gather(crossref_task, openalex_task)
+            crossref_map, openalex_map = await asyncio.gather(crossref_task, openalex_task)
             unpaywall_links = []
             europe_pmc_links = []
             landing_map = {"citation_pdf_url": [], "doi_page": [], "doi_landing": [], "doi_guessed": []}
@@ -2002,7 +2030,9 @@ class PDFService:
             "europe_pmc": europe_pmc_links,
             "crossref": crossref_map["crossref"],
             "crossref_elsevier_xml": crossref_map["crossref_elsevier_xml"],
-            "openalex": openalex_links,
+            "openalex": openalex_map["openalex"],
+            "openalex_landing": openalex_map["openalex_landing"],
+            "openalex_pmc_ids": openalex_map["openalex_pmc_ids"],
             "citation_pdf_url": landing_map["citation_pdf_url"],
             "doi_page": landing_map["doi_page"],
             "doi_landing": landing_map["doi_landing"],
@@ -2197,14 +2227,23 @@ class PDFService:
             urls.append(href)
         return urls
 
-    async def _openalex_pdf_links(self, doi: str) -> list[str]:
+    @staticmethod
+    def _extract_pmc_id_from_url(url: str | None) -> str | None:
+        if not url:
+            return None
+        match = re.search(r"/articles/(?:PMC)?(\d+)", url, re.IGNORECASE)
+        if match is None:
+            return None
+        return f"PMC{match.group(1)}"
+
+    async def _openalex_source_map(self, doi: str) -> dict[str, list[str]]:
         try:
             await self.resolve_rate_limiter.wait()
             response = await self.http_client.get(
                 f"{self.settings.openalex_base_url}/works",
                 params={
                     "filter": f"doi:https://doi.org/{doi}",
-                    "select": "best_oa_location,primary_location",
+                    "select": "best_oa_location,primary_location,locations",
                 },
                 headers={"User-Agent": self.settings.request_user_agent},
                 follow_redirects=True,
@@ -2213,18 +2252,48 @@ class PDFService:
             response.raise_for_status()
             results = response.json().get("results", [])
         except (httpx.HTTPError, ValueError):
-            return []
+            return {"openalex": [], "openalex_landing": [], "openalex_pmc_ids": []}
 
-        urls: list[str] = []
         if not results:
-            return urls
+            return {"openalex": [], "openalex_landing": [], "openalex_pmc_ids": []}
 
+        payload = results[0]
+        pdf_urls: list[str] = []
+        landing_urls: list[str] = []
+        pmc_ids: list[str] = []
+        seen_pdf: set[str] = set()
+        seen_landing: set[str] = set()
+        seen_pmc: set[str] = set()
+
+        locations: list[dict[str, Any]] = []
         for field in ("best_oa_location", "primary_location"):
-            location = results[0].get(field) or {}
-            pdf_url = location.get("pdf_url")
-            if pdf_url:
-                urls.append(pdf_url)
-        return urls
+            location = payload.get(field)
+            if isinstance(location, dict):
+                locations.append(location)
+        for location in payload.get("locations", []):
+            if isinstance(location, dict):
+                locations.append(location)
+
+        for location in locations:
+            pdf_url = self._normalize_candidate_url(location.get("pdf_url"))
+            landing_url = self._normalize_candidate_url(location.get("landing_page_url"))
+            if pdf_url and pdf_url not in seen_pdf:
+                seen_pdf.add(pdf_url)
+                pdf_urls.append(pdf_url)
+            if landing_url and "doi.org/" not in landing_url.lower() and landing_url not in seen_landing:
+                seen_landing.add(landing_url)
+                landing_urls.append(landing_url)
+            for candidate_url in (pdf_url, landing_url):
+                pmc_id = self._extract_pmc_id_from_url(candidate_url)
+                if pmc_id and pmc_id not in seen_pmc:
+                    seen_pmc.add(pmc_id)
+                    pmc_ids.append(pmc_id)
+
+        return {
+            "openalex": pdf_urls,
+            "openalex_landing": landing_urls,
+            "openalex_pmc_ids": pmc_ids,
+        }
 
     async def _unpaywall_pdf_links(self, doi: str) -> list[str]:
         if not self.settings.unpaywall_email:
@@ -2850,6 +2919,8 @@ class PDFService:
             "article_landing",
             "crossref",
             "openalex",
+            "openalex_landing",
+            "openalex_pmc_article",
             "citation_pdf_url",
             "doaj_pdf",
             "ncbi_linkout",
@@ -3329,6 +3400,10 @@ class PDFService:
                 "crossref",
                 "crossref_elsevier_xml",
                 "openalex",
+                "openalex_landing",
+                "openalex_pmc_direct",
+                "openalex_pmc_article",
+                "openalex_europe_pmc_pdf",
                 "citation_pdf_url",
                 "doaj_pdf",
                 "europe_pmc",
@@ -3354,9 +3429,13 @@ class PDFService:
             "ncbi_linkout": 13,
             "citation_pdf_url": 14,
             "doaj_pdf": 16,
+            "openalex_landing": 17,
             "openalex": 20,
             "europe_pmc": 30,
             "europepmc": 30,
+            "openalex_europe_pmc_pdf": 30,
+            "openalex_pmc_direct": 5,
+            "openalex_pmc_article": 18,
             "pmc_direct": 90,
         }
         preferred = [
@@ -3429,6 +3508,10 @@ class PDFService:
             "article_landing",
             "crossref",
             "openalex",
+            "openalex_landing",
+            "openalex_pmc_direct",
+            "openalex_pmc_article",
+            "openalex_europe_pmc_pdf",
             "unpaywall",
             "europe_pmc",
             "europepmc",
@@ -3437,7 +3520,7 @@ class PDFService:
             "doi_page",
             "doi_landing",
         }:
-            if mode == "fast" and source in {"openalex", "citation_pdf_url"}:
+            if mode == "fast" and source in {"openalex", "openalex_landing", "citation_pdf_url"}:
                 return 2.2
             return 2.0 if mode == "fast" else 5.0
         return 1.5 if mode == "fast" else 4.0
@@ -3452,7 +3535,16 @@ class PDFService:
     def _quick_probe_read_limit(source: str, content_type: str) -> int:
         if "html" in content_type or "xml" in content_type or "text/plain" in content_type:
             return 65536
-        if source in {"article_oa_pdf", "openalex", "citation_pdf_url", "crossref", "pmc_direct", "pmc_oa_pdf"}:
+        if source in {
+            "article_oa_pdf",
+            "openalex",
+            "openalex_pmc_direct",
+            "openalex_europe_pmc_pdf",
+            "citation_pdf_url",
+            "crossref",
+            "pmc_direct",
+            "pmc_oa_pdf",
+        }:
             return 16384
         return 8192
 

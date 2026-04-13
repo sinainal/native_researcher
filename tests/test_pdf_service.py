@@ -54,7 +54,7 @@ def test_pdf_service_downloads_from_crossref_first(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -138,7 +138,7 @@ def test_pdf_service_uses_openalex_pmc_location_without_article_pmcid(tmp_path) 
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -315,7 +315,7 @@ def test_pdf_service_downloads_from_pmc_oa_package(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -374,7 +374,7 @@ def test_pdf_service_fast_mode_short_circuits_with_pmc_preflight(tmp_path) -> No
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -444,7 +444,7 @@ def test_pdf_service_fast_mode_uses_europe_pmc_repo_for_pmc_doi_article(tmp_path
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -502,7 +502,7 @@ def test_pdf_service_fast_mode_skips_doi_landing_page(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -558,7 +558,7 @@ def test_pdf_service_balanced_mode_uses_citation_pdf_url(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -634,6 +634,7 @@ def test_pdf_service_uses_unpaywall_before_crossref(tmp_path) -> None:
         settings = Settings(
             download_root=tmp_path,
             unpaywall_email="tester@example.com",
+            pdf_downloader_mode="legacy"
         )
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
@@ -698,7 +699,7 @@ def test_pdf_service_collects_europe_pmc_fulltext_urls(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -740,7 +741,7 @@ def test_pdf_service_accepts_verified_html_fulltext(tmp_path) -> None:
                 return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, text=html)
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -798,7 +799,7 @@ def test_pdf_service_accepts_verified_doi_landing_fulltext(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -849,7 +850,7 @@ def test_pdf_service_accepts_elsevier_open_archive_html(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -900,7 +901,7 @@ def test_pdf_service_rejects_elsevier_preview_html(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -943,7 +944,7 @@ def test_pdf_service_uses_browser_fallback_when_enabled(tmp_path) -> None:
                 raise httpx.RemoteProtocolError("Server disconnected")
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -1014,6 +1015,7 @@ def test_pdf_service_probes_candidates_in_parallel(tmp_path) -> None:
         settings = Settings(
             download_root=tmp_path,
             pdf_candidate_download_concurrency=3,
+            pdf_downloader_mode="legacy"
         )
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
@@ -1048,7 +1050,7 @@ def test_pdf_service_probes_candidates_in_parallel(tmp_path) -> None:
 
 
 def test_pdf_service_builds_browser_targets_for_pmc_only_in_balanced_mode(tmp_path) -> None:
-    settings = Settings(download_root=tmp_path)
+    settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
     try:
         service = PDFService(
@@ -1069,7 +1071,7 @@ def test_pdf_service_builds_browser_targets_for_pmc_only_in_balanced_mode(tmp_pa
 
 
 def test_pdf_service_expands_browser_candidates_for_publishers(tmp_path) -> None:
-    settings = Settings(download_root=tmp_path)
+    settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
     try:
         service = PDFService(
@@ -1132,7 +1134,7 @@ def test_pdf_service_quick_availability_marks_pmc_direct_pdf_ready(tmp_path) -> 
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -1167,7 +1169,7 @@ def test_pdf_service_quick_availability_requires_pdf_signature(tmp_path) -> None
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -1218,7 +1220,7 @@ def test_pdf_service_quick_availability_marks_tgz_with_pdf_ready(tmp_path) -> No
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -1281,7 +1283,7 @@ def test_pdf_service_quick_availability_rejects_tgz_without_pdf(tmp_path) -> Non
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(
@@ -1313,7 +1315,7 @@ def test_pdf_service_quick_availability_accepts_html_fulltext(tmp_path) -> None:
                 )
             raise AssertionError(f"Unexpected URL: {request.url}")
 
-        settings = Settings(download_root=tmp_path)
+        settings = Settings(download_root=tmp_path, pdf_downloader_mode="legacy")
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             service = PDFService(

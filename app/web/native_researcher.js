@@ -170,7 +170,7 @@ const runtime = {
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "openalex"),
   aiPrimarySearchResource: "openalex",
-  pdfDownloaderMode: "legacy",
+  pdfDownloaderMode: "xml",
   assistantModel: stateModel,
 };
 
@@ -196,19 +196,20 @@ function searchResourceLabel(value) {
   return "OpenAlex";
 }
 
-function normalizePdfDownloaderMode(value, fallback = "legacy") {
+function normalizePdfDownloaderMode(value, fallback = "xml") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["legacy", "hybrid", "article_downloader", "final_method"].includes(normalized)) {
+  if (["legacy", "hybrid", "article_downloader", "final_method", "xml"].includes(normalized)) {
     return normalized;
   }
   return fallback;
 }
 
 function pdfDownloaderModeLabel(value) {
-  const normalized = normalizePdfDownloaderMode(value, "legacy");
-  if (normalized === "hybrid") return "Hybrid";
+  const normalized = normalizePdfDownloaderMode(value, "xml");
+  if (normalized === "xml")             return "XML Downloader ✦";
+  if (normalized === "hybrid")          return "Hybrid";
   if (normalized === "article_downloader") return "Article Downloader";
-  if (normalized === "final_method") return "Final Method";
+  if (normalized === "final_method")    return "Final Method";
   return "Legacy";
 }
 
@@ -780,11 +781,16 @@ function renderSettingsPanel() {
     els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
   }
   if (els.pdfDownloaderModeInput) {
-    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy");
+    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml");
   }
   if (els.pdfDownloaderModeStatus) {
-    const label = pdfDownloaderModeLabel(runtime.pdfDownloaderMode);
-    els.pdfDownloaderModeStatus.textContent = `Browser downloads use the ${label} bridge.`;
+    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml");
+    const label = pdfDownloaderModeLabel(mode);
+    if (mode === "xml") {
+      els.pdfDownloaderModeStatus.textContent = "XML Downloader: NCBI eFetch + Europe PMC — %100 OA, anti-bot yok.";
+    } else {
+      els.pdfDownloaderModeStatus.textContent = `Browser downloads use the ${label} bridge.`;
+    }
   }
   if (els.searchResource) {
     els.searchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
@@ -815,7 +821,7 @@ function applyApiKeyValues(payload = {}) {
   );
   runtime.pdfDownloaderMode = normalizePdfDownloaderMode(
     payload.pdf_downloader_mode,
-    runtime.pdfDownloaderMode || "legacy",
+    runtime.pdfDownloaderMode || "xml",
   );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
@@ -840,7 +846,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
       ...overrides,
     }),
   });
@@ -850,7 +856,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
     ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
+    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1671,7 +1677,7 @@ async function requestArticleDownload(article, options = {}) {
         articles: [articleReference(article)],
         download_dir: projectDownloadDir(),
         max_articles: 1,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
       }),
       signal: controller.signal,
     });
@@ -1712,7 +1718,7 @@ async function requestBatchDownload(articles, options = {}) {
         articles: batch.map(articleReference),
         download_dir: projectDownloadDir(),
         max_articles: batch.length,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "legacy"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
       }),
       signal: controller.signal,
     });
@@ -3160,7 +3166,7 @@ function bindEvents() {
     }
   });
   els.pdfDownloaderModeInput?.addEventListener("change", async () => {
-    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "legacy");
+    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "xml");
     if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = true;
     try {
       runtime.pdfDownloaderMode = nextValue;

@@ -54,7 +54,7 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"legacy", "article_downloader", "hybrid", "final_method"}:
+    if normalized in {"legacy", "article_downloader", "hybrid", "final_method", "xml"}:
         return normalized
     return default
 
@@ -74,7 +74,7 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
     object.__setattr__(
         settings,
         "pdf_downloader_mode",
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "legacy"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "xml"),
     )
     object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
 
@@ -104,8 +104,8 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
         pdf_downloader_mode=_normalize_pdf_downloader_mode(
             _read_value(settings.pdf_downloader_mode_path),
             _normalize_pdf_downloader_mode(
-                getattr(settings, "pdf_downloader_mode", "legacy"),
-                "legacy",
+                getattr(settings, "pdf_downloader_mode", "xml"),
+                "xml",
             ),
         ),
     )
@@ -131,7 +131,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
     )
     _write_value(
         settings.pdf_downloader_mode_path,
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "legacy"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "xml"),
     )
     next_payload = _current_payload(request)
     _apply_runtime_settings(request, next_payload)

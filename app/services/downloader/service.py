@@ -38,6 +38,7 @@ from app.services.downloader.article_downloader_bridge import ArticleDownloaderB
 from app.services.downloader.hybrid_bridge import HybridDownloaderBridge
 from app.services.downloader.final_method.orchestrator import FinalMethodBridge
 from app.services.downloader.legacy_bridge import ExactNewMethodBridge
+from app.services.downloader.xml_bridge import XmlDownloaderBridge
 from app.utils.cache import TTLCache
 from app.utils.files import ensure_unique_path, sanitize_filename
 from app.utils.rate_limit import AsyncRateLimiter
@@ -413,6 +414,10 @@ class PDFService:
             article_downloader_bridge=self.article_downloader_bridge,
         )
         self.final_method_bridge = FinalMethodBridge()
+        self.xml_bridge = XmlDownloaderBridge(
+            ncbi_api_key=settings.ncbi_api_key,
+            email=settings.unpaywall_email
+        )
 
     @staticmethod
     def _resolve_timeout() -> httpx.Timeout:
@@ -423,12 +428,14 @@ class PDFService:
         return mode if mode in {"fast", "balanced"} else "fast"
 
     def _downloader_mode(self, requested: str | None = None) -> str:
-        normalized = (requested or self.settings.pdf_downloader_mode or "legacy").strip().lower()
-        if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method"}:
+        normalized = (requested or self.settings.pdf_downloader_mode or "xml").strip().lower()
+        if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method", "xml"}:
             return normalized
-        return "legacy"
+        return "xml"
 
     def _bridge_for(self, downloader_mode: str):
+        if downloader_mode == "xml":
+            return self.xml_bridge
         if downloader_mode == "article_downloader":
             return self.article_downloader_bridge
         if downloader_mode == "hybrid":

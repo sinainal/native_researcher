@@ -42,7 +42,7 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method"}:
+    if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method", "xml"}:
         return normalized
     return default
 
@@ -89,7 +89,7 @@ class Settings:
     pdf_candidate_download_concurrency: int = 5
     pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
-    pdf_downloader_mode: str = "legacy"
+    pdf_downloader_mode: str = "xml"
     journal_metrics_enabled: bool = True
     journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
     journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
@@ -121,7 +121,7 @@ class Settings:
         )
         pdf_downloader_mode = _normalize_pdf_downloader_mode(
             os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
-            "legacy",
+            "xml",
         )
         default_rps = 10.0 if api_key else 3.0
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))

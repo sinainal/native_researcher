@@ -176,6 +176,7 @@
                   <label class="native-settings-field native-settings-field-wide" for="pdfDownloaderModeInput">
                     <span>Method</span>
                     <select id="pdfDownloaderModeInput" class="native-settings-select">
+                      <option value="xml" selected>XML Downloader ✦ (Default)</option>
                       <option value="legacy">Legacy</option>
                       <option value="hybrid">Hybrid</option>
                       <option value="article_downloader">Article Downloader</option>
@@ -183,7 +184,7 @@
                     </select>
                   </label>
                 </div>
-                <div id="pdfDownloaderModeStatus" class="native-settings-note">Browser downloads use the legacy downloader bridge.</div>
+                <div id="pdfDownloaderModeStatus" class="native-settings-note">XML Downloader: NCBI eFetch + Europe PMC — %100 OA, anti-bot yok.</div>
               </div>
               <div class="native-settings-card">
                 <div class="native-settings-row">
@@ -460,8 +461,8 @@
         <input id="ncbiApiKeyInput" class="api-keys-input" type="password" autocomplete="off" spellcheck="false">
       </label>
       <label class="api-keys-field">
-        <span class="api-keys-label">Unpaywall Email</span>
-        <input id="unpaywallEmailInput" class="api-keys-input" type="email" autocomplete="off" spellcheck="false" placeholder="name@example.com">
+        <span class="api-keys-label">API Email <small style="font-weight:400;opacity:.65">(NCBI polite pool)</small></span>
+        <input id="unpaywallEmailInput" class="api-keys-input" type="email" autocomplete="off" spellcheck="false" placeholder="name@institution.edu">
       </label>
       <div class="api-keys-actions">
         <button id="apiKeysCancel" class="btn btn-ghost btn-sm" type="button">Cancel</button>

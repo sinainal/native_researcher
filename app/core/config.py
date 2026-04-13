@@ -42,7 +42,7 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"legacy", "article_downloader", "hybrid"}:
+    if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method"}:
         return normalized
     return default
 

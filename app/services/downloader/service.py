@@ -36,6 +36,7 @@ from app.schemas.pdf import (
 from app.services.app_event_log_service import AppEventLogService
 from app.services.downloader.article_downloader_bridge import ArticleDownloaderBridge
 from app.services.downloader.hybrid_bridge import HybridDownloaderBridge
+from app.services.downloader.final_method.orchestrator import FinalMethodBridge
 from app.services.downloader.legacy_bridge import ExactNewMethodBridge
 from app.utils.cache import TTLCache
 from app.utils.files import ensure_unique_path, sanitize_filename
@@ -411,6 +412,7 @@ class PDFService:
             legacy_bridge=self.legacy_bridge,
             article_downloader_bridge=self.article_downloader_bridge,
         )
+        self.final_method_bridge = FinalMethodBridge()
 
     @staticmethod
     def _resolve_timeout() -> httpx.Timeout:
@@ -422,7 +424,7 @@ class PDFService:
 
     def _downloader_mode(self, requested: str | None = None) -> str:
         normalized = (requested or self.settings.pdf_downloader_mode or "legacy").strip().lower()
-        if normalized in {"legacy", "article_downloader", "hybrid", "native"}:
+        if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method"}:
             return normalized
         return "legacy"
 
@@ -431,6 +433,8 @@ class PDFService:
             return self.article_downloader_bridge
         if downloader_mode == "hybrid":
             return self.hybrid_bridge
+        if downloader_mode == "final_method":
+            return self.final_method_bridge
         return self.legacy_bridge
 
     @staticmethod

@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 SearchResource = Literal["openalex", "pubmed", "europe_pmc"]
-PDFDownloaderMode = Literal["legacy", "article_downloader", "hybrid"]
+PDFDownloaderMode = Literal["legacy", "article_downloader", "hybrid", "final_method"]
 
 
 class AppAPIKeysPayload(BaseModel):

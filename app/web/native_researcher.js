@@ -198,7 +198,7 @@ function searchResourceLabel(value) {
 
 function normalizePdfDownloaderMode(value, fallback = "legacy") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["legacy", "hybrid", "article_downloader"].includes(normalized)) {
+  if (["legacy", "hybrid", "article_downloader", "final_method"].includes(normalized)) {
     return normalized;
   }
   return fallback;
@@ -208,6 +208,7 @@ function pdfDownloaderModeLabel(value) {
   const normalized = normalizePdfDownloaderMode(value, "legacy");
   if (normalized === "hybrid") return "Hybrid";
   if (normalized === "article_downloader") return "Article Downloader";
+  if (normalized === "final_method") return "Final Method";
   return "Legacy";
 }
 

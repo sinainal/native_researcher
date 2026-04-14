@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a simple search + download smoke test.")
     parser.add_argument("--query", required=True, help="Literature query to search.")
     parser.add_argument("--source", default="pubmed", choices=["pubmed", "openalex", "europe_pmc", "pmc"], help="Primary search source.")
-    parser.add_argument("--mode", default="pdf_xml", choices=["pdf_xml", "xml", "pdf", "best"], help="Downloader mode to test.")
+    parser.add_argument("--mode", default="pdf_xml", choices=["pdf_xml", "xml", "pdf"], help="Downloader mode to test.")
     parser.add_argument("--max-results", type=int, default=1, help="Number of search hits to inspect.")
     parser.add_argument("--year-start", type=int, default=None)
     parser.add_argument("--year-end", type=int, default=None)
@@ -39,7 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     save_group.add_argument("--save-files", dest="save_files", action="store_true", help="Persist downloaded files to disk.")
     save_group.add_argument("--no-save-files", dest="save_files", action="store_false", help="Use a temporary directory and discard files.")
     parser.set_defaults(save_files=True)
-    parser.add_argument("--browser-fallback", action="store_true", help="Allow browser rescue when available.")
     return parser
 
 
@@ -98,9 +97,7 @@ async def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             articles,
             download_dir=args.download_dir,
             save_files=args.save_files,
-            mode="fast",
             downloader_mode=args.mode,
-            use_browser_fallback=args.browser_fallback,
         )
         success_count = sum(1 for item in diagnostics if item.success)
         total = len(diagnostics)

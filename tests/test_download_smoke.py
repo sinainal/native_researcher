@@ -15,6 +15,7 @@ def test_smoke_parser_defaults() -> None:
     assert args.source == "pubmed"
     assert args.mode == "pdf_xml"
     assert args.max_results == 1
+    assert not hasattr(args, "browser_fallback")
 
 
 def test_smoke_runner_uses_injected_services(monkeypatch) -> None:

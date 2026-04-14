@@ -89,9 +89,6 @@ class Settings:
     app_event_log_path: Path = Path("logs/app_events.jsonl")
     pdf_cache_ttl_seconds: int = 1800
     pdf_cache_max_entries: int = 256
-    pdf_download_concurrency: int = 16
-    pdf_candidate_download_concurrency: int = 5
-    pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
     pdf_downloader_mode: str = "pdf_xml"
     journal_metrics_enabled: bool = True
@@ -174,13 +171,6 @@ class Settings:
             app_event_log_path=Path(os.getenv("APP_EVENT_LOG_PATH", "logs/app_events.jsonl")),
             pdf_cache_ttl_seconds=int(os.getenv("PDF_CACHE_TTL_SECONDS", "1800")),
             pdf_cache_max_entries=int(os.getenv("PDF_CACHE_MAX_ENTRIES", "256")),
-            pdf_download_concurrency=int(os.getenv("PDF_DOWNLOAD_CONCURRENCY", "16")),
-            pdf_candidate_download_concurrency=int(
-                os.getenv("PDF_CANDIDATE_DOWNLOAD_CONCURRENCY", "5")
-            ),
-            pdf_browser_fallback_concurrency=int(
-                os.getenv("PDF_BROWSER_FALLBACK_CONCURRENCY", "6")
-            ),
             pdf_resolve_requests_per_second=float(
                 os.getenv("PDF_RESOLVE_REQUESTS_PER_SECOND", "20")
             ),

@@ -64,7 +64,8 @@ class FakePubMedService:
 
 
 class FakePDFService:
-    async def resolve(self, article, *, mode="balanced"):  # noqa: ANN001
+    async def resolve(self, article, *, downloader_mode=None):  # noqa: ANN001
+        _ = downloader_mode
         return PDFResolveResponse(
             article=article,
             candidates=[PDFCandidate(source="crossref", url="https://example.org/test.pdf")],
@@ -109,11 +110,9 @@ class FakePDFService:
         *,
         download_dir=None,
         save_files=True,
-        mode="balanced",
         downloader_mode=None,
-        use_browser_fallback=False,
     ):
-        _ = download_dir, mode, downloader_mode, use_browser_fallback
+        _ = download_dir, downloader_mode
         article = articles[0]
         return [
             PDFTestResult(

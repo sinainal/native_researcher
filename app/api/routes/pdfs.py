@@ -39,7 +39,7 @@ async def resolve_pdf_candidates(
 ) -> PDFResolveResponse:
     service = get_pdf_service(request)
     try:
-        return await service.resolve(article, mode="fast")
+        return await service.resolve(article)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -101,9 +101,7 @@ async def test_pdf_pipeline(
             articles,
             download_dir=payload.download_dir,
             save_files=payload.save_files,
-            mode=payload.mode,
             downloader_mode=payload.downloader_mode,
-            use_browser_fallback=payload.use_browser_fallback,
         )
         success_count = sum(1 for item in diagnostics if item.success)
         reason_counts: dict[str, int] = {}

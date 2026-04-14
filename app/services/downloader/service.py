@@ -42,7 +42,7 @@ class _BasePipeline:
         self.http_client = http_client
         self.settings = settings
 
-    async def resolve_candidates(self, article: ArticleReference, *, mode: str) -> list[DownloadCandidate]:
+    async def resolve_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
         raise NotImplementedError
 
     async def run(
@@ -50,13 +50,12 @@ class _BasePipeline:
         article: ArticleReference,
         *,
         output_dir: Path,
-        mode: str,
         budget_seconds: float,
         save_file: bool = True,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         logger = DownloadLogger()
-        candidates = await self.resolve_candidates(article, mode=mode)
+        candidates = await self.resolve_candidates(article)
         if not candidates:
             return self._failure_payload(
                 article,
@@ -180,7 +179,6 @@ class _BasePipeline:
         )
         return {
             "article": article.model_dump(),
-            "mode": "fast",
             "success": True,
             "source": candidate.source,
             "url": str(response.url),
@@ -236,7 +234,6 @@ class _BasePipeline:
     ) -> dict[str, Any]:
         return {
             "article": article.model_dump(),
-            "mode": "fast",
             "success": False,
             "source": None,
             "url": None,
@@ -555,7 +552,7 @@ class _BasePipeline:
 
 
 class XMLPipeline(_BasePipeline):
-    async def resolve_candidates(self, article: ArticleReference, *, mode: str) -> list[DownloadCandidate]:
+    async def resolve_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
         candidates: list[DownloadCandidate] = []
         pmc_id = await self._resolve_pmc_id(article)
         enriched_article = article.model_copy(update={"pmc_id": pmc_id or article.pmc_id})
@@ -580,7 +577,7 @@ class XMLPipeline(_BasePipeline):
 
 
 class PDFPipeline(_BasePipeline):
-    async def resolve_candidates(self, article: ArticleReference, *, mode: str) -> list[DownloadCandidate]:
+    async def resolve_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
         candidates: list[DownloadCandidate] = []
         pmc_id = await self._resolve_pmc_id(article)
         enriched_article = article.model_copy(update={"pmc_id": pmc_id or article.pmc_id})
@@ -637,10 +634,10 @@ class BestAvailablePipeline:
         self.xml_pipeline = xml_pipeline
         self.pdf_pipeline = pdf_pipeline
 
-    async def resolve_candidates(self, article: ArticleReference, *, mode: str) -> list[DownloadCandidate]:
+    async def resolve_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
         xml_candidates, pdf_candidates = await asyncio.gather(
-            self.xml_pipeline.resolve_candidates(article, mode=mode),
-            self.pdf_pipeline.resolve_candidates(article, mode=mode),
+            self.xml_pipeline.resolve_candidates(article),
+            self.pdf_pipeline.resolve_candidates(article),
         )
         return [*xml_candidates, *pdf_candidates]
 
@@ -649,21 +646,18 @@ class BestAvailablePipeline:
         article: ArticleReference,
         *,
         output_dir: Path,
-        mode: str,
         budget_seconds: float,
         save_file: bool = True,
     ) -> dict[str, Any]:
         xml_payload = await self.xml_pipeline.run(
             article,
             output_dir=output_dir,
-            mode=mode,
             budget_seconds=max(5.0, budget_seconds * 0.45),
             save_file=save_file,
         )
         pdf_payload = await self.pdf_pipeline.run(
             article,
             output_dir=output_dir,
-            mode=mode,
             budget_seconds=max(5.0, budget_seconds * 0.55),
             save_file=save_file,
         )
@@ -678,7 +672,6 @@ class BestAvailablePipeline:
             return xml_payload
         return {
             "article": article.model_dump(),
-            "mode": mode,
             "success": False,
             "source": None,
             "url": None,
@@ -705,10 +698,6 @@ class PDFService:
         self.xml_pipeline = XMLPipeline(http_client, settings)
         self.pdf_pipeline = PDFPipeline(http_client, settings)
         self.best_pipeline = BestAvailablePipeline(self.xml_pipeline, self.pdf_pipeline)
-
-    @staticmethod
-    def _exact_mode(mode: str) -> str:
-        return mode if mode in {"fast", "balanced"} else "fast"
 
     def _downloader_mode(self, requested: str | None = None) -> str:
         normalized = (requested or self.settings.pdf_downloader_mode or "pdf_xml").strip().lower()
@@ -737,17 +726,15 @@ class PDFService:
         self,
         article: ArticleReference,
         *,
-        mode: str = "fast",
         downloader_mode: str | None = None,
     ) -> PDFResolveResponse:
-        exact_mode = self._exact_mode(mode)
         selected_mode = self._downloader_mode(downloader_mode)
-        cache_key = self._candidate_cache_key(article, exact_mode, selected_mode)
+        cache_key = self._candidate_cache_key(article, selected_mode)
         cached = self.candidate_cache.get(cache_key)
         if cached is not None:
             return PDFResolveResponse(article=article, candidates=cached, cache_hit=True)
         pipeline = self._pipeline_for(selected_mode)
-        candidate_payloads = await pipeline.resolve_candidates(article, mode=exact_mode)
+        candidate_payloads = await pipeline.resolve_candidates(article)
         candidates = [PDFCandidate(source=item.source, url=item.url) for item in candidate_payloads]
         self.candidate_cache.set(cache_key, candidates)
         return PDFResolveResponse(article=article, candidates=candidates, cache_hit=False)
@@ -759,7 +746,6 @@ class PDFService:
                 payload = await self.best_pipeline.run(
                     article,
                     output_dir=Path(temp_dir),
-                    mode="fast",
                     budget_seconds=30.0,
                     save_file=False,
                 )
@@ -779,13 +765,12 @@ class PDFService:
         target_dir.mkdir(parents=True, exist_ok=True)
         articles = request.articles[: request.max_articles] if request.max_articles else request.articles
         selected_mode = self._downloader_mode(request.downloader_mode)
-        exact_mode = self._exact_mode(request.mode)
         pipeline = self._pipeline_for(selected_mode)
-        semaphore = asyncio.Semaphore(self._download_concurrency_for_articles(exact_mode, articles))
+        semaphore = asyncio.Semaphore(self._download_concurrency_for_articles(articles))
 
         async def run_single(article: ArticleReference) -> PDFDownloadResult:
             async with semaphore:
-                payload = await pipeline.run(article, output_dir=target_dir, mode=exact_mode, budget_seconds=60.0)
+                payload = await pipeline.run(article, output_dir=target_dir, budget_seconds=60.0)
                 return self._to_pdf_download_result(article, payload)
 
         results = await asyncio.gather(*(run_single(article) for article in articles))
@@ -803,11 +788,8 @@ class PDFService:
         *,
         download_dir: str | None = None,
         save_files: bool = True,
-        mode: str = "fast",
         downloader_mode: str | None = None,
-        use_browser_fallback: bool = False,
     ) -> list[PDFTestResult]:
-        _ = use_browser_fallback
         temp_dir_context: tempfile.TemporaryDirectory[str] | None = None
         if save_files:
             target_dir = self._resolve_target_dir(download_dir)
@@ -822,7 +804,6 @@ class PDFService:
                 payload = await pipeline.run(
                     article,
                     output_dir=target_dir,
-                    mode=self._exact_mode(mode),
                     budget_seconds=60.0,
                     save_file=save_files,
                 )
@@ -833,11 +814,10 @@ class PDFService:
                 temp_dir_context.cleanup()
 
     @staticmethod
-    def _candidate_cache_key(article: ArticleReference, mode: str, downloader_mode: str) -> str:
+    def _candidate_cache_key(article: ArticleReference, downloader_mode: str) -> str:
         return "|".join(
             [
                 downloader_mode,
-                mode,
                 article.doi or "",
                 article.pmc_id or "",
                 article.pmid or "",
@@ -847,9 +827,9 @@ class PDFService:
         )
 
     @staticmethod
-    def _download_concurrency_for_articles(mode: str, articles: list[ArticleReference]) -> int:
+    def _download_concurrency_for_articles(articles: list[ArticleReference]) -> int:
         batch_size = max(1, len(articles))
-        return min(4 if mode == "fast" else 8, batch_size)
+        return min(4, batch_size)
 
     def _resolve_target_dir(self, download_dir: str | None) -> Path:
         if download_dir:

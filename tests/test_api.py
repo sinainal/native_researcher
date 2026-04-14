@@ -243,7 +243,7 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
                     "pubmed_oa_only": True,
-                    "pdf_downloader_mode": "legacy",
+                    "pdf_downloader_mode": "best",
                 }
 
                 api_keys = await client.get("/app/api-keys")
@@ -254,7 +254,7 @@ def test_api_endpoints() -> None:
                     "unpaywall_email": "",
                     "pubmed_oa_only": True,
                     "ai_primary_search_resource": "openalex",
-                    "pdf_downloader_mode": "legacy",
+                    "pdf_downloader_mode": "best",
                 }
 
                 update_api_keys = await client.put(

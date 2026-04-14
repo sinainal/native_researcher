@@ -170,7 +170,7 @@ const runtime = {
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "openalex"),
   aiPrimarySearchResource: "openalex",
-  pdfDownloaderMode: "xml",
+  pdfDownloaderMode: "best",
   assistantModel: stateModel,
 };
 
@@ -182,7 +182,7 @@ function clampDownloadWorkers(value) {
 
 function normalizeSearchResource(value, fallback = "openalex") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["openalex", "pubmed", "europe_pmc"].includes(normalized)) {
+  if (["openalex", "pubmed", "europe_pmc", "pmc"].includes(normalized)) {
     return normalized;
   }
   return fallback;
@@ -193,25 +193,24 @@ function searchResourceLabel(value) {
   if (normalized === "openalex") return "OpenAlex";
   if (normalized === "pubmed") return "PubMed";
   if (normalized === "europe_pmc") return "Europe PMC";
+  if (normalized === "pmc") return "PMC";
   return "OpenAlex";
 }
 
-function normalizePdfDownloaderMode(value, fallback = "perfect") {
+function normalizePdfDownloaderMode(value, fallback = "best") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["legacy", "hybrid", "article_downloader", "final_method", "xml", "perfect"].includes(normalized)) {
+  if (["best", "xml", "pdf", "legacy", "hybrid", "article_downloader", "final_method", "perfect"].includes(normalized)) {
     return normalized;
   }
   return fallback;
 }
 
 function pdfDownloaderModeLabel(value) {
-  const normalized = normalizePdfDownloaderMode(value, "perfect");
-  if (normalized === "perfect")         return "Perfect (XML+PDF) ✦";
-  if (normalized === "xml")             return "XML Downloader";
-  if (normalized === "hybrid")          return "Hybrid";
-  if (normalized === "article_downloader") return "Article Downloader";
-  if (normalized === "final_method")    return "Final Method";
-  return "Legacy";
+  const normalized = normalizePdfDownloaderMode(value, "best");
+  if (normalized === "best" || normalized === "perfect") return "Best Available (XML+PDF) ✦";
+  if (normalized === "xml") return "XML Only";
+  if (normalized === "pdf") return "PDF Only";
+  return "Best Available (XML+PDF) ✦";
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -782,17 +781,18 @@ function renderSettingsPanel() {
     els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
   }
   if (els.pdfDownloaderModeInput) {
-    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect");
+    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best");
   }
   if (els.pdfDownloaderModeStatus) {
-    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect");
-    const label = pdfDownloaderModeLabel(mode);
-    if (mode === "perfect") {
-      els.pdfDownloaderModeStatus.textContent = "Perfect: XML First + PDF Fallback with Smart Scraper — %95+ Başarı.";
+    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best");
+    if (mode === "best" || mode === "perfect") {
+      els.pdfDownloaderModeStatus.textContent = "Best mode tries the unified XML pipeline first, then the unified PDF pipeline.";
     } else if (mode === "xml") {
-      els.pdfDownloaderModeStatus.textContent = "XML Downloader: NCBI eFetch + Europe PMC — %100 OA, anti-bot yok.";
+      els.pdfDownloaderModeStatus.textContent = "XML mode uses PMC, Europe PMC, NCBI eFetch and Crossref XML sources.";
+    } else if (mode === "pdf") {
+      els.pdfDownloaderModeStatus.textContent = "PDF mode uses PMC, Europe PMC, Crossref, DOI landing and linkout sources.";
     } else {
-      els.pdfDownloaderModeStatus.textContent = `Browser downloads use the ${label} bridge.`;
+      els.pdfDownloaderModeStatus.textContent = "Best mode tries the unified XML pipeline first, then the unified PDF pipeline.";
     }
   }
   if (els.searchResource) {
@@ -824,7 +824,7 @@ function applyApiKeyValues(payload = {}) {
   );
   runtime.pdfDownloaderMode = normalizePdfDownloaderMode(
     payload.pdf_downloader_mode,
-    runtime.pdfDownloaderMode || "perfect",
+    runtime.pdfDownloaderMode || "best",
   );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
@@ -849,7 +849,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
       ...overrides,
     }),
   });
@@ -859,7 +859,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
     ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
+    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1680,7 +1680,7 @@ async function requestArticleDownload(article, options = {}) {
         articles: [articleReference(article)],
         download_dir: projectDownloadDir(),
         max_articles: 1,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
       }),
       signal: controller.signal,
     });
@@ -1721,7 +1721,7 @@ async function requestBatchDownload(articles, options = {}) {
         articles: batch.map(articleReference),
         download_dir: projectDownloadDir(),
         max_articles: batch.length,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
       }),
       signal: controller.signal,
     });
@@ -3169,7 +3169,7 @@ function bindEvents() {
     }
   });
   els.pdfDownloaderModeInput?.addEventListener("change", async () => {
-    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "xml");
+    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "best");
     if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = true;
     try {
       runtime.pdfDownloaderMode = nextValue;

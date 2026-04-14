@@ -35,14 +35,14 @@ def _default_journal_metrics_url() -> str:
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"openalex", "pubmed", "europe_pmc"}:
+    if normalized in {"openalex", "pubmed", "europe_pmc", "pmc"}:
         return normalized
     return default
 
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method", "xml"}:
+    if normalized in {"best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "native", "final_method", "perfect"}:
         return normalized
     return default
 
@@ -89,7 +89,7 @@ class Settings:
     pdf_candidate_download_concurrency: int = 5
     pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
-    pdf_downloader_mode: str = "xml"
+    pdf_downloader_mode: str = "best"
     journal_metrics_enabled: bool = True
     journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
     journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
@@ -121,7 +121,7 @@ class Settings:
         )
         pdf_downloader_mode = _normalize_pdf_downloader_mode(
             os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
-            "xml",
+            "best",
         )
         default_rps = 10.0 if api_key else 3.0
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))

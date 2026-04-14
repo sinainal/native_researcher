@@ -1,5 +1,5 @@
-"""Compatibility wrapper for legacy exact downloader bridge."""
+"""Compatibility wrapper for the archived exact downloader bridge."""
 
-from app.services.downloader.legacy_bridge import ExactNewMethodBridge
+from old.downloader.legacy_bridge import ExactNewMethodBridge
 
 __all__ = ["ExactNewMethodBridge"]

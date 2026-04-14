@@ -305,6 +305,122 @@ def test_pubmed_service_returns_openalex_only_when_preferred() -> None:
     asyncio.run(runner())
 
 
+def test_pubmed_service_supports_europe_pmc_search() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            download_root=Settings().download_root,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "europepmc/webservices/rest/search" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "resultList": {
+                            "result": [
+                                {
+                                    "pmid": "777",
+                                    "pmcid": "PMC777",
+                                    "doi": "10.1000/epmc",
+                                    "title": "Europe PMC Article",
+                                    "journalTitle": "EPMC Journal",
+                                    "pubYear": "2024",
+                                    "abstractText": "Abstract",
+                                    "authorString": "Jane Doe, John Roe",
+                                    "citedByCount": 12,
+                                    "fullTextUrlList": {
+                                        "fullTextUrl": [
+                                            {"url": "https://example.org/epmc.pdf", "documentStyle": "pdf"}
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(query="docking", max_results=1, preferred_source="europe_pmc")
+            )
+
+        assert result.meta.primary_source == "europe_pmc"
+        assert result.articles[0].pmc_id == "PMC777"
+        assert result.articles[0].oa_pdf_url == "https://example.org/epmc.pdf"
+
+    asyncio.run(runner())
+
+
+def test_pubmed_service_supports_pmc_search() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            download_root=Settings().download_root,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/esearch.fcgi"):
+                assert request.url.params["db"] == "pmc"
+                return httpx.Response(200, json={"esearchresult": {"idlist": ["12345"]}})
+            if request.url.path.endswith("/efetch.fcgi"):
+                return httpx.Response(
+                    200,
+                    text=(
+                        "<?xml version='1.0'?><pmc-articleset>"
+                        "<article>"
+                        "<front><journal-meta><journal-title-group><journal-title>PMC Journal</journal-title></journal-title-group></journal-meta>"
+                        "<article-meta>"
+                        "<article-id pub-id-type='pmc'>PMC12345</article-id>"
+                        "<article-id pub-id-type='doi'>10.1000/pmc</article-id>"
+                        "<article-title>PMC Search Article</article-title>"
+                        "<pub-date><year>2023</year></pub-date>"
+                        "<abstract><p>PMC abstract.</p></abstract>"
+                        "</article-meta></front>"
+                        "</article>"
+                        "</pmc-articleset>"
+                    ),
+                )
+            raise AssertionError(f"Unexpected path: {request.url.path}")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(query="docking", max_results=1, preferred_source="pmc")
+            )
+
+        assert result.meta.primary_source == "pmc"
+        assert result.articles[0].pmc_id == "PMC12345"
+        assert result.articles[0].doi == "10.1000/pmc"
+
+    asyncio.run(runner())
+
+
 def test_pubmed_service_returns_empty_when_openalex_returns_nothing() -> None:
     async def runner() -> None:
         settings = Settings(

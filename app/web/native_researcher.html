@@ -87,6 +87,7 @@
                   <option value="openalex">OpenAlex</option>
                   <option value="pubmed">PubMed</option>
                   <option value="europe_pmc">Europe PMC</option>
+                  <option value="pmc">PMC</option>
                 </select>
               </label>
               <label class="native-query-quick-field" for="sidebarQuickMaxResults">
@@ -175,6 +176,7 @@
                       <option value="openalex">OpenAlex</option>
                       <option value="pubmed">PubMed</option>
                       <option value="europe_pmc">Europe PMC</option>
+                      <option value="pmc">PMC</option>
                     </select>
                   </label>
                 </div>
@@ -192,17 +194,13 @@
                   <label class="native-settings-field native-settings-field-wide" for="pdfDownloaderModeInput">
                     <span>Method</span>
                     <select id="pdfDownloaderModeInput" class="native-settings-select">
-                      <option value="perfect" selected>Perfect (XML+PDF) ✦ (Default)</option>
-                      <option value="xml">XML Downloader</option>
-                      <option value="legacy">Legacy</option>
-                      <option value="hybrid">Hybrid</option>
-                      <option value="article_downloader">Article Downloader</option>
-                      <option value="final_method">Final Method (Ultra Fast)</option>
+                      <option value="best" selected>Best Available (XML+PDF) ✦</option>
+                      <option value="xml">XML Only</option>
+                      <option value="pdf">PDF Only</option>
                     </select>
                   </label>
                 </div>
-                <div id="pdfDownloaderModeStatus" class="native-settings-note">XML Downloader: NCBI eFetch + Europe PMC
-                  — %100 OA, anti-bot yok.</div>
+                <div id="pdfDownloaderModeStatus" class="native-settings-note">Best mode tries XML first, then a unified PDF flow.</div>
               </div>
               <div class="native-settings-card">
                 <div class="native-settings-row">
@@ -445,6 +443,7 @@
       <option value="openalex">OpenAlex</option>
       <option value="pubmed">PubMed</option>
       <option value="europe_pmc">Europe PMC</option>
+      <option value="pmc">PMC</option>
     </select>
     <button id="searchBtn" type="button">Search</button>
   </div>

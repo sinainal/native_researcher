@@ -47,14 +47,14 @@ def _read_bool_value(path: Path, default: bool) -> bool:
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"openalex", "pubmed", "europe_pmc"}:
+    if normalized in {"openalex", "pubmed", "europe_pmc", "pmc"}:
         return normalized
     return default
 
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"legacy", "article_downloader", "hybrid", "final_method", "xml"}:
+    if normalized in {"best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
         return normalized
     return default
 
@@ -74,7 +74,7 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
     object.__setattr__(
         settings,
         "pdf_downloader_mode",
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "xml"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "best"),
     )
     object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
 
@@ -104,8 +104,8 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
         pdf_downloader_mode=_normalize_pdf_downloader_mode(
             _read_value(settings.pdf_downloader_mode_path),
             _normalize_pdf_downloader_mode(
-                getattr(settings, "pdf_downloader_mode", "xml"),
-                "xml",
+                getattr(settings, "pdf_downloader_mode", "best"),
+                "best",
             ),
         ),
     )
@@ -131,7 +131,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
     )
     _write_value(
         settings.pdf_downloader_mode_path,
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "xml"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "best"),
     )
     next_payload = _current_payload(request)
     _apply_runtime_settings(request, next_payload)

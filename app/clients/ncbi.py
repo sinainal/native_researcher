@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import random
 from dataclasses import dataclass
 
 import httpx
@@ -74,6 +75,7 @@ class NcbiClient:
             for attempt in range(attempts):
                 request_count += 1
                 await self.rate_limiter.wait()
+                await asyncio.sleep(0.08 + random.uniform(0.0, 0.05))
                 try:
                     response = await self.http_client.get(path, params=self._augment_params(params))
                     response.raise_for_status()
@@ -288,9 +290,13 @@ class NcbiClient:
             return None
         try:
             await self.rate_limiter.wait()
+            headers = {"User-Agent": self.settings.request_user_agent}
+            if self.settings.openalex_api_key:
+                headers["Authorization"] = f"Bearer {self.settings.openalex_api_key}"
             response = await self.http_client.get(
                 self.settings.openalex_base_url + "/works",
                 params={"filter": filters[0], "select": "cited_by_count"},
+                headers=headers,
             )
             response.raise_for_status()
             payload = response.json()

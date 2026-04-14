@@ -65,6 +65,7 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
     object.__setattr__(settings, "assistant_api_key", payload.assistant_api_key.strip() or None)
     object.__setattr__(settings, "ncbi_api_key", payload.ncbi_api_key.strip() or None)
     object.__setattr__(settings, "unpaywall_email", payload.unpaywall_email.strip() or None)
+    object.__setattr__(settings, "openalex_api_key", payload.openalex_api_key.strip() or None)
     object.__setattr__(settings, "pubmed_oa_only", payload.pubmed_oa_only)
     object.__setattr__(
         settings,
@@ -90,6 +91,7 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
         assistant_api_key=_read_value(settings.assistant_api_key_path),
         ncbi_api_key=_read_value(settings.ncbi_api_key_path),
         unpaywall_email=_read_value(settings.unpaywall_email_path),
+        openalex_api_key=_read_value(settings.openalex_api_key_path),
         pubmed_oa_only=_read_bool_value(
             settings.pubmed_oa_only_path,
             bool(getattr(settings, "pubmed_oa_only", True)),
@@ -124,6 +126,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
     _write_value(settings.assistant_api_key_path, payload.assistant_api_key)
     _write_value(settings.ncbi_api_key_path, payload.ncbi_api_key)
     _write_value(settings.unpaywall_email_path, payload.unpaywall_email)
+    _write_value(settings.openalex_api_key_path, payload.openalex_api_key)
     _write_bool_value(settings.pubmed_oa_only_path, payload.pubmed_oa_only)
     _write_value(
         settings.ai_primary_search_resource_path,
@@ -143,6 +146,7 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
             "assistant_api_key": bool(next_payload.assistant_api_key),
             "ncbi_api_key": bool(next_payload.ncbi_api_key),
             "unpaywall_email": bool(next_payload.unpaywall_email),
+            "openalex_api_key": bool(next_payload.openalex_api_key),
             "pubmed_oa_only": next_payload.pubmed_oa_only,
             "ai_primary_search_resource": next_payload.ai_primary_search_resource,
             "pdf_downloader_mode": next_payload.pdf_downloader_mode,

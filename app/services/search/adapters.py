@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
+import random
 
 import httpx
 
@@ -58,6 +60,7 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
 
     async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
         await self.rate_limiter.wait()
+        await asyncio.sleep(0.05 + random.uniform(0.0, 0.03))
         params: dict[str, Any] = {
             "search": request.query.strip(),
             "per-page": min(max_results, 200),
@@ -78,7 +81,11 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
             params["filter"] = ",".join(filters)
 
         try:
-            response = await self.http_client.get(f"{self.settings.openalex_base_url}/works", params=params)
+            response = await self.http_client.get(
+                f"{self.settings.openalex_base_url}/works",
+                params=params,
+                headers=self._headers(),
+            )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPError:
@@ -87,6 +94,12 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
         rows = payload.get("results", []) if isinstance(payload, dict) else []
         articles = [self._article_from_openalex(index + 1, row) for index, row in enumerate(rows)]
         return SearchResult(articles=articles[:max_results], request_count=1)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"User-Agent": self.settings.request_user_agent}
+        if self.settings.openalex_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.openalex_api_key}"
+        return headers
 
     @staticmethod
     def _openalex_text_list(items: list[dict[str, Any]] | None) -> list[str]:
@@ -159,6 +172,7 @@ class EuropePMCSearchAdapter(BaseSearchAdapter):
 
     async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
         await self.rate_limiter.wait()
+        await asyncio.sleep(0.05 + random.uniform(0.0, 0.03))
         query = request.query.strip()
         if self.settings.pubmed_oa_only:
             query = f"({query}) AND OPEN_ACCESS:y"
@@ -221,6 +235,7 @@ class PMCSearchAdapter(BaseSearchAdapter):
 
     async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
         await self.rate_limiter.wait()
+        await asyncio.sleep(0.08 + random.uniform(0.0, 0.04))
         params = {
             "db": "pmc",
             "term": request.query.strip(),

@@ -90,6 +90,7 @@ const els = {
   apiKeysCancel: document.getElementById("apiKeysCancel"),
   assistantApiKeyInput: document.getElementById("assistantApiKeyInput"),
   ncbiApiKeyInput: document.getElementById("ncbiApiKeyInput"),
+  openalexApiKeyInput: document.getElementById("openalexApiKeyInput"),
   unpaywallEmailInput: document.getElementById("unpaywallEmailInput"),
   workspaceSettingsState: document.getElementById("workspaceSettingsState"),
   pubmedOaOnlyToggle: document.getElementById("pubmedOaOnlyToggle"),
@@ -165,6 +166,7 @@ const downloadabilityLabels = {
 const runtime = {
   apiKey: "",
   ncbiApiKey: "",
+  openalexApiKey: "",
   unpaywallEmail: "",
   pubmedOaOnly: localStorage.getItem(pubmedOaOnlyStorageKey) !== "false",
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
@@ -814,6 +816,7 @@ function setApiKeysDialogOpen(next) {
 function applyApiKeyValues(payload = {}) {
   runtime.apiKey = payload.assistant_api_key || localStorage.getItem("researcher2_api_key") || "";
   runtime.ncbiApiKey = payload.ncbi_api_key || "";
+  runtime.openalexApiKey = payload.openalex_api_key || "";
   runtime.unpaywallEmail = payload.unpaywall_email || "";
   runtime.pubmedOaOnly = payload.pubmed_oa_only !== undefined
     ? Boolean(payload.pubmed_oa_only)
@@ -830,6 +833,7 @@ function applyApiKeyValues(payload = {}) {
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
   if (els.ncbiApiKeyInput) els.ncbiApiKeyInput.value = runtime.ncbiApiKey;
+  if (els.openalexApiKeyInput) els.openalexApiKeyInput.value = runtime.openalexApiKey;
   if (els.unpaywallEmailInput) els.unpaywallEmailInput.value = runtime.unpaywallEmail;
   renderSettingsPanel();
 }
@@ -846,6 +850,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
     body: JSON.stringify({
       assistant_api_key: runtime.apiKey,
       ncbi_api_key: runtime.ncbiApiKey,
+      openalex_api_key: runtime.openalexApiKey,
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
@@ -856,6 +861,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
   applyApiKeyValues(payload);
   trackAppEvent("info", "api_keys_saved_ui", "API keys updated from the native UI.", {
     has_ncbi_api_key: Boolean(runtime.ncbiApiKey),
+    has_openalex_api_key: Boolean(runtime.openalexApiKey),
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
     ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
@@ -3130,6 +3136,7 @@ function bindEvents() {
     await saveApiKeys({
       assistant_api_key: els.assistantApiKeyInput?.value || "",
       ncbi_api_key: els.ncbiApiKeyInput?.value || "",
+      openalex_api_key: els.openalexApiKeyInput?.value || "",
       unpaywall_email: els.unpaywallEmailInput?.value || "",
     });
   });

@@ -739,15 +739,60 @@ class SingleArticleDownloader:
             self._log(step="download", source=candidate.source, status="error", started=started, url=candidate.url, detail=type(exc).__name__)
             return False, None, None
 
+    async def _download_tgz_xml(self, candidate: Candidate, article: ArticleRef) -> tuple[bool, str | None, str | None]:
+        started = time.perf_counter()
+        try:
+            response = await self._with_outer_timeout(15.0, self._download_client.get(candidate.url))
+            if response.status_code != 200:
+                return False, None, None
+            archive = tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz")
+        except Exception:
+            return False, None, None
+        for member in archive.getmembers():
+            if member.isfile() and member.name.lower().endswith(".nxml"):
+                extracted = archive.extractfile(member)
+                if extracted:
+                    xml_bytes = extracted.read()
+                    path = self._write_file(article, candidate.source, xml_bytes, ".xml")
+                    self._log(step="download", source=candidate.source, status="ok", started=started, url=candidate.url)
+                    return True, str(path), candidate.url
+        return False, None, None
+
+    async def _download_direct_xml(self, candidate: Candidate, article: ArticleRef) -> tuple[bool, str | None, str | None]:
+        started = time.perf_counter()
+        try:
+            r = await self._download_client.get(candidate.url, timeout=10.0)
+            if r.status_code == 200 and (b"<?xml" in r.content or b"<article" in r.content):
+                path = self._write_file(article, candidate.source, r.content, ".xml")
+                self._log(step="download", source=candidate.source, status="ok", started=started, url=candidate.url)
+                return True, str(path), candidate.url
+        except Exception:
+            pass
+        return False, None, None
+
     async def _download_candidate(self, candidate: Candidate, article: ArticleRef) -> tuple[Candidate, bool, str | None, str | None]:
+        is_xml_source = "_xml" in candidate.source or "xml" in candidate.url.lower() or "efetch" in candidate.url.lower()
+        
+        if self.mode == "xml" and not is_xml_source and candidate.source != "pmc_oa_tgz":
+            return candidate, False, None, None
+
         if candidate.source == "pmc_oa_tgz":
-            success, file_path, final_url = await self._download_tgz_pdf(candidate, article)
+            # If XML mode, extract .nxml, otherwise extract .pdf
+            if self.mode == "xml":
+                success, file_path, final_url = await self._download_tgz_xml(candidate, article)
+            else:
+                success, file_path, final_url = await self._download_tgz_pdf(candidate, article)
         elif candidate.source == "crossref_elsevier_xml":
             success, file_path, final_url = await self._download_elsevier_xml(candidate, article)
         elif candidate.source.endswith("_html_fulltext"):
+            if self.mode == "xml": return candidate, False, None, None
             success, file_path, final_url = await self._download_html_fulltext(candidate, article)
+        elif "efetch" in candidate.url:
+            success, file_path, final_url = await self._download_direct_xml(candidate, article)
         else:
+            if self.mode == "xml": return candidate, False, None, None
             success, file_path, final_url = await self._download_direct_pdf(candidate, article)
+            
         return candidate, success, file_path, final_url
 
     def _write_file(self, article: ArticleRef, source: str, body: bytes, suffix: str) -> Path:
@@ -791,8 +836,30 @@ class SingleArticleDownloader:
             note="trusted_direct_host" if host in TRUSTED_DIRECT_HOSTS else None,
         )
 
+    async def _resolve_missing_ids(self, article: ArticleRef) -> None:
+        """DOI/PMID varsa ve PMCID eksikse NCBI API kullanarak tamamlar."""
+        if article.pmc_id:
+            return
+        ids = []
+        if article.doi: ids.append(article.doi)
+        if article.pmid: ids.append(article.pmid)
+        if not ids:
+            return
+            
+        try:
+            url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={','.join(ids)}&format=json&tool=NativeResearcher&email=bot@example.com"
+            r = await self._metadata_client.get(url, timeout=5.0)
+            if r.status_code == 200:
+                for rec in r.json().get("records", []):
+                    if rec.get("pmcid"):
+                        article.pmc_id = rec["pmcid"]
+                        break
+        except Exception:
+            pass
+
     async def run(self, article: ArticleRef) -> Result:
         started = time.perf_counter()
+        await self._resolve_missing_ids(article)
 
         all_candidates: list[Candidate] = []
         checked_urls: set[str] = set()

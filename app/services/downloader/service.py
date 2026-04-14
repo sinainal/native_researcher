@@ -414,6 +414,11 @@ class PDFService:
             article_downloader_bridge=self.article_downloader_bridge,
         )
         self.final_method_bridge = FinalMethodBridge()
+        from app.services.downloader.perfect_bridge import PerfectDownloaderBridge
+        self.perfect_bridge = PerfectDownloaderBridge(
+            ncbi_api_key=settings.ncbi_api_key,
+            email=settings.unpaywall_email
+        )
         self.xml_bridge = XmlDownloaderBridge(
             ncbi_api_key=settings.ncbi_api_key,
             email=settings.unpaywall_email
@@ -428,12 +433,14 @@ class PDFService:
         return mode if mode in {"fast", "balanced"} else "fast"
 
     def _downloader_mode(self, requested: str | None = None) -> str:
-        normalized = (requested or self.settings.pdf_downloader_mode or "xml").strip().lower()
-        if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method", "xml"}:
+        normalized = (requested or self.settings.pdf_downloader_mode or "perfect").strip().lower()
+        if normalized in {"legacy", "article_downloader", "hybrid", "native", "final_method", "xml", "perfect"}:
             return normalized
-        return "xml"
+        return "perfect"
 
     def _bridge_for(self, downloader_mode: str):
+        if downloader_mode == "perfect":
+            return self.perfect_bridge
         if downloader_mode == "xml":
             return self.xml_bridge
         if downloader_mode == "article_downloader":
@@ -3377,7 +3384,7 @@ class PDFService:
 
     @staticmethod
     def _download_concurrency(mode: str) -> int:
-        return 20 if mode == "fast" else 16
+        return 5 if mode == "fast" else 16
 
     @classmethod
     def _download_concurrency_for_articles(cls, mode: str, articles: list[ArticleReference]) -> int:

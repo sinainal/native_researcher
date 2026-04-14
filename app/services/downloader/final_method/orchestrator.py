@@ -59,6 +59,10 @@ class FinalMethodDownloader:
             openalex_url = f"https://api.openalex.org/works/https://doi.org/{article.doi}"
             tasks.append(("openalex", self._safe_get_json(openalex_url)))
             
+            # 1.5 Semantic Scholar (Geniş arşiv tarama)
+            sem_url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{article.doi}?fields=openAccessPdf"
+            tasks.append(("sem_scholar", self._safe_get_json(sem_url)))
+            
         # 2. Europe PMC search
         epmc_queries = []
         if article.pmc_id: epmc_queries.append(f"PMCID:{article.pmc_id}")
@@ -88,6 +92,11 @@ class FinalMethodDownloader:
                         url = loc.get("pdf_url") or loc.get("landing_page_url")
                         if url: candidates.append({"source": "openalex", "url": url})
                 
+                elif source_name == "sem_scholar":
+                    pdf_data = res.get("openAccessPdf")
+                    if pdf_data and pdf_data.get("url"):
+                        candidates.append({"source": "sem_scholar", "url": pdf_data["url"]})
+
                 elif source_name == "europe_pmc":
                     items = res.get("resultList", {}).get("result", [])
                     if items:
@@ -125,7 +134,7 @@ class FinalMethodDownloader:
                     dedup.append(c)
         return dedup
 
-    async def _try_download(self, candidate: dict, started_total: float, pmc_id: str = None) -> dict:
+    async def _try_download(self, candidate: dict, started_total: float, pmc_id: str = None) -> dict[str, Any] | None:
         url = candidate["url"]
         source = candidate["source"]
         
@@ -134,27 +143,67 @@ class FinalMethodDownloader:
             
         started = time.perf_counter()
         try:
-            resp = await self.client.get(url)
+            resp = await self.client.get(url, timeout=10.0)
             body = resp.content
             ctype = resp.headers.get("content-type", "").lower()
             
-            # Follow some redirect explicitly if needed, but httpx already does it.
-            if resp.status_code in [200, 206]:
-                is_pdf = "pdf" in ctype or body.startswith(b"%PDF")
-                is_full_text_xml = "xml" in ctype and b"<body" in body.lower()
-                is_full_text_html = "html" in ctype and len(body) > 15000 and (b"citation_title" in body.lower() or b"abstract" in body.lower())
-                
-                # Drop anti-bot pages quickly
-                if "html" in ctype and (b"just a moment" in body.lower() or b"cloudflare" in body.lower() or b"captcha" in body.lower()):
-                    self._log_attempt("download", source, "cloudflare_blocked", started, url)
-                    return None
-                    
-                if is_pdf or is_full_text_xml or is_full_text_html:
-                    ext = ".pdf" if is_pdf else ".xml" if is_full_text_xml else ".html"
-                    self._log_attempt("download", source, "ok", started, str(resp.url), f"ctype={ctype}")
-                    return {"success": True, "body": body, "ext": ext, "source": source, "url": str(resp.url)}
+            # 1. Detect Landing Page vs Direct PDF
+            is_pdf = "pdf" in ctype or body.startswith(b"%PDF")
+            is_html = "html" in ctype
             
-            self._log_attempt("download", source, "reject", started, str(resp.url), f"status={resp.status_code}")
+            # 2. If it's HTML, seek for Meta PDF links (Standard for publishers)
+            if is_html:
+                text_content = body.decode("utf-8", "ignore")
+                # Look for <meta name="citation_pdf_url" content="...">
+                meta_match = re.search(r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']', text_content, re.I)
+                if not meta_match:
+                    # Alternative order: content first
+                    meta_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url["\']', text_content, re.I)
+                
+                if meta_match:
+                    new_url = meta_match.group(1)
+                    if new_url.startswith("/"): # Relative path
+                        base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+                        new_url = base + new_url
+                    
+                    try:
+                        resp_jump = await self.client.get(new_url, timeout=12.0)
+                        if resp_jump.status_code == 200 and (b"%PDF" in resp_jump.content or "pdf" in resp_jump.headers.get("content-type", "").lower()):
+                            body = resp_jump.content
+                            url = str(resp_jump.url)
+                            is_pdf = True
+                            is_html = False
+                    except Exception: pass
+            
+            # 3. Elsevier/Nature Specific PII/Redirect Scraper (Fallback)
+            if is_html and ("sciencedirect.com" in url or "elsevier.com" in url or "nature.com" in url):
+                text_content = body.decode("utf-8", "ignore")
+                match = re.search(r'https?://[^"\'\s]+pdf[^"\'\s]+', text_content)
+                if match:
+                    new_url = match.group(0)
+                    try:
+                        resp_jump = await self.client.get(new_url, timeout=10.0)
+                        if resp_jump.status_code == 200 and (b"%PDF" in resp_jump.content or "pdf" in resp_jump.headers.get("content-type", "").lower()):
+                            body = resp_jump.content
+                            url = str(resp_jump.url)
+                            is_pdf = True
+                            is_html = False
+                    except Exception: pass
+
+            # Drop anti-bot pages quickly
+            if is_html and (b"just a moment" in body.lower() or b"cloudflare" in body.lower() or b"captcha" in body.lower()):
+                self._log_attempt("download", source, "cloudflare_blocked", started, url)
+                return None
+            
+            is_full_text_xml = "xml" in ctype and b"<body" in body.lower()
+            is_full_text_html = is_html and len(body) > 15000 and (b"citation_title" in body.lower() or b"abstract" in body.lower())
+                
+            if is_pdf or is_full_text_xml or is_full_text_html:
+                ext = ".pdf" if is_pdf else ".xml" if is_full_text_xml else ".html"
+                self._log_attempt("download", source, "ok", started, url, f"ctype={ctype}")
+                return {"success": True, "body": body, "ext": ext, "source": source, "url": url}
+            
+            self._log_attempt("download", source, "reject", started, url, f"status={resp.status_code}")
             return None
         except Exception as e:
             self._log_attempt("download", source, "error", started, url, str(e))

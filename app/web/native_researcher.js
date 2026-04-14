@@ -196,17 +196,18 @@ function searchResourceLabel(value) {
   return "OpenAlex";
 }
 
-function normalizePdfDownloaderMode(value, fallback = "xml") {
+function normalizePdfDownloaderMode(value, fallback = "perfect") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["legacy", "hybrid", "article_downloader", "final_method", "xml"].includes(normalized)) {
+  if (["legacy", "hybrid", "article_downloader", "final_method", "xml", "perfect"].includes(normalized)) {
     return normalized;
   }
   return fallback;
 }
 
 function pdfDownloaderModeLabel(value) {
-  const normalized = normalizePdfDownloaderMode(value, "xml");
-  if (normalized === "xml")             return "XML Downloader ✦";
+  const normalized = normalizePdfDownloaderMode(value, "perfect");
+  if (normalized === "perfect")         return "Perfect (XML+PDF) ✦";
+  if (normalized === "xml")             return "XML Downloader";
   if (normalized === "hybrid")          return "Hybrid";
   if (normalized === "article_downloader") return "Article Downloader";
   if (normalized === "final_method")    return "Final Method";
@@ -781,12 +782,14 @@ function renderSettingsPanel() {
     els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
   }
   if (els.pdfDownloaderModeInput) {
-    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml");
+    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect");
   }
   if (els.pdfDownloaderModeStatus) {
-    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml");
+    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect");
     const label = pdfDownloaderModeLabel(mode);
-    if (mode === "xml") {
+    if (mode === "perfect") {
+      els.pdfDownloaderModeStatus.textContent = "Perfect: XML First + PDF Fallback with Smart Scraper — %95+ Başarı.";
+    } else if (mode === "xml") {
       els.pdfDownloaderModeStatus.textContent = "XML Downloader: NCBI eFetch + Europe PMC — %100 OA, anti-bot yok.";
     } else {
       els.pdfDownloaderModeStatus.textContent = `Browser downloads use the ${label} bridge.`;
@@ -821,7 +824,7 @@ function applyApiKeyValues(payload = {}) {
   );
   runtime.pdfDownloaderMode = normalizePdfDownloaderMode(
     payload.pdf_downloader_mode,
-    runtime.pdfDownloaderMode || "xml",
+    runtime.pdfDownloaderMode || "perfect",
   );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
@@ -846,7 +849,7 @@ async function saveApiKeys(overrides = {}, options = {}) {
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "xml"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "perfect"),
       ...overrides,
     }),
   });

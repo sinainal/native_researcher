@@ -13,7 +13,7 @@ def test_smoke_parser_defaults() -> None:
     args = parser.parse_args(["--query", "docking"])
     assert args.query == "docking"
     assert args.source == "pubmed"
-    assert args.mode == "xml"
+    assert args.mode == "pdf_xml"
     assert args.max_results == 1
 
 
@@ -77,7 +77,7 @@ def test_smoke_runner_uses_injected_services(monkeypatch) -> None:
 
         async def diagnose_articles(self, articles, **kwargs):  # noqa: ANN001
             assert len(articles) == 1
-            assert kwargs["downloader_mode"] == "xml"
+            assert kwargs["downloader_mode"] == "pdf_xml"
             return [FakeResult()]
 
     class FakeNcbiClient:
@@ -97,7 +97,7 @@ def test_smoke_runner_uses_injected_services(monkeypatch) -> None:
     monkeypatch.setattr("scripts.download_smoke.TTLCache", FakeCache)
 
     parser = build_parser()
-    args = parser.parse_args(["--query", "docking", "--source", "pmc", "--mode", "xml"])
+    args = parser.parse_args(["--query", "docking", "--source", "pmc", "--mode", "pdf_xml"])
     payload = asyncio.run(run_smoke(args))
     assert payload["success_rate"] == 100.0
     assert payload["search_meta"]["primary_source"] == "pmc"

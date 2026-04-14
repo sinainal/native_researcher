@@ -3690,9 +3690,9 @@ select {
 .native-workspace-download-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   padding: 10px 12px;
-  border-radius: 14px;
+  border-radius: 12px;
   text-decoration: none;
   color: inherit;
   background: rgba(255, 255, 255, 0.78);
@@ -3703,6 +3703,13 @@ select {
 .native-workspace-download-item:focus-visible {
   background: rgba(255, 255, 255, 0.96);
   border-color: rgba(197, 210, 230, 0.96);
+}
+
+.native-workspace-download-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .native-query-history-item {
@@ -3745,11 +3752,37 @@ select {
   line-height: 1.45;
   color: #20304a;
   word-break: break-word;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .native-workspace-download-meta {
   font-size: 0.74rem;
   color: #8290a7;
+}
+
+.native-workspace-download-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.native-workspace-download-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: rgba(43, 94, 184, 0.10);
+  color: #284a7b;
+}
+
+.native-workspace-download-badge-dual {
+  background: rgba(27, 94, 32, 0.12);
+  color: #27643a;
 }
 
 .native-workspace-library-empty {

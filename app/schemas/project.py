@@ -25,6 +25,7 @@ class ProjectDownloadItem(BaseModel):
     path: str = Field(..., min_length=1)
     size_bytes: int = Field(default=0, ge=0)
     modified_at: str = Field(..., min_length=1, max_length=64)
+    artifact_types: list[str] = Field(default_factory=list)
 
 
 class ProjectDownloadListResponse(BaseModel):

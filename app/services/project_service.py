@@ -20,6 +20,23 @@ from app.services.workspace_db import WorkspaceDatabase
 
 
 class ProjectService:
+    _DOWNLOAD_SOURCE_SUFFIXES = (
+        "article_oa_pdf",
+        "pmc_direct_pdf",
+        "pmc_oa_package",
+        "europe_pmc_repo_pdf",
+        "europe_pmc_render_pdf",
+        "crossref_pdf",
+        "doi_landing_pdf",
+        "article_landing_pdf",
+        "landing_page_probe",
+        "ncbi_linkout_pdf",
+        "pmc_efetch_xml",
+        "europe_pmc_repo_xml",
+        "europe_pmc_xml",
+        "crossref_xml",
+    )
+
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root
         self.projects_root = workspace_root / "projects"
@@ -384,7 +401,11 @@ class ProjectService:
         download_dir.mkdir(parents=True, exist_ok=True)
 
         entries = sorted(
-            (item for item in download_dir.rglob("*.pdf") if item.is_file()),
+            (
+                item
+                for item in download_dir.rglob("*")
+                if item.is_file() and item.suffix.lower() in {".pdf", ".xml"}
+            ),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
@@ -456,15 +477,60 @@ class ProjectService:
                 (project_id,),
             ).fetchall()
 
-        return [
-            ProjectDownloadItem(
-                name=str(row["file_name"]),
-                path=str(project_dir / str(row["relative_path"])),
-                size_bytes=int(row["size_bytes"]),
-                modified_at=str(row["modified_at"]),
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            relative_path = Path(str(row["relative_path"]))
+            group_key = self._download_group_key(relative_path)
+            grouped.setdefault(group_key, []).append(
+                {
+                    "relative_path": str(row["relative_path"]),
+                    "file_name": str(row["file_name"]),
+                    "size_bytes": int(row["size_bytes"]),
+                    "modified_at": str(row["modified_at"]),
+                    "artifact_type": self._artifact_type_from_path(relative_path),
+                }
             )
-            for row in rows
-        ]
+
+        items: list[ProjectDownloadItem] = []
+        for group_rows in grouped.values():
+            group_rows.sort(key=lambda item: (item["modified_at"], item["file_name"]), reverse=True)
+            preferred = next((item for item in group_rows if item["artifact_type"] == "pdf"), group_rows[0])
+            artifact_types: list[str] = []
+            if any(item["artifact_type"] == "pdf" for item in group_rows):
+                artifact_types.append("pdf")
+            if any(item["artifact_type"] == "xml" for item in group_rows):
+                artifact_types.append("xml")
+            items.append(
+                ProjectDownloadItem(
+                    name=preferred["file_name"],
+                    path=str(project_dir / preferred["relative_path"]),
+                    size_bytes=sum(item["size_bytes"] for item in group_rows),
+                    modified_at=group_rows[0]["modified_at"],
+                    artifact_types=artifact_types,
+                )
+            )
+
+        items.sort(key=lambda item: (item.modified_at, item.name), reverse=True)
+        return items
+
+    @classmethod
+    def _download_group_key(cls, relative_path: Path) -> tuple[str, str]:
+        stem = relative_path.stem
+        for suffix in sorted(cls._DOWNLOAD_SOURCE_SUFFIXES, key=len, reverse=True):
+            marker = f"_{suffix}"
+            if stem.endswith(marker):
+                stem = stem[: -len(marker)]
+                break
+        return relative_path.parent.as_posix(), stem.lower()
+
+    @staticmethod
+    def _artifact_type_from_path(relative_path: Path) -> str:
+        suffix = relative_path.suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix == ".xml":
+            return "xml"
+        return "file"
 
     def _unique_project_id(self, name: str) -> str:
         base = self._slugify(name) or "project"

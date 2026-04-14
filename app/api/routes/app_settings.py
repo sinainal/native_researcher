@@ -54,7 +54,9 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
+    if normalized in {"pdf_xml", "best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
+        if normalized in {"best", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
+            return "pdf_xml"
         return normalized
     return default
 
@@ -70,12 +72,12 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
     object.__setattr__(
         settings,
         "ai_primary_search_resource",
-        _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
+        _normalize_search_resource(payload.ai_primary_search_resource, "pubmed"),
     )
     object.__setattr__(
         settings,
         "pdf_downloader_mode",
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "best"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "pdf_xml"),
     )
     object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
 
@@ -99,15 +101,15 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
         ai_primary_search_resource=_normalize_search_resource(
             _read_value(settings.ai_primary_search_resource_path),
             _normalize_search_resource(
-                getattr(settings, "ai_primary_search_resource", "openalex"),
-                "openalex",
+                getattr(settings, "ai_primary_search_resource", "pubmed"),
+                "pubmed",
             ),
         ),
         pdf_downloader_mode=_normalize_pdf_downloader_mode(
             _read_value(settings.pdf_downloader_mode_path),
             _normalize_pdf_downloader_mode(
-                getattr(settings, "pdf_downloader_mode", "best"),
-                "best",
+                getattr(settings, "pdf_downloader_mode", "pdf_xml"),
+                "pdf_xml",
             ),
         ),
     )
@@ -130,11 +132,11 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
     _write_bool_value(settings.pubmed_oa_only_path, payload.pubmed_oa_only)
     _write_value(
         settings.ai_primary_search_resource_path,
-        _normalize_search_resource(payload.ai_primary_search_resource, "openalex"),
+        _normalize_search_resource(payload.ai_primary_search_resource, "pubmed"),
     )
     _write_value(
         settings.pdf_downloader_mode_path,
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "best"),
+        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "pdf_xml"),
     )
     next_payload = _current_payload(request)
     _apply_runtime_settings(request, next_payload)

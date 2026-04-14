@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 SearchResource = Literal["openalex", "pubmed", "europe_pmc", "pmc"]
-PDFDownloaderMode = Literal["best", "xml", "pdf", "legacy", "article_downloader", "hybrid", "final_method", "perfect"]
+PDFDownloaderMode = Literal["pdf_xml", "best", "xml", "pdf", "legacy", "article_downloader", "hybrid", "final_method", "perfect"]
 
 
 class AppAPIKeysPayload(BaseModel):
@@ -16,5 +16,5 @@ class AppAPIKeysPayload(BaseModel):
     unpaywall_email: str = Field(default="", max_length=512)
     openalex_api_key: str = Field(default="", max_length=512)
     pubmed_oa_only: bool = True
-    ai_primary_search_resource: SearchResource = "openalex"
-    pdf_downloader_mode: PDFDownloaderMode = "best"
+    ai_primary_search_resource: SearchResource = "pubmed"
+    pdf_downloader_mode: PDFDownloaderMode = "pdf_xml"

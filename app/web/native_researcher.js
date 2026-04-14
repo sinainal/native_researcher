@@ -170,9 +170,9 @@ const runtime = {
   unpaywallEmail: "",
   pubmedOaOnly: localStorage.getItem(pubmedOaOnlyStorageKey) !== "false",
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
-  searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "openalex"),
-  aiPrimarySearchResource: "openalex",
-  pdfDownloaderMode: "best",
+  searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "pubmed"),
+  aiPrimarySearchResource: "pubmed",
+  pdfDownloaderMode: "pdf_xml",
   assistantModel: stateModel,
 };
 
@@ -182,7 +182,7 @@ function clampDownloadWorkers(value) {
   return Math.min(8, Math.max(1, parsed));
 }
 
-function normalizeSearchResource(value, fallback = "openalex") {
+function normalizeSearchResource(value, fallback = "pubmed") {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (["openalex", "pubmed", "europe_pmc", "pmc"].includes(normalized)) {
     return normalized;
@@ -191,28 +191,31 @@ function normalizeSearchResource(value, fallback = "openalex") {
 }
 
 function searchResourceLabel(value) {
-  const normalized = normalizeSearchResource(value, "openalex");
+  const normalized = normalizeSearchResource(value, "pubmed");
   if (normalized === "openalex") return "OpenAlex";
   if (normalized === "pubmed") return "PubMed";
   if (normalized === "europe_pmc") return "Europe PMC";
   if (normalized === "pmc") return "PMC";
-  return "OpenAlex";
+  return "PubMed";
 }
 
-function normalizePdfDownloaderMode(value, fallback = "best") {
+function normalizePdfDownloaderMode(value, fallback = "pdf_xml") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["best", "xml", "pdf", "legacy", "hybrid", "article_downloader", "final_method", "perfect"].includes(normalized)) {
+  if (["pdf_xml", "best", "xml", "pdf", "legacy", "hybrid", "article_downloader", "final_method", "perfect"].includes(normalized)) {
+    if (["best", "legacy", "hybrid", "article_downloader", "final_method", "perfect"].includes(normalized)) {
+      return "pdf_xml";
+    }
     return normalized;
   }
   return fallback;
 }
 
 function pdfDownloaderModeLabel(value) {
-  const normalized = normalizePdfDownloaderMode(value, "best");
-  if (normalized === "best" || normalized === "perfect") return "Best Available (XML+PDF) ✦";
+  const normalized = normalizePdfDownloaderMode(value, "pdf_xml");
+  if (normalized === "pdf_xml") return "PDF + XML";
   if (normalized === "xml") return "XML Only";
   if (normalized === "pdf") return "PDF Only";
-  return "Best Available (XML+PDF) ✦";
+  return "PDF + XML";
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -377,7 +380,16 @@ function renderProjectDownloads() {
   els.workspaceDownloadList.innerHTML = items
     .map((item) => `
       <a class="native-workspace-download-item" href="${buildFileOpenUrl(item.path)}" target="_blank" rel="noreferrer">
-        <span class="native-workspace-download-name">${escapeHtml(item.name)}</span>
+        <span class="native-workspace-download-head">
+          <span class="native-workspace-download-name">${escapeHtml(item.name)}</span>
+          <span class="native-workspace-download-badges">
+            ${Array.isArray(item.artifact_types) && item.artifact_types.includes("pdf") && item.artifact_types.includes("xml")
+              ? '<span class="native-workspace-download-badge native-workspace-download-badge-dual">PDF + XML</span>'
+              : Array.isArray(item.artifact_types)
+                ? item.artifact_types.map((type) => `<span class="native-workspace-download-badge">${escapeHtml(type.toUpperCase())}</span>`).join("")
+                : ""}
+          </span>
+        </span>
         <span class="native-workspace-download-meta">${escapeHtml(formatFileSize(item.size_bytes))} · ${escapeHtml(formatRelativeTime(item.modified_at))}</span>
       </a>
     `)
@@ -436,8 +448,8 @@ function renderQueryDetail() {
     record.search_payload?.year_end ? `to ${record.search_payload.year_end}` : "",
     record.search_payload?.article_type ? record.search_payload.article_type : "",
   ].filter(Boolean).join(" · ");
-  const requestedSource = searchResourceLabel(record.search_payload?.preferred_source || "openalex");
-  const actualSource = searchResourceLabel(meta.primary_source || record.search_payload?.preferred_source || "openalex");
+  const requestedSource = searchResourceLabel(record.search_payload?.preferred_source || "pubmed");
+  const actualSource = searchResourceLabel(meta.primary_source || record.search_payload?.preferred_source || "pubmed");
   const sourcesUsed = Array.isArray(meta.sources_used) && meta.sources_used.length
     ? meta.sources_used.map((item) => searchResourceLabel(item)).join(", ")
     : actualSource;
@@ -530,7 +542,7 @@ function syncSidebarQuickControls() {
     els.sidebarQuickMaxResults.value = String(nextMax);
   }
   if (els.searchResource && els.sidebarQuickSearchResource) {
-    const nextResource = normalizeSearchResource(els.searchResource.value || runtime.searchResource, "openalex");
+    const nextResource = normalizeSearchResource(els.searchResource.value || runtime.searchResource, "pubmed");
     els.searchResource.value = nextResource;
     els.sidebarQuickSearchResource.value = nextResource;
   }
@@ -637,7 +649,7 @@ function restoreQueryRecord(queryId) {
     els.yearStart.value = record.search_payload.year_start ? String(record.search_payload.year_start) : "";
     els.yearEnd.value = record.search_payload.year_end ? String(record.search_payload.year_end) : "";
     els.maxResults.value = String(record.search_payload.max_results || 50);
-    runtime.searchResource = normalizeSearchResource(record.search_payload.preferred_source, runtime.searchResource || "openalex");
+    runtime.searchResource = normalizeSearchResource(record.search_payload.preferred_source, runtime.searchResource || "pubmed");
     localStorage.setItem(searchResourceStorageKey, runtime.searchResource);
     if (els.searchResource) els.searchResource.value = runtime.searchResource;
     autoResizeTextarea(els.query);
@@ -776,32 +788,32 @@ function renderSettingsPanel() {
     els.downloadWorkerCountStatus.textContent = `Batch downloads use ${runtime.downloadWorkers} parallel worker${runtime.downloadWorkers === 1 ? "" : "s"}.`;
   }
   if (els.aiPrimarySearchResourceInput) {
-    els.aiPrimarySearchResourceInput.value = normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex");
+    els.aiPrimarySearchResourceInput.value = normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed");
   }
   if (els.aiPrimarySearchResourceStatus) {
     const label = searchResourceLabel(runtime.aiPrimarySearchResource);
     els.aiPrimarySearchResourceStatus.textContent = `Searcher AI uses ${label} for search tool calls.`;
   }
   if (els.pdfDownloaderModeInput) {
-    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best");
+    els.pdfDownloaderModeInput.value = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml");
   }
   if (els.pdfDownloaderModeStatus) {
-    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best");
-    if (mode === "best" || mode === "perfect") {
-      els.pdfDownloaderModeStatus.textContent = "Best mode tries the unified XML pipeline first, then the unified PDF pipeline.";
+    const mode = normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml");
+    if (mode === "pdf_xml") {
+      els.pdfDownloaderModeStatus.textContent = "PDF + XML mode saves the XML first and the PDF when available.";
     } else if (mode === "xml") {
       els.pdfDownloaderModeStatus.textContent = "XML mode uses PMC, Europe PMC, NCBI eFetch and Crossref XML sources.";
     } else if (mode === "pdf") {
       els.pdfDownloaderModeStatus.textContent = "PDF mode uses PMC, Europe PMC, Crossref, DOI landing and linkout sources.";
     } else {
-      els.pdfDownloaderModeStatus.textContent = "Best mode tries the unified XML pipeline first, then the unified PDF pipeline.";
+      els.pdfDownloaderModeStatus.textContent = "PDF + XML mode saves the XML first and the PDF when available.";
     }
   }
   if (els.searchResource) {
-    els.searchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
+    els.searchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
   }
   if (els.sidebarQuickSearchResource) {
-    els.sidebarQuickSearchResource.value = normalizeSearchResource(runtime.searchResource, "openalex");
+    els.sidebarQuickSearchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
   }
 }
 
@@ -823,11 +835,11 @@ function applyApiKeyValues(payload = {}) {
     : localStorage.getItem(pubmedOaOnlyStorageKey) !== "false";
   runtime.aiPrimarySearchResource = normalizeSearchResource(
     payload.ai_primary_search_resource,
-    runtime.aiPrimarySearchResource || "openalex",
+    runtime.aiPrimarySearchResource || "pubmed",
   );
   runtime.pdfDownloaderMode = normalizePdfDownloaderMode(
     payload.pdf_downloader_mode,
-    runtime.pdfDownloaderMode || "best",
+    runtime.pdfDownloaderMode || "pdf_xml",
   );
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
@@ -853,8 +865,8 @@ async function saveApiKeys(overrides = {}, options = {}) {
       openalex_api_key: runtime.openalexApiKey,
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
-      ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
+      ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
       ...overrides,
     }),
   });
@@ -864,8 +876,8 @@ async function saveApiKeys(overrides = {}, options = {}) {
     has_openalex_api_key: Boolean(runtime.openalexApiKey),
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
-    ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "openalex"),
-    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
+      ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed"),
+      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1418,7 +1430,7 @@ function currentSearchSource() {
     state.lastPubmedResponse?.meta?.primary_source
       || state.lastSearchPayload?.preferred_source
       || runtime.searchResource,
-    "openalex",
+    "pubmed",
   );
 }
 
@@ -1686,7 +1698,7 @@ async function requestArticleDownload(article, options = {}) {
         articles: [articleReference(article)],
         download_dir: projectDownloadDir(),
         max_articles: 1,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
       }),
       signal: controller.signal,
     });
@@ -1727,7 +1739,7 @@ async function requestBatchDownload(articles, options = {}) {
         articles: batch.map(articleReference),
         download_dir: projectDownloadDir(),
         max_articles: batch.length,
-        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "best"),
+        downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
       }),
       signal: controller.signal,
     });
@@ -2658,7 +2670,7 @@ function updateThinkingLabel() {
 
 function assistantActionLabel(action) {
   const details = action.details || {};
-  const sourceLabel = searchResourceLabel(details.meta?.primary_source || runtime.aiPrimarySearchResource || "openalex");
+  const sourceLabel = searchResourceLabel(details.meta?.primary_source || runtime.aiPrimarySearchResource || "pubmed");
   const running = {
     search_pubmed: `Searching ${sourceLabel}`,
     get_article_details: "Reading article details",
@@ -3158,7 +3170,7 @@ function bindEvents() {
     }
   });
   els.aiPrimarySearchResourceInput?.addEventListener("change", async () => {
-    const nextValue = normalizeSearchResource(els.aiPrimarySearchResourceInput?.value, "openalex");
+    const nextValue = normalizeSearchResource(els.aiPrimarySearchResourceInput?.value, "pubmed");
     if (els.aiPrimarySearchResourceInput) els.aiPrimarySearchResourceInput.disabled = true;
     try {
       runtime.aiPrimarySearchResource = nextValue;
@@ -3176,7 +3188,7 @@ function bindEvents() {
     }
   });
   els.pdfDownloaderModeInput?.addEventListener("change", async () => {
-    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "best");
+    const nextValue = normalizePdfDownloaderMode(els.pdfDownloaderModeInput?.value, "pdf_xml");
     if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = true;
     try {
       runtime.pdfDownloaderMode = nextValue;
@@ -3203,7 +3215,7 @@ function bindEvents() {
     });
   });
   els.sidebarQuickSearchResource?.addEventListener("change", () => {
-    const nextValue = normalizeSearchResource(els.sidebarQuickSearchResource?.value, "openalex");
+    const nextValue = normalizeSearchResource(els.sidebarQuickSearchResource?.value, "pubmed");
     runtime.searchResource = nextValue;
     localStorage.setItem(searchResourceStorageKey, nextValue);
     if (els.searchResource) els.searchResource.value = nextValue;

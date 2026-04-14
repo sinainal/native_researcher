@@ -660,8 +660,6 @@ class BestAvailablePipeline:
             budget_seconds=max(5.0, budget_seconds * 0.45),
             save_file=save_file,
         )
-        if xml_payload.get("success"):
-            return xml_payload
         pdf_payload = await self.pdf_pipeline.run(
             article,
             output_dir=output_dir,
@@ -674,6 +672,10 @@ class BestAvailablePipeline:
             pdf_payload["attempts"] = merged_attempts
             pdf_payload["candidate_count"] = int(xml_payload.get("candidate_count") or 0) + int(pdf_payload.get("candidate_count") or 0)
             return pdf_payload
+        if xml_payload.get("success"):
+            xml_payload["attempts"] = [*(xml_payload.get("attempts") or []), *(pdf_payload.get("attempts") or [])]
+            xml_payload["candidate_count"] = int(xml_payload.get("candidate_count") or 0) + int(pdf_payload.get("candidate_count") or 0)
+            return xml_payload
         return {
             "article": article.model_dump(),
             "mode": mode,
@@ -709,19 +711,20 @@ class PDFService:
         return mode if mode in {"fast", "balanced"} else "fast"
 
     def _downloader_mode(self, requested: str | None = None) -> str:
-        normalized = (requested or self.settings.pdf_downloader_mode or "best").strip().lower()
+        normalized = (requested or self.settings.pdf_downloader_mode or "pdf_xml").strip().lower()
         aliases = {
-            "legacy": "best",
-            "article_downloader": "pdf",
-            "hybrid": "best",
-            "final_method": "pdf",
-            "perfect": "best",
-            "native": "best",
+            "best": "pdf_xml",
+            "legacy": "pdf_xml",
+            "article_downloader": "pdf_xml",
+            "hybrid": "pdf_xml",
+            "final_method": "pdf_xml",
+            "perfect": "pdf_xml",
+            "native": "pdf_xml",
         }
         normalized = aliases.get(normalized, normalized)
-        if normalized in {"xml", "pdf", "best"}:
+        if normalized in {"xml", "pdf", "pdf_xml"}:
             return normalized
-        return "best"
+        return "pdf_xml"
 
     def _pipeline_for(self, downloader_mode: str) -> XMLPipeline | PDFPipeline | BestAvailablePipeline:
         if downloader_mode == "xml":

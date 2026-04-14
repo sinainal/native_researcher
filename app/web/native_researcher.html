@@ -85,7 +85,7 @@
                 <span>Source</span>
                 <select id="sidebarQuickSearchResource" class="native-query-quick-select">
                   <option value="openalex">OpenAlex</option>
-                  <option value="pubmed">PubMed</option>
+                  <option value="pubmed" selected>PubMed</option>
                   <option value="europe_pmc">Europe PMC</option>
                   <option value="pmc">PMC</option>
                 </select>
@@ -174,7 +174,7 @@
                     <span>Source</span>
                     <select id="aiPrimarySearchResourceInput" class="native-settings-select">
                       <option value="openalex">OpenAlex</option>
-                      <option value="pubmed">PubMed</option>
+                      <option value="pubmed" selected>PubMed</option>
                       <option value="europe_pmc">Europe PMC</option>
                       <option value="pmc">PMC</option>
                     </select>
@@ -194,13 +194,13 @@
                   <label class="native-settings-field native-settings-field-wide" for="pdfDownloaderModeInput">
                     <span>Method</span>
                     <select id="pdfDownloaderModeInput" class="native-settings-select">
-                      <option value="best" selected>Best Available (XML+PDF) ✦</option>
+                      <option value="pdf_xml" selected>PDF + XML</option>
                       <option value="xml">XML Only</option>
                       <option value="pdf">PDF Only</option>
                     </select>
                   </label>
                 </div>
-                <div id="pdfDownloaderModeStatus" class="native-settings-note">Best mode tries XML first, then a unified PDF flow.</div>
+                <div id="pdfDownloaderModeStatus" class="native-settings-note">PDF + XML mode saves the XML first and the PDF when available.</div>
               </div>
               <div class="native-settings-card">
                 <div class="native-settings-row">
@@ -441,7 +441,7 @@
     <input id="maxResults" type="number" value="50" min="1" max="250">
     <select id="searchResource">
       <option value="openalex">OpenAlex</option>
-      <option value="pubmed">PubMed</option>
+      <option value="pubmed" selected>PubMed</option>
       <option value="europe_pmc">Europe PMC</option>
       <option value="pmc">PMC</option>
     </select>

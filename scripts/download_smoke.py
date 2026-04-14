@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a simple search + download smoke test.")
     parser.add_argument("--query", required=True, help="Literature query to search.")
     parser.add_argument("--source", default="pubmed", choices=["pubmed", "openalex", "europe_pmc", "pmc"], help="Primary search source.")
-    parser.add_argument("--mode", default="xml", choices=["xml", "pdf", "best"], help="Downloader mode to test.")
+    parser.add_argument("--mode", default="pdf_xml", choices=["pdf_xml", "xml", "pdf", "best"], help="Downloader mode to test.")
     parser.add_argument("--max-results", type=int, default=1, help="Number of search hits to inspect.")
     parser.add_argument("--year-start", type=int, default=None)
     parser.add_argument("--year-end", type=int, default=None)

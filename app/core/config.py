@@ -42,7 +42,9 @@ def _normalize_search_resource(value: str | None, default: str) -> str:
 
 def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "native", "final_method", "perfect"}:
+    if normalized in {"pdf_xml", "best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "native", "final_method", "perfect"}:
+        if normalized in {"best", "legacy", "article_downloader", "hybrid", "native", "final_method", "perfect"}:
+            return "pdf_xml"
         return normalized
     return default
 
@@ -72,7 +74,7 @@ class Settings:
     ncbi_api_key: str | None = None
     openalex_api_key: str | None = None
     pubmed_oa_only: bool = True
-    ai_primary_search_resource: str = "openalex"
+    ai_primary_search_resource: str = "pubmed"
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
     pubmed_default_batch_size: int = 250
     pubmed_max_batch_size: int = 250
@@ -91,7 +93,7 @@ class Settings:
     pdf_candidate_download_concurrency: int = 5
     pdf_browser_fallback_concurrency: int = 6
     pdf_resolve_requests_per_second: float = 20.0
-    pdf_downloader_mode: str = "best"
+    pdf_downloader_mode: str = "pdf_xml"
     journal_metrics_enabled: bool = True
     journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
     journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
@@ -121,11 +123,11 @@ class Settings:
         )
         ai_primary_search_resource = _normalize_search_resource(
             os.getenv("AI_PRIMARY_SEARCH_RESOURCE") or _read_secret_file(ai_primary_search_resource_path),
-            "openalex",
+            "pubmed",
         )
         pdf_downloader_mode = _normalize_pdf_downloader_mode(
             os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
-            "best",
+            "pdf_xml",
         )
         default_rps = 10.0 if api_key else 2.5
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))

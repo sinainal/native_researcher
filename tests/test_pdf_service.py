@@ -50,6 +50,47 @@ def test_best_mode_prefers_xml_when_xml_is_available(tmp_path) -> None:
         assert response.success_count == 1
         result = response.results[0]
         assert result.success is True
+        assert result.source == "crossref_pdf"
+        assert result.file_path and result.file_path.endswith(".pdf")
+
+    asyncio.run(runner())
+
+
+def test_xml_mode_returns_xml_only(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/idconv" in url:
+                return httpx.Response(200, json={"records": [{"pmcid": "PMC12345"}]})
+            if "efetch.fcgi?db=pmc&id=12345" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/xml"},
+                    content=b"<?xml version='1.0'?><article><body><sec>text</sec></body></article>",
+                )
+            if "api.crossref.org/works/" in url:
+                return httpx.Response(
+                    200,
+                    json={"message": {"link": [{"URL": "https://files.example.org/paper.pdf", "content-type": "application/pdf"}]}},
+                )
+            if url == "https://files.example.org/paper.pdf":
+                return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 test")
+            if "europepmc.org" in url:
+                return httpx.Response(200, json={"resultList": {"result": []}})
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(client, Settings(download_root=tmp_path, pdf_downloader_mode="pdf_xml"), TTLCache(60, 16))
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[ArticleReference(title="XML only", year="2025", doi="10.1000/xml-only")],
+                    downloader_mode="xml",
+                )
+            )
+
+        assert response.success_count == 1
+        result = response.results[0]
+        assert result.success is True
         assert result.source == "pmc_efetch_xml"
         assert result.file_path and result.file_path.endswith(".xml")
 

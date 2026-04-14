@@ -245,7 +245,7 @@ def test_api_endpoints() -> None:
                     "unpaywall_email": "",
                     "openalex_api_key": "",
                     "pubmed_oa_only": True,
-                    "pdf_downloader_mode": "best",
+                    "pdf_downloader_mode": "pdf_xml",
                 }
 
                 api_keys = await client.get("/app/api-keys")
@@ -256,8 +256,8 @@ def test_api_endpoints() -> None:
                     "unpaywall_email": "",
                     "openalex_api_key": "",
                     "pubmed_oa_only": True,
-                    "ai_primary_search_resource": "openalex",
-                    "pdf_downloader_mode": "best",
+                    "ai_primary_search_resource": "pubmed",
+                    "pdf_downloader_mode": "pdf_xml",
                 }
 
                 update_api_keys = await client.put(
@@ -280,7 +280,7 @@ def test_api_endpoints() -> None:
                     "openalex_api_key": "openalex-secret",
                     "pubmed_oa_only": False,
                     "ai_primary_search_resource": "pubmed",
-                    "pdf_downloader_mode": "article_downloader",
+                    "pdf_downloader_mode": "pdf_xml",
                 }
 
                 update_hybrid_mode = await client.put(
@@ -296,7 +296,7 @@ def test_api_endpoints() -> None:
                     },
                 )
                 assert update_hybrid_mode.status_code == 200
-                assert update_hybrid_mode.json()["pdf_downloader_mode"] == "hybrid"
+                assert update_hybrid_mode.json()["pdf_downloader_mode"] == "pdf_xml"
 
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200
@@ -380,6 +380,10 @@ def test_api_endpoints() -> None:
                 project_pdf_dir.mkdir(parents=True, exist_ok=True)
                 sample_pdf = project_pdf_dir / "sample-paper.pdf"
                 sample_pdf.write_bytes(b"%PDF-1.4\n%test\n")
+                sample_xml = project_pdf_dir / "sample-paper.xml"
+                sample_xml.write_text("<article><body>xml</body></article>", encoding="utf-8")
+                xml_only = project_pdf_dir / "xml-only-study.xml"
+                xml_only.write_text("<article><body>xml</body></article>", encoding="utf-8")
 
                 projects = await client.get("/app/projects")
                 assert projects.status_code == 200
@@ -402,7 +406,14 @@ def test_api_endpoints() -> None:
 
                 project_downloads = await client.get("/app/projects/project-1/downloads")
                 assert project_downloads.status_code == 200
-                assert project_downloads.json()["items"][0]["name"] == "sample-paper.pdf"
+                download_items = project_downloads.json()["items"]
+                assert len(download_items) == 2
+                combined_item = next(item for item in download_items if item["name"] == "sample-paper.pdf")
+                assert combined_item["path"].endswith("sample-paper.pdf")
+                assert combined_item["artifact_types"] == ["pdf", "xml"]
+                xml_item = next(item for item in download_items if item["name"] == "xml-only-study.xml")
+                assert xml_item["path"].endswith("xml-only-study.xml")
+                assert xml_item["artifact_types"] == ["xml"]
                 assert project.json()["pdf_count"] == 1
 
                 project_state = await client.get("/app/projects/project-1/state")
@@ -513,7 +524,7 @@ def test_api_endpoints() -> None:
                     assert conn.execute(
                         "SELECT COUNT(*) FROM project_documents WHERE project_id = ?",
                         ("project-1",),
-                    ).fetchone()[0] == 1
+                    ).fetchone()[0] == 3
 
                 touched_project = await client.post("/app/projects/project-1/touch")
                 assert touched_project.status_code == 200

@@ -168,9 +168,11 @@ const assistantMessageUpdateQueue = new Set();
 let resultsRenderScheduled = false;
 let appErrorLoggingBound = false;
 let pdfJsLoadPromise = null;
+let pdfJsViewerLoadPromise = null;
 
 const pdfJsScriptUrl = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js";
 const pdfJsWorkerUrl = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+const pdfJsViewerScriptUrl = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/web/pdf_viewer.js";
 
 const downloadabilityLabels = {
   loading: "Downloading",
@@ -1667,6 +1669,35 @@ async function loadPdfJs() {
   return pdfJsLoadPromise;
 }
 
+async function loadPdfJsViewer() {
+  if (window.pdfjsViewer) {
+    return window.pdfjsViewer;
+  }
+  if (!pdfJsViewerLoadPromise) {
+    pdfJsViewerLoadPromise = new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-pdfjs-viewer-loader="true"]');
+      if (existing && window.pdfjsViewer) {
+        resolve(window.pdfjsViewer);
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = pdfJsViewerScriptUrl;
+      script.async = true;
+      script.dataset.pdfjsViewerLoader = "true";
+      script.onload = () => {
+        if (!window.pdfjsViewer) {
+          reject(new Error("PDF.js viewer loaded but pdfjsViewer is unavailable."));
+          return;
+        }
+        resolve(window.pdfjsViewer);
+      };
+      script.onerror = () => reject(new Error("PDF.js viewer could not be loaded."));
+      document.head.appendChild(script);
+    });
+  }
+  return pdfJsViewerLoadPromise;
+}
+
 function cleanXmlText(value) {
   return String(value ?? "")
     .replace(/<\s*\/?\s*[A-Za-z][^>]*>/g, " ")
@@ -1937,14 +1968,13 @@ async function resolvePdfOutlineNode(pdfDoc, item, pageLabels = null) {
   const title = cleanXmlText(item?.title || "") || "Bookmark";
   let pageNumber = null;
   let pageLabel = "";
-  let destinationName = "";
-  let destinationY = null;
+  const destination = item?.dest ?? null;
   try {
-    const destination = typeof item?.dest === "string"
+    const explicitDestination = typeof item?.dest === "string"
       ? await pdfDoc.getDestination(item.dest)
       : item?.dest;
-    if (Array.isArray(destination) && destination.length) {
-      const first = destination[0];
+    if (Array.isArray(explicitDestination) && explicitDestination.length) {
+      const first = explicitDestination[0];
       if (typeof first === "object" && first) {
         pageNumber = (await pdfDoc.getPageIndex(first)) + 1;
       } else if (Number.isFinite(first)) {
@@ -1952,13 +1982,6 @@ async function resolvePdfOutlineNode(pdfDoc, item, pageLabels = null) {
       }
       if (Number.isFinite(pageNumber) && Array.isArray(pageLabels) && pageLabels[pageNumber - 1]) {
         pageLabel = String(pageLabels[pageNumber - 1]);
-      }
-      const destinationMode = destination[1]?.name || "";
-      destinationName = destinationMode;
-      if (destinationMode === "XYZ" && Number.isFinite(destination[3])) {
-        destinationY = destination[3];
-      } else if ((destinationMode === "FitH" || destinationMode === "FitBH") && Number.isFinite(destination[2])) {
-        destinationY = destination[2];
       }
     }
   } catch (_error) {
@@ -1972,193 +1995,50 @@ async function resolvePdfOutlineNode(pdfDoc, item, pageLabels = null) {
     title,
     pageNumber,
     pageLabel,
-    destinationName,
-    destinationY,
+    destination,
     children,
   };
 }
 
-function renderResolvedPdfOutline(nodes, depth = 0) {
-  return nodes.map((node) => {
-    const childrenMarkup = node.children?.length ? renderResolvedPdfOutline(node.children, depth + 1) : "";
-    const hasPage = Number.isFinite(node.pageNumber);
-    return `
-      <button
-        type="button"
-        class="native-pdf-outline-item native-pdf-outline-depth-${Math.min(depth, 4)}"
-        data-page-number="${hasPage ? node.pageNumber : ""}"
-        data-destination-y="${Number.isFinite(node.destinationY) ? node.destinationY : ""}"
-        data-destination-name="${escapeHtml(node.destinationName || "")}"
-        data-outline-title="${escapeHtml(node.title || "")}"
-        ${hasPage ? "" : "disabled"}
-      >
-        <span class="native-pdf-outline-item-title">${escapeHtml(node.title)}</span>
-        ${hasPage ? `<span class="native-pdf-outline-item-page">${escapeHtml(node.pageLabel || String(node.pageNumber))}</span>` : ""}
-      </button>
-      ${childrenMarkup ? `<div class="native-pdf-outline-children">${childrenMarkup}</div>` : ""}
-    `;
-  }).join("");
-}
-
-function normalizePdfOutlineText(value) {
-  return cleanXmlText(value)
-    .toLowerCase()
-    .replace(/\u00a0/g, " ");
-}
-
-function clusterPdfTextLines(textItems, viewport) {
-  const lines = [];
-  const grouped = [];
-  for (const item of textItems || []) {
-    const rawText = cleanXmlText(item?.str || "");
-    if (!rawText) continue;
-    const transform = Array.isArray(item?.transform) ? item.transform : null;
-    if (!transform || transform.length < 6) continue;
-    const [vx, vy] = viewport.convertToViewportPoint(transform[4], transform[5]);
-    grouped.push({
-      text: rawText,
-      normText: normalizePdfOutlineText(rawText),
-      x: vx,
-      y: vy,
-      width: Number.isFinite(item.width) ? item.width : 0,
-      height: Number.isFinite(item.height) ? item.height : 0,
-    });
-  }
-
-  grouped.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-  const yTolerance = 7;
-  for (const item of grouped) {
-    const current = lines.at(-1);
-    if (!current || Math.abs(current.y - item.y) > yTolerance) {
-      lines.push({
-        text: item.text,
-        normText: item.normText,
-        y: item.y,
-        x: item.x,
-        items: [item],
-      });
-      continue;
+function appendResolvedPdfOutline(container, nodes, lookup, depth = 0, pathPrefix = "root") {
+  nodes.forEach((node, index) => {
+    const key = `${pathPrefix}.${index}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `native-pdf-outline-item native-pdf-outline-depth-${Math.min(depth, 4)}`;
+    if (Number.isFinite(node.pageNumber)) {
+      button.dataset.outlineKey = key;
+      lookup.set(key, node);
+    } else {
+      button.disabled = true;
     }
-    current.items.push(item);
-    current.text = current.items
-      .slice()
-      .sort((left, right) => left.x - right.x)
-      .map((lineItem) => lineItem.text)
-      .join(" ");
-    current.normText = normalizePdfOutlineText(current.text);
-    current.y = Math.min(current.y, item.y);
-    current.x = Math.min(current.x, item.x);
-  }
-  return lines;
-}
 
-function scorePdfLineMatch(line, titleNorm) {
-  if (!line?.normText || !titleNorm) return Number.POSITIVE_INFINITY;
-  if (line.normText === titleNorm) return 0;
-  if (line.normText.startsWith(titleNorm)) return 1;
-  if (line.normText.includes(titleNorm)) return 2;
-  return Number.POSITIVE_INFINITY;
-}
+    const title = document.createElement("span");
+    title.className = "native-pdf-outline-item-title";
+    title.textContent = node.title;
+    button.appendChild(title);
 
-async function findPdfOutlineAnchor(pdfDoc, pageNumber, title, scale, fallbackDestinationY = null) {
-  if (!pdfDoc || !Number.isFinite(pageNumber) || pageNumber < 1) return null;
-  const page = await pdfDoc.getPage(pageNumber);
-  const viewport = page.getViewport({ scale });
-  const textContent = await page.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false });
-  const lines = clusterPdfTextLines(textContent?.items || [], viewport);
-  const titleNorm = normalizePdfOutlineText(title);
-
-  const ranked = [];
-  for (const line of lines) {
-    const score = scorePdfLineMatch(line, titleNorm);
-    if (!Number.isFinite(score)) continue;
-    ranked.push({ score, line, lineLength: line.normText.length });
-  }
-
-  if (!ranked.length) {
-    const sequences = [];
-    for (let i = 0; i < lines.length; i += 1) {
-      for (let span = 2; span <= 3; span += 1) {
-        const chunk = lines.slice(i, i + span);
-        if (chunk.length < span) continue;
-        const text = normalizePdfOutlineText(chunk.map((line) => line.text).join(" "));
-        if (!text.includes(titleNorm)) continue;
-        sequences.push({
-          score: 3 + (span - 2),
-          line: {
-            y: chunk[0].y,
-            x: chunk[0].x,
-            text: chunk.map((line) => line.text).join(" "),
-            normText: text,
-          },
-          lineLength: text.length,
-        });
-      }
+    if (Number.isFinite(node.pageNumber)) {
+      const badge = document.createElement("span");
+      badge.className = "native-pdf-outline-item-page";
+      badge.textContent = node.pageLabel || String(node.pageNumber);
+      button.appendChild(badge);
     }
-    ranked.push(...sequences);
-  }
 
-  if (ranked.length) {
-    ranked.sort((a, b) => a.score - b.score || a.lineLength - b.lineLength || a.line.y - b.line.y || a.line.x - b.line.x);
-    return {
-      y: Math.max(0, ranked[0].line.y - 10),
-      matchedText: ranked[0].line.text,
-      matchType: ranked[0].score === 0 ? "exact" : ranked[0].score === 1 ? "prefix" : "contains",
-    };
-  }
+    container.appendChild(button);
 
-  if (Number.isFinite(fallbackDestinationY)) {
-    const [, viewportY] = viewport.convertToViewportPoint(0, fallbackDestinationY);
-    return {
-      y: Math.max(0, viewportY - 10),
-      matchedText: "",
-      matchType: "fallback",
-    };
-  }
-  return null;
-}
-
-function renderPdfTextAnchors(lines, pageWidth, pageHeight) {
-  if (!lines?.length) return "";
-  return `
-    <div class="native-document-pdf-text-layer" style="width:${Math.max(1, Math.round(pageWidth))}px;height:${Math.max(1, Math.round(pageHeight))}px;">
-      ${lines.map((line) => `
-        <div
-          class="native-document-pdf-text-anchor"
-          data-text="${escapeHtml(line.normText || "")}"
-          data-raw-text="${escapeHtml(line.text || "")}"
-          style="left:${Math.max(0, Math.round(line.x))}px;top:${Math.max(0, Math.round(line.y))}px;"
-        ></div>
-      `).join("")}
-    </div>
-  `;
-}
-
-function findExactPdfLineAnchor(pageNode, title) {
-  if (!pageNode || !title) return null;
-  const titleNorm = normalizePdfOutlineText(title);
-  const anchors = Array.from(pageNode.querySelectorAll(".native-document-pdf-text-anchor"));
-  if (!anchors.length) return null;
-  const scored = anchors
-    .map((anchor) => {
-      const text = String(anchor.dataset.text || "");
-      if (!text) return null;
-      let score = Number.POSITIVE_INFINITY;
-      if (text === titleNorm) score = 0;
-      else if (text.startsWith(titleNorm)) score = 1;
-      else if (text.includes(titleNorm)) score = 2;
-      else if (titleNorm.includes(text) && text.length > 3) score = 3;
-      if (!Number.isFinite(score)) return null;
-      return { anchor, score, len: text.length };
-    })
-    .filter(Boolean);
-  if (!scored.length) return null;
-  scored.sort((a, b) => a.score - b.score || a.len - b.len);
-  return scored[0].anchor;
+    if (node.children?.length) {
+      const childrenWrap = document.createElement("div");
+      childrenWrap.className = "native-pdf-outline-children";
+      container.appendChild(childrenWrap);
+      appendResolvedPdfOutline(childrenWrap, node.children, lookup, depth + 1, key);
+    }
+  });
 }
 
 async function renderPdfDocumentViewer(fileUrl, token) {
   const pdfjsLib = await loadPdfJs();
+  const pdfjsViewer = await loadPdfJsViewer();
   if (token !== state.documentViewerRenderToken) return;
   if (!els.documentViewerBody) return;
   els.documentViewerBody.innerHTML = `
@@ -2172,80 +2052,66 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       </aside>
       <div class="native-document-pdf-pages-panel">
         <div class="native-document-pdf-status" id="documentViewerPdfStatus">Loading PDF…</div>
-        <div class="native-document-pdf-pages" id="documentViewerPdfPages"></div>
+        <div class="native-document-pdf-stage">
+          <div id="documentViewerPdfContainer" class="native-document-pdf-container">
+            <div class="pdfViewer"></div>
+          </div>
+        </div>
       </div>
     </div>
   `;
 
   const outlineStatusEl = document.getElementById("documentViewerPdfOutlineStatus");
   const outlineListEl = document.getElementById("documentViewerPdfOutlineList");
-  const pagesEl = document.getElementById("documentViewerPdfPages");
+  const pagesEl = document.getElementById("documentViewerPdfContainer");
   const statusEl = document.getElementById("documentViewerPdfStatus");
   if (!outlineStatusEl || !outlineListEl || !pagesEl || !statusEl) return;
-  const outlineScrollPadding = 10;
 
   try {
-    const response = await fetch(fileUrl, { credentials: "same-origin" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const data = await response.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data });
+    configurePdfJsWorker(pdfjsLib);
+    const eventBus = new pdfjsViewer.EventBus();
+    const linkService = new pdfjsViewer.PDFLinkService({ eventBus });
+    const findController = new pdfjsViewer.PDFFindController({ eventBus, linkService });
+    const viewer = new pdfjsViewer.PDFViewer({
+      container: pagesEl,
+      viewer: pagesEl.querySelector(".pdfViewer"),
+      eventBus,
+      linkService,
+      findController,
+      textLayerMode: 1,
+      removePageBorders: true,
+    });
+    linkService.setViewer(viewer);
+
+    const loadingTask = pdfjsLib.getDocument(fileUrl);
     const pdfDoc = await loadingTask.promise;
     if (token !== state.documentViewerRenderToken) return;
-    const pageLabels = await pdfDoc.getPageLabels().catch(() => null);
-    const pageViewportMap = new Map();
-    const pageAnchorMap = new Map();
+    viewer.setDocument(pdfDoc);
+    linkService.setDocument(pdfDoc, null);
 
+    const pageLabels = await pdfDoc.getPageLabels().catch(() => null);
     const outlineItems = await pdfDoc.getOutline();
     if (token !== state.documentViewerRenderToken) return;
 
     if (outlineItems?.length) {
+      const outlineLookup = new Map();
       const resolvedOutline = await Promise.all(outlineItems.map((item) => resolvePdfOutlineNode(pdfDoc, item, pageLabels)));
       if (token !== state.documentViewerRenderToken) return;
       outlineStatusEl.textContent = "Bookmarks available";
-      outlineListEl.innerHTML = renderResolvedPdfOutline(resolvedOutline);
-      outlineListEl.querySelectorAll("[data-page-number]").forEach((button) => {
-        button.addEventListener("click", () => {
-          const pageNumber = Number.parseInt(button.getAttribute("data-page-number") || "", 10);
-          if (!Number.isFinite(pageNumber) || pageNumber < 1) return;
-          void (async () => {
-            const pageNode = document.getElementById(`documentViewerPdfPage-${pageNumber}`);
-            if (!pageNode) return;
-            const destinationY = Number.parseFloat(button.getAttribute("data-destination-y") || "");
-            const outlineTitle = button.getAttribute("data-outline-title") || "";
-            let anchor = pageAnchorMap.get(`${pageNumber}:${outlineTitle}`);
-            if (!anchor) {
-              anchor = await findPdfOutlineAnchor(pdfDoc, pageNumber, outlineTitle, scale, destinationY);
-              if (anchor) {
-                pageAnchorMap.set(`${pageNumber}:${outlineTitle}`, anchor);
-              }
-            }
-            const exactLine = findExactPdfLineAnchor(pageNode, outlineTitle);
-            if (exactLine) {
-              const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
-              let nextTop = pageNode.offsetTop;
-              if (canvasWrap) {
-                nextTop += canvasWrap.offsetTop;
-              }
-              nextTop += exactLine.offsetTop - outlineScrollPadding;
-              pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
-              return;
-            }
-            const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
-            const viewport = pageViewportMap.get(pageNumber);
-            let nextTop = pageNode.offsetTop;
-            if (canvasWrap) {
-              nextTop += canvasWrap.offsetTop;
-            }
-            if (anchor?.y != null) {
-              nextTop += anchor.y - outlineScrollPadding;
-            } else if (Number.isFinite(destinationY) && viewport?.convertToViewportPoint) {
-              const [, viewportY] = viewport.convertToViewportPoint(0, destinationY);
-              nextTop += Math.max(0, viewportY - outlineScrollPadding);
-            }
-            pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
-          })();
+      outlineListEl.innerHTML = "";
+      appendResolvedPdfOutline(outlineListEl, resolvedOutline, outlineLookup);
+      outlineListEl.querySelectorAll("[data-outline-key]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const key = button.getAttribute("data-outline-key") || "";
+          const node = outlineLookup.get(key);
+          if (!node) return;
+          if (node.destination != null) {
+            await linkService.goToDestination(node.destination);
+            return;
+          }
+          if (Number.isFinite(node.pageNumber)) {
+            viewer.currentPageNumber = node.pageNumber;
+          }
         });
       });
     } else {
@@ -2258,59 +2124,17 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       `;
     }
 
-    const firstPage = await pdfDoc.getPage(1);
-    const viewport = firstPage.getViewport({ scale: 1 });
-    const availableWidth = Math.max(320, pagesEl.getBoundingClientRect().width || 0);
-    const targetWidth = Math.max(640, availableWidth - 12);
-    const scale = Math.min(2.0, Math.max(0.75, targetWidth / viewport.width));
-    firstPage.cleanup?.();
-
-    pagesEl.innerHTML = "";
-    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+    eventBus.on("pagesinit", () => {
       if (token !== state.documentViewerRenderToken) return;
-      statusEl.textContent = `Rendering page ${pageNumber} of ${pdfDoc.numPages}…`;
-      const page = await pdfDoc.getPage(pageNumber);
+      viewer.currentScaleValue = "page-width";
+      statusEl.textContent = `Rendered ${pdfDoc.numPages} page${pdfDoc.numPages === 1 ? "" : "s"}`;
+    });
+    eventBus.on("pagechanging", ({ pageNumber }) => {
       if (token !== state.documentViewerRenderToken) return;
-      const pageViewport = page.getViewport({ scale });
-      pageViewportMap.set(pageNumber, pageViewport);
-      const textContent = await page.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false });
-      if (token !== state.documentViewerRenderToken) return;
-      const textLines = clusterPdfTextLines(textContent?.items || [], pageViewport);
-      const pageCard = document.createElement("section");
-      pageCard.className = "native-document-pdf-page";
-      pageCard.id = `documentViewerPdfPage-${pageNumber}`;
-      pageCard.innerHTML = `
-        <div class="native-document-pdf-page-header">
-          <span>Page ${pageNumber}</span>
-          <span>${Math.round(pageViewport.width)} × ${Math.round(pageViewport.height)} px</span>
-        </div>
-        <div class="native-document-pdf-canvas-wrap">
-          <canvas class="native-document-pdf-canvas"></canvas>
-          ${renderPdfTextAnchors(textLines, pageViewport.width, pageViewport.height)}
-        </div>
-      `;
-      pagesEl.appendChild(pageCard);
-
-      const canvas = pageCard.querySelector("canvas");
-      const context = canvas.getContext("2d", { alpha: false });
-      const outputScale = window.devicePixelRatio || 1;
-      canvas.width = Math.floor(pageViewport.width * outputScale);
-      canvas.height = Math.floor(pageViewport.height * outputScale);
-      canvas.style.width = `${Math.floor(pageViewport.width)}px`;
-      canvas.style.height = `${Math.floor(pageViewport.height)}px`;
-      context.setTransform(1, 0, 0, 1, 0, 0);
-      context.clearRect(0, 0, canvas.width, canvas.height);
-
-      await page.render({
-        canvasContext: context,
-        viewport: pageViewport,
-        transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null,
-        background: "#ffffff",
-      }).promise;
-      page.cleanup?.();
-    }
+      statusEl.textContent = `Page ${pageNumber} of ${pdfDoc.numPages}`;
+    });
     if (token !== state.documentViewerRenderToken) return;
-    statusEl.textContent = `Rendered ${pdfDoc.numPages} page${pdfDoc.numPages === 1 ? "" : "s"}`;
+    statusEl.textContent = `Loading ${pdfDoc.numPages} page${pdfDoc.numPages === 1 ? "" : "s"}…`;
   } catch (error) {
     if (token !== state.documentViewerRenderToken) return;
     pagesEl.innerHTML = `

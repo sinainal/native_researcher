@@ -1268,6 +1268,7 @@ body.is-document-viewer-open .native-document-viewer {
   flex-direction: column;
   overflow: hidden;
   padding: 14px;
+  position: relative;
 }
 
 .native-document-pdf-status {
@@ -1276,66 +1277,41 @@ body.is-document-viewer-open .native-document-viewer {
   margin-bottom: 10px;
 }
 
-.native-document-pdf-pages {
+.native-document-pdf-stage {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
+}
+
+.native-document-pdf-container {
+  position: absolute;
+  inset: 0;
   overflow: auto;
-  display: grid;
-  gap: 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: linear-gradient(180deg, #f8fafc, #eef3fb);
   padding-right: 4px;
 }
 
-.native-document-pdf-page {
-  border: 1px solid rgba(221, 228, 239, 0.95);
-  border-radius: 18px;
-  background: #fff;
-  box-shadow: var(--sh-sm);
-  padding: 12px;
+.native-document-pdf-container .pdfViewer {
+  padding-bottom: 18px;
 }
 
-.native-document-pdf-page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 0.76rem;
-  color: #718196;
-  margin-bottom: 10px;
-}
-
-.native-document-pdf-canvas-wrap {
-  display: grid;
-  place-items: center;
-  overflow: auto;
-  background: linear-gradient(180deg, #f8fafc, #eef3fb);
+.native-document-pdf-container .pdfViewer .page {
   border-radius: 14px;
-  padding: 10px;
-}
-
-.native-document-pdf-canvas {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(17, 25, 39, 0.08);
-}
-
-.native-document-pdf-text-layer {
-  position: absolute;
-  inset: 0;
   overflow: hidden;
-  pointer-events: none;
-  opacity: 0;
+  box-shadow: 0 12px 30px rgba(17, 25, 39, 0.08);
+  margin-bottom: 18px;
 }
 
-.native-document-pdf-canvas-wrap {
-  position: relative;
+.native-document-pdf-container .textLayer .highlight {
+  background: rgba(255, 215, 0, 0.28);
+  border-radius: 3px;
 }
 
-.native-document-pdf-text-anchor {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+.native-document-pdf-container .page {
+  border: 0;
 }
 
 .native-document-scroll {

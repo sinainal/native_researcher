@@ -95,6 +95,16 @@
                 <input id="sidebarQuickMaxResults" class="native-query-quick-max" type="number" value="5" min="1"
                   max="50">
               </label>
+              <label class="native-query-quick-field" for="sidebarQuickYearStart">
+                <span>From</span>
+                <input id="sidebarQuickYearStart" class="native-query-quick-max" type="number" min="1000" max="9999"
+                  placeholder="2020">
+              </label>
+              <label class="native-query-quick-field" for="sidebarQuickYearEnd">
+                <span>To</span>
+                <input id="sidebarQuickYearEnd" class="native-query-quick-max" type="number" min="1000" max="9999"
+                  placeholder="2026">
+              </label>
               <button id="sidebarQuickSearchBtn" class="btn btn-primary btn-sm" type="button">Run Query</button>
             </div>
             <div id="sidebarQuickStatus" class="native-query-quick-status">Uses the selected primary search source from
@@ -263,6 +273,7 @@
               </div>
               <button id="quickDownloadSelectedBtn" class="native-toolbar-link-btn" type="button" disabled>Download
                 Selected</button>
+              <button id="tableFilterBtn" class="btn btn-ghost btn-sm" type="button" disabled>Filters</button>
               <button id="clearSelectionBtn" class="btn btn-ghost btn-sm" disabled>Clear Selection</button>
               <button id="selectAllBtn" class="btn btn-ghost btn-sm" disabled>Select All</button>
             </div>
@@ -533,6 +544,29 @@
         <button id="apiKeysSave" class="btn btn-primary btn-sm" type="submit">Save</button>
       </div>
     </form>
+  </section>
+  <div id="tableFilterOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="tableFilterPopup" class="detail-popup native-filter-popup" hidden role="dialog" aria-modal="true"
+    aria-labelledby="tableFilterTitle">
+    <div class="detail-popup-head">
+      <div class="detail-popup-headcopy">
+        <div class="detail-popup-eyebrow">Article Results</div>
+        <h3 id="tableFilterTitle" class="detail-popup-title">Filters</h3>
+        <div id="tableFilterMeta" class="detail-popup-meta">0 active</div>
+      </div>
+      <button id="tableFilterClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+    <div id="tableFilterBody" class="native-filter-body"></div>
+    <div class="native-filter-actions">
+      <button id="tableFilterClear" class="btn btn-ghost btn-sm" type="button">Clear</button>
+      <button id="tableFilterApply" class="btn btn-primary btn-sm" type="button">Apply</button>
+    </div>
   </section>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/web/pdf_viewer.css">
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>

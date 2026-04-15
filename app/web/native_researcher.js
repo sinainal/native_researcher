@@ -19,10 +19,19 @@ const state = {
   citationRunId: 0,
   citationsLoading: false,
   selectedIds: new Set(),
+  tableFilters: {
+    years: [],
+    articleTypes: [],
+    citationBuckets: [],
+    journalQuartiles: [],
+    meshTerms: [],
+    keywords: [],
+  },
   sortKey: null,
   sortDirection: "asc",
   lastSearchPayload: null,
   lastPubmedResponse: null,
+  articleDatasetMode: "query",
   detailArticleId: null,
   documentViewer: null,
   documentViewerMode: "table",
@@ -70,6 +79,8 @@ const els = {
   workspaceQueryDetail: document.getElementById("workspaceQueryDetail"),
   sidebarQuickQuery: document.getElementById("sidebarQuickQuery"),
   sidebarQuickMaxResults: document.getElementById("sidebarQuickMaxResults"),
+  sidebarQuickYearStart: document.getElementById("sidebarQuickYearStart"),
+  sidebarQuickYearEnd: document.getElementById("sidebarQuickYearEnd"),
   sidebarQuickSearchResource: document.getElementById("sidebarQuickSearchResource"),
   sidebarQuickSearchBtn: document.getElementById("sidebarQuickSearchBtn"),
   sidebarQuickStatus: document.getElementById("sidebarQuickStatus"),
@@ -78,6 +89,14 @@ const els = {
   clearSelectionBtn: document.getElementById("clearSelectionBtn"),
   selectAllBtn: document.getElementById("selectAllBtn"),
   quickDownloadSelectedBtn: document.getElementById("quickDownloadSelectedBtn"),
+  tableFilterBtn: document.getElementById("tableFilterBtn"),
+  tableFilterOverlay: document.getElementById("tableFilterOverlay"),
+  tableFilterPopup: document.getElementById("tableFilterPopup"),
+  tableFilterClose: document.getElementById("tableFilterClose"),
+  tableFilterBody: document.getElementById("tableFilterBody"),
+  tableFilterMeta: document.getElementById("tableFilterMeta"),
+  tableFilterClear: document.getElementById("tableFilterClear"),
+  tableFilterApply: document.getElementById("tableFilterApply"),
   metaStrip: document.getElementById("metaStrip"),
   resultsBody: document.getElementById("resultsBody"),
   sortButtons: document.querySelectorAll(".table-sort-btn"),
@@ -560,7 +579,7 @@ function applySelectedQuerySelection() {
     renderQueryDetail();
     return;
   }
-  applyArticleDataset(dataset, { persist: false });
+  applyArticleDataset(dataset, { persist: false, mode: "selected_queries" });
 }
 
 function syncSelectedQuerySelection() {
@@ -759,6 +778,12 @@ function syncSidebarQuickControls() {
     const nextMax = normalizedNumber(els.maxResults, 20);
     els.sidebarQuickMaxResults.value = String(nextMax);
   }
+  if (els.sidebarQuickYearStart && els.yearStart) {
+    els.sidebarQuickYearStart.value = els.yearStart.value || "";
+  }
+  if (els.sidebarQuickYearEnd && els.yearEnd) {
+    els.sidebarQuickYearEnd.value = els.yearEnd.value || "";
+  }
   if (els.searchResource && els.sidebarQuickSearchResource) {
     const nextResource = normalizeSearchResource(els.searchResource.value || runtime.searchResource, "pubmed");
     els.searchResource.value = nextResource;
@@ -784,6 +809,7 @@ function createQueryRecordFromDataset(response) {
 }
 
 function upsertActiveQueryRecord() {
+  if (state.articleDatasetMode !== "query") return;
   if (!state.lastSearchPayload?.query || !state.lastPubmedResponse?.articles?.length) return;
   const existingIndex = state.activeQueryId
     ? state.queryHistory.findIndex((item) => item.id === state.activeQueryId)
@@ -3139,6 +3165,196 @@ function articleSortValue(article, sortKey) {
   }
 }
 
+function emptyTableFilters() {
+  return {
+    years: [],
+    articleTypes: [],
+    citationBuckets: [],
+    journalQuartiles: [],
+    meshTerms: [],
+    keywords: [],
+  };
+}
+
+function normalizeFilterOption(value) {
+  return String(value ?? "").trim();
+}
+
+function selectedFilterSet(key) {
+  return new Set((state.tableFilters?.[key] || []).map(normalizeFilterOption).filter(Boolean));
+}
+
+function citationBucketForArticle(article) {
+  const count = Number.isInteger(article?.citation_count) ? article.citation_count : null;
+  if (count === null) return "unknown";
+  if (count < 25) return "0-24";
+  if (count < 50) return "25-49";
+  if (count < 100) return "50-99";
+  if (count < 200) return "100-199";
+  if (count < 500) return "200-499";
+  return "500+";
+}
+
+function citationBucketLabel(bucket) {
+  return {
+    "0-24": "0-24",
+    "25-49": "25-49",
+    "50-99": "50-99",
+    "100-199": "100-199",
+    "200-499": "200-499",
+    "500+": "500+",
+    unknown: "Unknown",
+  }[bucket] || bucket;
+}
+
+function articleFilterValues(article, key) {
+  switch (key) {
+    case "years":
+      return [normalizeFilterOption(article.year || "Unknown")];
+    case "articleTypes":
+      return (article.article_types?.length ? article.article_types : [article.article_type || "Unknown"])
+        .map(normalizeFilterOption)
+        .filter(Boolean);
+    case "citationBuckets":
+      return [citationBucketForArticle(article)];
+    case "journalQuartiles":
+      return [normalizeFilterOption(article.journal_quartile || "Unranked")];
+    case "meshTerms":
+      return (article.mesh_terms || []).map(normalizeFilterOption).filter(Boolean);
+    case "keywords":
+      return (article.keywords || []).map(normalizeFilterOption).filter(Boolean);
+    default:
+      return [];
+  }
+}
+
+function tableFilterActiveCount() {
+  return Object.values(state.tableFilters || {}).reduce((sum, values) => sum + (Array.isArray(values) ? values.length : 0), 0);
+}
+
+function articleMatchesTableFilters(article) {
+  const filters = state.tableFilters || emptyTableFilters();
+  return Object.keys(filters).every((key) => {
+    const selected = selectedFilterSet(key);
+    if (!selected.size) return true;
+    return articleFilterValues(article, key).some((value) => selected.has(value));
+  });
+}
+
+function applyArticleFilters() {
+  state.articles = state.allArticles.filter((article) => articleMatchesTableFilters(article));
+  applyArticleSort();
+  const visibleIds = new Set(state.articles.map((article) => article.id));
+  state.selectedIds = new Set([...state.selectedIds].filter((id) => visibleIds.has(id)));
+  if (state.detailArticleId && !visibleIds.has(state.detailArticleId)) {
+    state.detailArticleId = null;
+  }
+}
+
+function countFilterOptions(key) {
+  const counts = new Map();
+  state.allArticles.forEach((article) => {
+    articleFilterValues(article, key).forEach((value) => {
+      const normalized = normalizeFilterOption(value || "Unknown");
+      if (!normalized) return;
+      counts.set(normalized, (counts.get(normalized) || 0) + 1);
+    });
+  });
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((left, right) => {
+      if (key === "years") {
+        return (parseOptionalNumber(right.value) || 0) - (parseOptionalNumber(left.value) || 0);
+      }
+      if (key === "journalQuartiles") {
+        const rank = { Q1: 1, Q2: 2, Q3: 3, Q4: 4, Unranked: 5 };
+        return (rank[left.value] || 99) - (rank[right.value] || 99);
+      }
+      if (key === "citationBuckets") {
+        const rank = { "0-24": 1, "25-49": 2, "50-99": 3, "100-199": 4, "200-499": 5, "500+": 6, unknown: 7 };
+        return (rank[left.value] || 99) - (rank[right.value] || 99);
+      }
+      return right.count - left.count || left.value.localeCompare(right.value, "en", { sensitivity: "base" });
+    });
+}
+
+function tableFilterSections() {
+  return [
+    { key: "years", title: "Year", options: countFilterOptions("years") },
+    {
+      key: "citationBuckets",
+      title: "Citations",
+      options: ["0-24", "25-49", "50-99", "100-199", "200-499", "500+", "unknown"]
+        .map((value) => countFilterOptions("citationBuckets").find((item) => item.value === value) || { value, count: 0 })
+        .filter((item) => item.count > 0),
+      label: citationBucketLabel,
+    },
+    { key: "articleTypes", title: "Article Type", options: countFilterOptions("articleTypes") },
+    { key: "journalQuartiles", title: "Q Rank", options: countFilterOptions("journalQuartiles") },
+    { key: "meshTerms", title: "MeSH Terms", options: countFilterOptions("meshTerms") },
+    { key: "keywords", title: "Keywords", options: countFilterOptions("keywords") },
+  ];
+}
+
+function renderTableFilterPopup() {
+  if (!els.tableFilterBody) return;
+  const activeCount = tableFilterActiveCount();
+  if (els.tableFilterMeta) {
+    els.tableFilterMeta.textContent = `${activeCount} active · ${state.articles.length} of ${state.allArticles.length} shown`;
+  }
+  const sections = tableFilterSections();
+  els.tableFilterBody.innerHTML = sections
+    .map((section) => {
+      const selected = selectedFilterSet(section.key);
+      const labelFor = section.label || ((value) => value);
+      return `
+        <details class="native-filter-section" open>
+          <summary class="native-filter-section-summary">
+            <span>${escapeHtml(section.title)}</span>
+            <span>${escapeHtml(String(section.options.length))}</span>
+          </summary>
+          <div class="native-filter-options">
+            ${section.options.length ? section.options.map((option) => `
+              <label class="native-filter-option">
+                <input type="checkbox" data-filter-key="${escapeHtml(section.key)}" value="${escapeHtml(option.value)}" ${selected.has(option.value) ? "checked" : ""}>
+                <span class="native-filter-option-label">${escapeHtml(labelFor(option.value))}</span>
+                <span class="native-filter-option-count">${escapeHtml(String(option.count))}</span>
+              </label>
+            `).join("") : '<div class="native-filter-empty">No values</div>'}
+          </div>
+        </details>
+      `;
+    })
+    .join("");
+}
+
+function readTableFiltersFromPopup() {
+  const next = emptyTableFilters();
+  els.tableFilterBody?.querySelectorAll("input[data-filter-key]:checked").forEach((input) => {
+    const key = input.dataset.filterKey;
+    if (!Object.hasOwn(next, key)) return;
+    next[key].push(input.value);
+  });
+  return next;
+}
+
+function setTableFilterOpen(next) {
+  if (!els.tableFilterPopup || !els.tableFilterOverlay) return;
+  els.tableFilterPopup.hidden = !next;
+  els.tableFilterOverlay.hidden = !next;
+  els.tableFilterPopup.classList.toggle("is-open", next);
+  els.tableFilterOverlay.classList.toggle("is-open", next);
+  if (next) renderTableFilterPopup();
+}
+
+function applyTableFiltersFromPopup() {
+  state.tableFilters = readTableFiltersFromPopup();
+  applyArticleFilters();
+  renderMeta(state.lastPubmedResponse?.meta || null);
+  renderResults();
+  setTableFilterOpen(false);
+}
+
 function applyArticleSort() {
   if (!state.sortKey) return;
   const direction = state.sortDirection === "desc" ? -1 : 1;
@@ -3181,7 +3397,7 @@ function toggleArticleSort(sortKey) {
     state.sortKey = sortKey;
     state.sortDirection = defaultSortDirection(sortKey);
   }
-  applyArticleSort();
+  applyArticleFilters();
   renderResults();
 }
 
@@ -3196,6 +3412,7 @@ function renderMeta(meta) {
   const chips = [
     ["Total results", meta.total_results_found],
     ["Fetched", meta.fetched_results],
+    ["Shown", state.allArticles.length ? `${state.articles.length}/${state.allArticles.length}` : state.articles.length],
     ["Database", currentSearchSourceLabel()],
     ["Sources", currentSearchSourcesUsed()],
     ["Years", yearBits.join(" ") || "last 5 years"],
@@ -3212,10 +3429,16 @@ function renderMeta(meta) {
 
 function updateCounters() {
   const hasSelection = state.selectedIds.size > 0;
+  const activeFilters = tableFilterActiveCount();
   els.articleCount.textContent = String(state.articles.length);
   els.selectedCount.textContent = String(state.selectedIds.size);
   els.selectAllBtn.disabled = state.articles.length === 0;
   els.clearSelectionBtn.disabled = !hasSelection;
+  if (els.tableFilterBtn) {
+    els.tableFilterBtn.disabled = state.allArticles.length === 0;
+    els.tableFilterBtn.textContent = activeFilters ? `Filters (${activeFilters})` : "Filters";
+    els.tableFilterBtn.classList.toggle("is-active", activeFilters > 0);
+  }
   if (els.quickDownloadSelectedBtn) {
     els.quickDownloadSelectedBtn.disabled = !hasSelection;
     els.quickDownloadSelectedBtn.classList.toggle("is-active", hasSelection);
@@ -3258,14 +3481,14 @@ async function enrichCitationsInBackground() {
             citation_count: byKey.get(key),
           };
         });
-        state.articles = [...state.allArticles];
         if (state.lastPubmedResponse) {
           state.lastPubmedResponse = {
             ...state.lastPubmedResponse,
             articles: cloneJson(state.allArticles),
           };
         }
-        applyArticleSort();
+        applyArticleFilters();
+        renderMeta(state.lastPubmedResponse?.meta || null);
         renderResults();
         upsertActiveQueryRecord();
         scheduleProjectStateSave();
@@ -3292,19 +3515,20 @@ async function enrichCitationsInBackground() {
 }
 
 function applyArticleDataset(data, options = {}) {
-  const { persist = true } = options;
+  const { persist = true, mode = "query" } = options;
   state.datasetRevision += 1;
   closeDocumentViewer();
   state.lastPubmedResponse = data;
+  state.articleDatasetMode = mode;
   state.allArticles = Array.isArray(data.articles) ? data.articles : [];
-  state.articles = [...state.allArticles];
+  state.tableFilters = emptyTableFilters();
   state.downloadabilityRunId += 1;
   seedDownloadability(state.allArticles);
   state.selectedIds.clear();
   state.detailArticleId = null;
   closeDetailPopup();
+  applyArticleFilters();
   renderMeta(data.meta || null);
-  applyArticleSort();
   renderResults();
   if (persist) {
     upsertActiveQueryRecord();
@@ -3465,6 +3689,8 @@ async function runSidebarQuickSearch() {
     throw new Error("Sidebar query cannot be empty.");
   }
   const maxResults = normalizedNumber(els.sidebarQuickMaxResults, 5);
+  const yearStart = els.sidebarQuickYearStart?.value ? Number(els.sidebarQuickYearStart.value) : null;
+  const yearEnd = els.sidebarQuickYearEnd?.value ? Number(els.sidebarQuickYearEnd.value) : null;
   const preferredSource = normalizeSearchResource(
     els.sidebarQuickSearchResource?.value || runtime.searchResource,
     "openalex",
@@ -3478,6 +3704,8 @@ async function runSidebarQuickSearch() {
   }
   els.query.value = query;
   els.maxResults.value = String(maxResults);
+  els.yearStart.value = yearStart ? String(yearStart) : "";
+  els.yearEnd.value = yearEnd ? String(yearEnd) : "";
   if (els.searchResource) {
     els.searchResource.value = preferredSource;
   }
@@ -4020,6 +4248,25 @@ function bindEvents() {
 
   els.quickDownloadSelectedBtn?.addEventListener("click", () => {
     void downloadSelectedArticles();
+  });
+  els.tableFilterBtn?.addEventListener("click", () => {
+    setTableFilterOpen(true);
+  });
+  els.tableFilterOverlay?.addEventListener("click", () => {
+    setTableFilterOpen(false);
+  });
+  els.tableFilterClose?.addEventListener("click", () => {
+    setTableFilterOpen(false);
+  });
+  els.tableFilterClear?.addEventListener("click", () => {
+    state.tableFilters = emptyTableFilters();
+    applyArticleFilters();
+    renderMeta(state.lastPubmedResponse?.meta || null);
+    renderResults();
+    renderTableFilterPopup();
+  });
+  els.tableFilterApply?.addEventListener("click", () => {
+    applyTableFiltersFromPopup();
   });
   els.apiKeysBtn?.addEventListener("click", () => {
     setApiKeysDialogOpen(true);

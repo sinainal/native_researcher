@@ -1729,6 +1729,131 @@ body.is-document-viewer-open .native-document-viewer {
   white-space: pre-wrap;
 }
 
+.native-filter-popup {
+  width: min(960px, calc(100vw - 40px));
+  max-height: min(82vh, 820px);
+}
+
+.native-filter-body {
+  padding: 14px 16px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.native-filter-section {
+  border: 1px solid rgba(218, 226, 238, 0.92);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  overflow: hidden;
+}
+
+.native-filter-section-summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #52627a;
+  border-bottom: 1px solid rgba(226, 233, 243, 0.86);
+}
+
+.native-filter-section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.native-filter-section-summary span:last-child {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(235, 241, 249, 0.98);
+  color: #65758d;
+  text-align: center;
+  font-size: 0.7rem;
+}
+
+.native-filter-options {
+  max-height: 230px;
+  overflow: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.native-filter-option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  color: #24344e;
+  font-size: 0.8rem;
+}
+
+.native-filter-option:hover {
+  background: rgba(242, 246, 252, 0.96);
+}
+
+.native-filter-option input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--blue);
+}
+
+.native-filter-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-filter-option-count {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(235, 241, 249, 0.98);
+  color: #697891;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.native-filter-empty {
+  padding: 8px;
+  color: #8290a6;
+  font-size: 0.8rem;
+}
+
+.native-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.btn.is-active {
+  border-color: rgba(74, 105, 176, 0.7);
+  background: rgba(226, 236, 252, 0.72);
+  color: #24427b;
+}
+
+@media (max-width: 760px) {
+  .native-filter-body {
+    grid-template-columns: 1fr;
+  }
+}
+
 .data-table .row-check {
   width: 14px;
   height: 14px;

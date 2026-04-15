@@ -11,7 +11,7 @@ from typing import Iterator
 class WorkspaceDatabase:
     """Small SQLite wrapper for local workspace state."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -85,6 +85,7 @@ class WorkspaceDatabase:
                     project_id TEXT PRIMARY KEY
                         REFERENCES projects(id) ON DELETE CASCADE,
                     active_query_id TEXT,
+                    selected_query_ids_json TEXT NOT NULL DEFAULT '[]',
                     selected_ids_json TEXT NOT NULL DEFAULT '[]',
                     detail_article_id INTEGER,
                     sidebar_panel TEXT NOT NULL DEFAULT 'queries',
@@ -179,4 +180,9 @@ class WorkspaceDatabase:
                         pass
             if version < 4:
                 pass
+            if version < 5:
+                try:
+                    conn.execute("ALTER TABLE project_state ADD COLUMN selected_query_ids_json TEXT NOT NULL DEFAULT '[]'")
+                except sqlite3.OperationalError:
+                    pass
             conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")

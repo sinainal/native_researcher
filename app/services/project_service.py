@@ -259,6 +259,7 @@ class ProjectService:
             """
             SELECT
                 active_query_id,
+                selected_query_ids_json,
                 selected_ids_json,
                 detail_article_id,
                 sidebar_panel,
@@ -285,6 +286,7 @@ class ProjectService:
         )
         payload: dict[str, Any] = {
             "active_query_id": state_row["active_query_id"],
+            "selected_query_ids": self._loads_json(state_row["selected_query_ids_json"], default=[]),
             "selected_ids": self._loads_json(state_row["selected_ids_json"], default=[]),
             "detail_article_id": state_row["detail_article_id"],
             "sidebar_panel": state_row["sidebar_panel"] or "queries",
@@ -316,13 +318,14 @@ class ProjectService:
             conn.execute(
                 """
                 INSERT INTO project_state (
-                    project_id, active_query_id, selected_ids_json, detail_article_id,
+                    project_id, active_query_id, selected_query_ids_json, selected_ids_json, detail_article_id,
                     sidebar_panel, query_detail_id, downloadability_cache_json, current_session_id,
                     assistant_sessions_json, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     active_query_id = excluded.active_query_id,
+                    selected_query_ids_json = excluded.selected_query_ids_json,
                     selected_ids_json = excluded.selected_ids_json,
                     detail_article_id = excluded.detail_article_id,
                     sidebar_panel = excluded.sidebar_panel,
@@ -335,6 +338,7 @@ class ProjectService:
                 (
                     project_id,
                     payload.active_query_id,
+                    json.dumps(payload.selected_query_ids, ensure_ascii=True),
                     json.dumps(payload.selected_ids, ensure_ascii=True),
                     payload.detail_article_id,
                     payload.sidebar_panel,

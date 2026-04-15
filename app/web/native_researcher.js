@@ -1936,6 +1936,8 @@ function renderXmlStructuredMarkup(xmlText) {
 async function resolvePdfOutlineNode(pdfDoc, item) {
   const title = cleanXmlText(item?.title || "") || "Bookmark";
   let pageNumber = null;
+  let destinationName = "";
+  let destinationY = null;
   try {
     const destination = typeof item?.dest === "string"
       ? await pdfDoc.getDestination(item.dest)
@@ -1947,6 +1949,13 @@ async function resolvePdfOutlineNode(pdfDoc, item) {
       } else if (Number.isFinite(first)) {
         pageNumber = first + 1;
       }
+      const destinationMode = destination[1]?.name || "";
+      destinationName = destinationMode;
+      if (destinationMode === "XYZ" && Number.isFinite(destination[3])) {
+        destinationY = destination[3];
+      } else if ((destinationMode === "FitH" || destinationMode === "FitBH") && Number.isFinite(destination[2])) {
+        destinationY = destination[2];
+      }
     }
   } catch (_error) {
     pageNumber = null;
@@ -1955,7 +1964,13 @@ async function resolvePdfOutlineNode(pdfDoc, item) {
   const children = item?.items?.length
     ? await Promise.all(item.items.map((child) => resolvePdfOutlineNode(pdfDoc, child)))
     : [];
-  return { title, pageNumber, children };
+  return {
+    title,
+    pageNumber,
+    destinationName,
+    destinationY,
+    children,
+  };
 }
 
 function renderResolvedPdfOutline(nodes, depth = 0) {
@@ -1963,7 +1978,14 @@ function renderResolvedPdfOutline(nodes, depth = 0) {
     const childrenMarkup = node.children?.length ? renderResolvedPdfOutline(node.children, depth + 1) : "";
     const hasPage = Number.isFinite(node.pageNumber);
     return `
-      <button type="button" class="native-pdf-outline-item native-pdf-outline-depth-${Math.min(depth, 4)}" data-page-number="${hasPage ? node.pageNumber : ""}" ${hasPage ? "" : "disabled"}>
+      <button
+        type="button"
+        class="native-pdf-outline-item native-pdf-outline-depth-${Math.min(depth, 4)}"
+        data-page-number="${hasPage ? node.pageNumber : ""}"
+        data-destination-y="${Number.isFinite(node.destinationY) ? node.destinationY : ""}"
+        data-destination-name="${escapeHtml(node.destinationName || "")}"
+        ${hasPage ? "" : "disabled"}
+      >
         <span class="native-pdf-outline-item-title">${escapeHtml(node.title)}</span>
         ${hasPage ? `<span class="native-pdf-outline-item-page">${node.pageNumber}</span>` : ""}
       </button>
@@ -2021,7 +2043,20 @@ async function renderPdfDocumentViewer(fileUrl, token) {
           const pageNumber = Number.parseInt(button.getAttribute("data-page-number") || "", 10);
           if (!Number.isFinite(pageNumber) || pageNumber < 1) return;
           const pageNode = document.getElementById(`documentViewerPdfPage-${pageNumber}`);
-          pageNode?.scrollIntoView({ behavior: "smooth", block: "start" });
+          if (!pageNode) return;
+          const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
+          const pageHeight = Number.parseFloat(pageNode.getAttribute("data-pdf-height") || "");
+          const pageScale = Number.parseFloat(pageNode.getAttribute("data-page-scale") || "");
+          const destinationY = Number.parseFloat(button.getAttribute("data-destination-y") || "");
+          let nextTop = pageNode.offsetTop;
+          if (canvasWrap) {
+            nextTop += canvasWrap.offsetTop;
+          }
+          if (Number.isFinite(destinationY) && Number.isFinite(pageHeight) && Number.isFinite(pageScale)) {
+            const offsetWithinPage = Math.max(0, (pageHeight - destinationY) * pageScale - 8);
+            nextTop += offsetWithinPage;
+          }
+          pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
         });
       });
     } else {
@@ -2051,6 +2086,8 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       const pageCard = document.createElement("section");
       pageCard.className = "native-document-pdf-page";
       pageCard.id = `documentViewerPdfPage-${pageNumber}`;
+      pageCard.setAttribute("data-page-scale", String(scale));
+      pageCard.setAttribute("data-pdf-height", String(page.view?.[3] || pageViewport.height / scale));
       pageCard.innerHTML = `
         <div class="native-document-pdf-page-header">
           <span>Page ${pageNumber}</span>
@@ -2069,11 +2106,14 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       canvas.height = Math.floor(pageViewport.height * outputScale);
       canvas.style.width = `${Math.floor(pageViewport.width)}px`;
       canvas.style.height = `${Math.floor(pageViewport.height)}px`;
-      context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, canvas.width, canvas.height);
 
       await page.render({
         canvasContext: context,
         viewport: pageViewport,
+        transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null,
+        background: "#ffffff",
       }).promise;
       page.cleanup?.();
     }

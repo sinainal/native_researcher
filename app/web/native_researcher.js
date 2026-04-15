@@ -27,6 +27,7 @@ const state = {
   documentViewerMode: "table",
   documentViewerContentMode: "structured",
   documentViewerArtifactPaths: {},
+  documentViewerRenderToken: 0,
   assistantThreadId: null,
   assistantMessages: [],
   assistantOpen: true,
@@ -166,6 +167,10 @@ let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
 let resultsRenderScheduled = false;
 let appErrorLoggingBound = false;
+let pdfJsLoadPromise = null;
+
+const pdfJsScriptUrl = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js";
+const pdfJsWorkerUrl = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
 const downloadabilityLabels = {
   loading: "Downloading",
@@ -1623,6 +1628,45 @@ function documentTitleFromPath(filePath) {
   return normalized.split("/").pop() || "Document";
 }
 
+function configurePdfJsWorker(pdfjsLib) {
+  if (!pdfjsLib?.GlobalWorkerOptions) return;
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = pdfJsWorkerUrl;
+  }
+}
+
+async function loadPdfJs() {
+  if (window.pdfjsLib) {
+    configurePdfJsWorker(window.pdfjsLib);
+    return window.pdfjsLib;
+  }
+  if (!pdfJsLoadPromise) {
+    pdfJsLoadPromise = new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-pdfjs-loader="true"]');
+      if (existing && window.pdfjsLib) {
+        configurePdfJsWorker(window.pdfjsLib);
+        resolve(window.pdfjsLib);
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = pdfJsScriptUrl;
+      script.async = true;
+      script.dataset.pdfjsLoader = "true";
+      script.onload = () => {
+        if (!window.pdfjsLib) {
+          reject(new Error("PDF.js loaded but pdfjsLib is unavailable."));
+          return;
+        }
+        configurePdfJsWorker(window.pdfjsLib);
+        resolve(window.pdfjsLib);
+      };
+      script.onerror = () => reject(new Error("PDF.js could not be loaded."));
+      document.head.appendChild(script);
+    });
+  }
+  return pdfJsLoadPromise;
+}
+
 function cleanXmlText(value) {
   return String(value ?? "")
     .replace(/<\s*\/?\s*[A-Za-z][^>]*>/g, " ")
@@ -1664,6 +1708,7 @@ function setDocumentViewerRawMode(next) {
 }
 
 function closeDocumentViewer() {
+  state.documentViewerRenderToken += 1;
   state.documentViewer = null;
   state.documentViewerContentMode = "structured";
   state.documentViewerArtifactPaths = {};
@@ -1888,9 +1933,169 @@ function renderXmlStructuredMarkup(xmlText) {
   `;
 }
 
+async function resolvePdfOutlineNode(pdfDoc, item) {
+  const title = cleanXmlText(item?.title || "") || "Bookmark";
+  let pageNumber = null;
+  try {
+    const destination = typeof item?.dest === "string"
+      ? await pdfDoc.getDestination(item.dest)
+      : item?.dest;
+    if (Array.isArray(destination) && destination.length) {
+      const first = destination[0];
+      if (typeof first === "object" && first) {
+        pageNumber = (await pdfDoc.getPageIndex(first)) + 1;
+      } else if (Number.isFinite(first)) {
+        pageNumber = first + 1;
+      }
+    }
+  } catch (_error) {
+    pageNumber = null;
+  }
+
+  const children = item?.items?.length
+    ? await Promise.all(item.items.map((child) => resolvePdfOutlineNode(pdfDoc, child)))
+    : [];
+  return { title, pageNumber, children };
+}
+
+function renderResolvedPdfOutline(nodes, depth = 0) {
+  return nodes.map((node) => {
+    const childrenMarkup = node.children?.length ? renderResolvedPdfOutline(node.children, depth + 1) : "";
+    const hasPage = Number.isFinite(node.pageNumber);
+    return `
+      <button type="button" class="native-pdf-outline-item native-pdf-outline-depth-${Math.min(depth, 4)}" data-page-number="${hasPage ? node.pageNumber : ""}" ${hasPage ? "" : "disabled"}>
+        <span class="native-pdf-outline-item-title">${escapeHtml(node.title)}</span>
+        ${hasPage ? `<span class="native-pdf-outline-item-page">${node.pageNumber}</span>` : ""}
+      </button>
+      ${childrenMarkup ? `<div class="native-pdf-outline-children">${childrenMarkup}</div>` : ""}
+    `;
+  }).join("");
+}
+
+async function renderPdfDocumentViewer(fileUrl, token) {
+  const pdfjsLib = await loadPdfJs();
+  if (token !== state.documentViewerRenderToken) return;
+  if (!els.documentViewerBody) return;
+  els.documentViewerBody.innerHTML = `
+    <div class="native-document-pdf-shell">
+      <aside class="native-document-pdf-outline-panel">
+        <div class="native-document-pdf-outline-header">
+          <div class="native-document-pdf-outline-title">Bookmarks</div>
+          <div class="native-document-pdf-outline-status" id="documentViewerPdfOutlineStatus">Loading outline...</div>
+        </div>
+        <div class="native-document-pdf-outline-list" id="documentViewerPdfOutlineList"></div>
+      </aside>
+      <div class="native-document-pdf-pages-panel">
+        <div class="native-document-pdf-status" id="documentViewerPdfStatus">Loading PDF…</div>
+        <div class="native-document-pdf-pages" id="documentViewerPdfPages"></div>
+      </div>
+    </div>
+  `;
+
+  const outlineStatusEl = document.getElementById("documentViewerPdfOutlineStatus");
+  const outlineListEl = document.getElementById("documentViewerPdfOutlineList");
+  const pagesEl = document.getElementById("documentViewerPdfPages");
+  const statusEl = document.getElementById("documentViewerPdfStatus");
+  if (!outlineStatusEl || !outlineListEl || !pagesEl || !statusEl) return;
+
+  try {
+    const response = await fetch(fileUrl, { credentials: "same-origin" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.arrayBuffer();
+    const loadingTask = pdfjsLib.getDocument({ data });
+    const pdfDoc = await loadingTask.promise;
+    if (token !== state.documentViewerRenderToken) return;
+
+    const outlineItems = await pdfDoc.getOutline();
+    if (token !== state.documentViewerRenderToken) return;
+
+    if (outlineItems?.length) {
+      const resolvedOutline = await Promise.all(outlineItems.map((item) => resolvePdfOutlineNode(pdfDoc, item)));
+      if (token !== state.documentViewerRenderToken) return;
+      outlineStatusEl.textContent = "Bookmarks available";
+      outlineListEl.innerHTML = renderResolvedPdfOutline(resolvedOutline);
+      outlineListEl.querySelectorAll("[data-page-number]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const pageNumber = Number.parseInt(button.getAttribute("data-page-number") || "", 10);
+          if (!Number.isFinite(pageNumber) || pageNumber < 1) return;
+          const pageNode = document.getElementById(`documentViewerPdfPage-${pageNumber}`);
+          pageNode?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+    } else {
+      outlineStatusEl.textContent = "No bookmarks found";
+      outlineListEl.innerHTML = `
+        <div class="native-document-empty native-document-pdf-empty">
+          <div class="native-document-empty-title">No outline available</div>
+          <div class="native-document-empty-copy">This PDF does not expose bookmark metadata. Page rendering still works.</div>
+        </div>
+      `;
+    }
+
+    const firstPage = await pdfDoc.getPage(1);
+    const viewport = firstPage.getViewport({ scale: 1 });
+    const availableWidth = Math.max(320, pagesEl.getBoundingClientRect().width || 0);
+    const targetWidth = Math.max(640, availableWidth - 12);
+    const scale = Math.min(2.0, Math.max(0.75, targetWidth / viewport.width));
+    firstPage.cleanup?.();
+
+    pagesEl.innerHTML = "";
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+      if (token !== state.documentViewerRenderToken) return;
+      statusEl.textContent = `Rendering page ${pageNumber} of ${pdfDoc.numPages}…`;
+      const page = await pdfDoc.getPage(pageNumber);
+      if (token !== state.documentViewerRenderToken) return;
+      const pageViewport = page.getViewport({ scale });
+      const pageCard = document.createElement("section");
+      pageCard.className = "native-document-pdf-page";
+      pageCard.id = `documentViewerPdfPage-${pageNumber}`;
+      pageCard.innerHTML = `
+        <div class="native-document-pdf-page-header">
+          <span>Page ${pageNumber}</span>
+          <span>${Math.round(pageViewport.width)} × ${Math.round(pageViewport.height)} px</span>
+        </div>
+        <div class="native-document-pdf-canvas-wrap">
+          <canvas class="native-document-pdf-canvas"></canvas>
+        </div>
+      `;
+      pagesEl.appendChild(pageCard);
+
+      const canvas = pageCard.querySelector("canvas");
+      const context = canvas.getContext("2d", { alpha: false });
+      const outputScale = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(pageViewport.width * outputScale);
+      canvas.height = Math.floor(pageViewport.height * outputScale);
+      canvas.style.width = `${Math.floor(pageViewport.width)}px`;
+      canvas.style.height = `${Math.floor(pageViewport.height)}px`;
+      context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+
+      await page.render({
+        canvasContext: context,
+        viewport: pageViewport,
+      }).promise;
+      page.cleanup?.();
+    }
+    if (token !== state.documentViewerRenderToken) return;
+    statusEl.textContent = `Rendered ${pdfDoc.numPages} page${pdfDoc.numPages === 1 ? "" : "s"}`;
+  } catch (error) {
+    if (token !== state.documentViewerRenderToken) return;
+    pagesEl.innerHTML = `
+      <div class="native-document-empty">
+        <div class="native-document-empty-title">PDF could not be rendered</div>
+        <div class="native-document-empty-copy">${escapeHtml(error.message || "Unable to load PDF.")}</div>
+      </div>
+    `;
+    outlineStatusEl.textContent = "Unavailable";
+    statusEl.textContent = "Failed to render";
+  }
+}
+
 async function renderDocumentViewer() {
   const viewer = getDocumentViewerState();
   if (!viewer) return;
+  const renderToken = ++state.documentViewerRenderToken;
   const availableKinds = availableDocumentKinds(state.documentViewerArtifactPaths);
   if (els.documentViewerEyebrow) {
     els.documentViewerEyebrow.textContent = viewer.kind === "xml"
@@ -1918,10 +2123,12 @@ async function renderDocumentViewer() {
   if (viewer.kind === "pdf") {
     if (els.documentViewerRawBtn) els.documentViewerRawBtn.hidden = true;
     els.documentViewerBody.innerHTML = `
-      <div class="native-document-frame-shell">
-        <iframe class="native-document-frame" src="${escapeHtml(fileUrl)}" title="${escapeHtml(viewer.title || "PDF document")}"></iframe>
+      <div class="native-document-empty">
+        <div class="native-document-empty-title">Loading PDF viewer</div>
+        <div class="native-document-empty-copy">Rendering pages and bookmarks...</div>
       </div>
     `;
+    await renderPdfDocumentViewer(fileUrl, renderToken);
     return;
   }
 
@@ -1936,6 +2143,7 @@ async function renderDocumentViewer() {
       throw new Error(`HTTP ${response.status}`);
     }
     const xmlText = await response.text();
+    if (renderToken !== state.documentViewerRenderToken) return;
     if (state.documentViewerContentMode === "raw") {
       els.documentViewerBody.innerHTML = `
         <pre class="native-document-raw">${escapeHtml(xmlText)}</pre>

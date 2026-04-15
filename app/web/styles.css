@@ -1137,6 +1137,175 @@ body.is-document-viewer-open .native-document-viewer {
   background: #fff;
 }
 
+.native-document-pdf-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.native-document-pdf-outline-panel,
+.native-document-pdf-pages-panel {
+  min-height: 0;
+  border-radius: 18px;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.native-document-pdf-outline-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.native-document-pdf-outline-header {
+  padding: 14px 14px 12px;
+  border-bottom: 1px solid rgba(221, 228, 239, 0.95);
+}
+
+.native-document-pdf-outline-title {
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6f7f95;
+}
+
+.native-document-pdf-outline-status {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: #8a98ac;
+}
+
+.native-document-pdf-outline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.native-pdf-outline-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 9px 10px;
+  background: #fff;
+  color: #22324a;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--sh-xs);
+}
+
+.native-pdf-outline-item:hover {
+  border-color: rgba(30, 64, 175, 0.18);
+  background: #f6f9ff;
+}
+
+.native-pdf-outline-item:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.native-pdf-outline-item-title {
+  font-size: 0.86rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.native-pdf-outline-item-page {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--blue);
+  background: var(--blue-light);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.native-pdf-outline-children {
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(30, 64, 175, 0.14);
+  display: grid;
+  gap: 6px;
+}
+
+.native-pdf-outline-depth-1 {
+  background: linear-gradient(180deg, #fcfdff, #f7faff);
+}
+
+.native-pdf-outline-depth-2 {
+  background: linear-gradient(180deg, #fbfdff, #f6f9ff);
+}
+
+.native-pdf-outline-depth-3 {
+  background: linear-gradient(180deg, #faffff, #f4f8ff);
+}
+
+.native-document-pdf-pages-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.native-document-pdf-status {
+  font-size: 0.8rem;
+  color: #718196;
+  margin-bottom: 10px;
+}
+
+.native-document-pdf-pages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 18px;
+  padding-right: 4px;
+}
+
+.native-document-pdf-page {
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: var(--sh-sm);
+  padding: 12px;
+}
+
+.native-document-pdf-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.76rem;
+  color: #718196;
+  margin-bottom: 10px;
+}
+
+.native-document-pdf-canvas-wrap {
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  background: linear-gradient(180deg, #f8fafc, #eef3fb);
+  border-radius: 14px;
+  padding: 10px;
+}
+
+.native-document-pdf-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(17, 25, 39, 0.08);
+}
+
 .native-document-scroll {
   display: flex;
   flex-direction: column;

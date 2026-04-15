@@ -2182,6 +2182,7 @@ async function renderPdfDocumentViewer(fileUrl, token) {
   const pagesEl = document.getElementById("documentViewerPdfPages");
   const statusEl = document.getElementById("documentViewerPdfStatus");
   if (!outlineStatusEl || !outlineListEl || !pagesEl || !statusEl) return;
+  const outlineScrollPadding = 48;
 
   try {
     const response = await fetch(fileUrl, { credentials: "same-origin" });
@@ -2222,7 +2223,13 @@ async function renderPdfDocumentViewer(fileUrl, token) {
             }
             const exactLine = findExactPdfLineAnchor(pageNode, outlineTitle);
             if (exactLine) {
-              exactLine.scrollIntoView({ behavior: "smooth", block: "start" });
+              const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
+              let nextTop = pageNode.offsetTop;
+              if (canvasWrap) {
+                nextTop += canvasWrap.offsetTop;
+              }
+              nextTop += exactLine.offsetTop - outlineScrollPadding;
+              pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
               return;
             }
             const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
@@ -2232,10 +2239,10 @@ async function renderPdfDocumentViewer(fileUrl, token) {
               nextTop += canvasWrap.offsetTop;
             }
             if (anchor?.y != null) {
-              nextTop += anchor.y;
+              nextTop += anchor.y - outlineScrollPadding;
             } else if (Number.isFinite(destinationY) && viewport?.convertToViewportPoint) {
               const [, viewportY] = viewport.convertToViewportPoint(0, destinationY);
-              nextTop += Math.max(0, viewportY - 8);
+              nextTop += Math.max(0, viewportY - outlineScrollPadding);
             }
             pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
           })();

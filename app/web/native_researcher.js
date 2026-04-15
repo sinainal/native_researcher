@@ -1933,9 +1933,10 @@ function renderXmlStructuredMarkup(xmlText) {
   `;
 }
 
-async function resolvePdfOutlineNode(pdfDoc, item) {
+async function resolvePdfOutlineNode(pdfDoc, item, pageLabels = null) {
   const title = cleanXmlText(item?.title || "") || "Bookmark";
   let pageNumber = null;
+  let pageLabel = "";
   let destinationName = "";
   let destinationY = null;
   try {
@@ -1948,6 +1949,9 @@ async function resolvePdfOutlineNode(pdfDoc, item) {
         pageNumber = (await pdfDoc.getPageIndex(first)) + 1;
       } else if (Number.isFinite(first)) {
         pageNumber = first + 1;
+      }
+      if (Number.isFinite(pageNumber) && Array.isArray(pageLabels) && pageLabels[pageNumber - 1]) {
+        pageLabel = String(pageLabels[pageNumber - 1]);
       }
       const destinationMode = destination[1]?.name || "";
       destinationName = destinationMode;
@@ -1962,11 +1966,12 @@ async function resolvePdfOutlineNode(pdfDoc, item) {
   }
 
   const children = item?.items?.length
-    ? await Promise.all(item.items.map((child) => resolvePdfOutlineNode(pdfDoc, child)))
+    ? await Promise.all(item.items.map((child) => resolvePdfOutlineNode(pdfDoc, child, pageLabels)))
     : [];
   return {
     title,
     pageNumber,
+    pageLabel,
     destinationName,
     destinationY,
     children,
@@ -1987,7 +1992,7 @@ function renderResolvedPdfOutline(nodes, depth = 0) {
         ${hasPage ? "" : "disabled"}
       >
         <span class="native-pdf-outline-item-title">${escapeHtml(node.title)}</span>
-        ${hasPage ? `<span class="native-pdf-outline-item-page">${node.pageNumber}</span>` : ""}
+        ${hasPage ? `<span class="native-pdf-outline-item-page">${escapeHtml(node.pageLabel || String(node.pageNumber))}</span>` : ""}
       </button>
       ${childrenMarkup ? `<div class="native-pdf-outline-children">${childrenMarkup}</div>` : ""}
     `;
@@ -2029,12 +2034,14 @@ async function renderPdfDocumentViewer(fileUrl, token) {
     const loadingTask = pdfjsLib.getDocument({ data });
     const pdfDoc = await loadingTask.promise;
     if (token !== state.documentViewerRenderToken) return;
+    const pageLabels = await pdfDoc.getPageLabels().catch(() => null);
+    const pageViewportMap = new Map();
 
     const outlineItems = await pdfDoc.getOutline();
     if (token !== state.documentViewerRenderToken) return;
 
     if (outlineItems?.length) {
-      const resolvedOutline = await Promise.all(outlineItems.map((item) => resolvePdfOutlineNode(pdfDoc, item)));
+      const resolvedOutline = await Promise.all(outlineItems.map((item) => resolvePdfOutlineNode(pdfDoc, item, pageLabels)));
       if (token !== state.documentViewerRenderToken) return;
       outlineStatusEl.textContent = "Bookmarks available";
       outlineListEl.innerHTML = renderResolvedPdfOutline(resolvedOutline);
@@ -2045,16 +2052,15 @@ async function renderPdfDocumentViewer(fileUrl, token) {
           const pageNode = document.getElementById(`documentViewerPdfPage-${pageNumber}`);
           if (!pageNode) return;
           const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
-          const pageHeight = Number.parseFloat(pageNode.getAttribute("data-pdf-height") || "");
-          const pageScale = Number.parseFloat(pageNode.getAttribute("data-page-scale") || "");
           const destinationY = Number.parseFloat(button.getAttribute("data-destination-y") || "");
           let nextTop = pageNode.offsetTop;
           if (canvasWrap) {
             nextTop += canvasWrap.offsetTop;
           }
-          if (Number.isFinite(destinationY) && Number.isFinite(pageHeight) && Number.isFinite(pageScale)) {
-            const offsetWithinPage = Math.max(0, (pageHeight - destinationY) * pageScale - 8);
-            nextTop += offsetWithinPage;
+          const viewport = pageViewportMap.get(pageNumber);
+          if (Number.isFinite(destinationY) && viewport?.convertToViewportPoint) {
+            const [, viewportY] = viewport.convertToViewportPoint(0, destinationY);
+            nextTop += Math.max(0, viewportY - 8);
           }
           pagesEl.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
         });
@@ -2083,11 +2089,10 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       const page = await pdfDoc.getPage(pageNumber);
       if (token !== state.documentViewerRenderToken) return;
       const pageViewport = page.getViewport({ scale });
+      pageViewportMap.set(pageNumber, pageViewport);
       const pageCard = document.createElement("section");
       pageCard.className = "native-document-pdf-page";
       pageCard.id = `documentViewerPdfPage-${pageNumber}`;
-      pageCard.setAttribute("data-page-scale", String(scale));
-      pageCard.setAttribute("data-pdf-height", String(page.view?.[3] || pageViewport.height / scale));
       pageCard.innerHTML = `
         <div class="native-document-pdf-page-header">
           <span>Page ${pageNumber}</span>

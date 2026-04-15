@@ -1212,6 +1212,13 @@ body.is-document-viewer-open .native-document-viewer {
 .native-pdf-outline-depth-0 .native-pdf-outline-item-title {
   color: #162033;
   font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.native-pdf-outline-depth-1 .native-pdf-outline-item-title {
+  color: #22324a;
+  font-weight: 600;
+  font-size: 0.88rem;
 }
 
 .native-pdf-outline-item:disabled {

@@ -57,10 +57,10 @@ async def get_project(project_id: str, request: Request) -> ProjectSummary:
 @router.get("/{project_id}/downloads", response_model=ProjectDownloadListResponse)
 async def list_project_downloads(project_id: str, request: Request) -> ProjectDownloadListResponse:
     service = get_project_service(request)
-    items = service.list_project_downloads(project_id)
-    if items is None:
+    payload = service.list_project_downloads(project_id)
+    if payload is None:
         raise HTTPException(status_code=404, detail="Project not found.")
-    return ProjectDownloadListResponse(items=items)
+    return payload
 
 
 @router.get("/{project_id}/state", response_model=ProjectStatePayload)

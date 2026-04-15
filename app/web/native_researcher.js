@@ -8,6 +8,7 @@ const state = {
   projectName: "Project",
   projectRenaming: false,
   projectRenameSaving: false,
+  projectDownloadGroups: [],
   projectDownloads: [],
   downloadabilityCache: {},
   downloadabilityById: {},
@@ -388,9 +389,11 @@ async function runConcurrentQueue(items, concurrency, handler) {
 
 function renderProjectDownloads() {
   if (!els.workspaceDownloadList || !els.workspaceDownloadCount) return;
+  const groups = Array.isArray(state.projectDownloadGroups) ? state.projectDownloadGroups : [];
   const items = Array.isArray(state.projectDownloads) ? state.projectDownloads : [];
-  els.workspaceDownloadCount.textContent = String(items.length);
-  if (!items.length) {
+  const totalCount = items.length || groups.reduce((sum, group) => sum + (Array.isArray(group?.items) ? group.items.length : 0), 0);
+  els.workspaceDownloadCount.textContent = String(totalCount);
+  if (!groups.length && !items.length) {
     els.workspaceDownloadList.innerHTML = `
       <div class="native-workspace-library-empty">
         <div class="native-workspace-library-empty-title">No papers yet</div>
@@ -399,23 +402,74 @@ function renderProjectDownloads() {
     `;
     return;
   }
-  els.workspaceDownloadList.innerHTML = items
-    .map((item) => `
-      <button type="button" class="native-workspace-download-item" data-file-path="${escapeHtml(item.path)}" data-file-title="${escapeHtml(item.name)}" data-artifact-paths="${escapeHtml(JSON.stringify(item.artifact_paths || {}))}">
-        <span class="native-workspace-download-head">
-          <span class="native-workspace-download-name">${escapeHtml(item.name)}</span>
-          <span class="native-workspace-download-badges">
-            ${Array.isArray(item.artifact_types) && item.artifact_types.includes("pdf") && item.artifact_types.includes("xml")
-              ? '<span class="native-workspace-download-badge native-workspace-download-badge-dual">PDF + XML</span>'
-              : Array.isArray(item.artifact_types)
-                ? item.artifact_types.map((type) => `<span class="native-workspace-download-badge">${escapeHtml(type.toUpperCase())}</span>`).join("")
-                : ""}
-          </span>
-        </span>
-        <span class="native-workspace-download-meta">${escapeHtml(formatFileSize(item.size_bytes))} · ${escapeHtml(formatRelativeTime(item.modified_at))}</span>
+  const renderDownloadItem = (item) => {
+    const title = item?.name || item?.title || "Document";
+    const meta = [
+      formatFileSize(item?.size_bytes || 0),
+      formatRelativeTime(item?.modified_at || ""),
+    ].filter(Boolean);
+    return `
+      <button type="button" class="native-workspace-download-item native-workspace-download-item-child" data-file-path="${escapeHtml(item.path)}" data-file-title="${escapeHtml(title)}" data-artifact-paths="${escapeHtml(JSON.stringify(item.artifact_paths || {}))}">
+        <span class="native-workspace-download-item-title">${escapeHtml(title)}</span>
+        <span class="native-workspace-download-item-meta">${escapeHtml(meta.join(" · "))}</span>
       </button>
-    `)
-    .join("");
+    `;
+  };
+  const renderGroup = (group) => {
+    const itemsInGroup = Array.isArray(group?.items) ? group.items : [];
+    const queryLabel = group?.title || "Query";
+    const metaParts = [
+      group?.query ? group.query : "",
+      `${itemsInGroup.length} papers`,
+      formatFileSize(group?.size_bytes || 0),
+    ];
+    const groupBadges = [];
+    const artifactTypes = Array.isArray(group?.artifact_types) ? group.artifact_types : [];
+    if (artifactTypes.includes("pdf") && artifactTypes.includes("xml")) {
+      groupBadges.push('<span class="native-workspace-download-badge native-workspace-download-badge-dual">PDF + XML</span>');
+    } else {
+      artifactTypes.forEach((type) => {
+        groupBadges.push(`<span class="native-workspace-download-badge">${escapeHtml(type.toUpperCase())}</span>`);
+      });
+    }
+    return `
+      <details class="native-workspace-download-group">
+        <summary class="native-workspace-download-group-summary">
+          <span class="native-workspace-download-group-summary-main">
+            <span class="native-workspace-download-group-toggle" aria-hidden="true"></span>
+            <span class="native-workspace-download-group-title">${escapeHtml(queryLabel)}</span>
+            <span class="native-workspace-download-group-count">${escapeHtml(String(itemsInGroup.length))}</span>
+            <span class="native-workspace-download-badges native-workspace-download-group-badges">
+              ${groupBadges.join("")}
+            </span>
+          </span>
+          <span class="native-workspace-download-group-meta">${escapeHtml(metaParts.filter(Boolean).join(" · "))}</span>
+        </summary>
+        <div class="native-workspace-download-group-body">
+          ${itemsInGroup.map((item) => renderDownloadItem(item)).join("")}
+        </div>
+      </details>
+    `;
+  };
+  if (groups.length) {
+    els.workspaceDownloadList.innerHTML = groups.map((group) => renderGroup(group)).join("");
+    return;
+  }
+  els.workspaceDownloadList.innerHTML = `
+    <details class="native-workspace-download-group">
+      <summary class="native-workspace-download-group-summary">
+        <span class="native-workspace-download-group-summary-main">
+          <span class="native-workspace-download-group-toggle" aria-hidden="true"></span>
+          <span class="native-workspace-download-group-title">Downloads</span>
+          <span class="native-workspace-download-group-count">${escapeHtml(String(items.length))}</span>
+        </span>
+        <span class="native-workspace-download-group-meta">${escapeHtml(formatFileSize(items.reduce((sum, item) => sum + (item.size_bytes || 0), 0)))} · ${escapeHtml(formatRelativeTime(items[0]?.modified_at || ""))}</span>
+      </summary>
+      <div class="native-workspace-download-group-body">
+        ${items.map((item) => renderDownloadItem(item)).join("")}
+      </div>
+    </details>
+  `;
 }
 
 function sidebarPanelMeta(panel) {
@@ -452,6 +506,75 @@ function currentQueryRecord() {
   return state.queryHistory.find((item) => item.id === state.activeQueryId) || null;
 }
 
+function selectedQueryRecords() {
+  const selectedIds = state.selectedQueryIds instanceof Set ? state.selectedQueryIds : new Set();
+  if (!selectedIds.size) return [];
+  return state.queryHistory.filter((item) => selectedIds.has(item.id));
+}
+
+function selectedQueryDataset() {
+  const records = selectedQueryRecords();
+  if (!records.length) return null;
+  const articles = [];
+  const seen = new Set();
+  for (const record of records) {
+    for (const article of Array.isArray(record.articles) ? record.articles : []) {
+      const identity = articleIdentityKey(article);
+      if (!identity || seen.has(identity)) continue;
+      seen.add(identity);
+      articles.push(cloneJson(article));
+    }
+  }
+  return {
+    meta: {
+      ...(cloneJson(records[0]?.meta || {}) || {}),
+      full_query: "Selected query set",
+      total_results_found: records.reduce((sum, record) => sum + Number(record.meta?.total_results_found ?? record.articles?.length ?? 0), 0),
+      fetched_results: records.reduce((sum, record) => sum + Number(record.meta?.fetched_results ?? record.articles?.length ?? 0), 0),
+      request_count: records.reduce((sum, record) => sum + Number(record.meta?.request_count ?? 0), 0),
+      elapsed_ms: records.reduce((sum, record) => sum + Number(record.meta?.elapsed_ms ?? 0), 0),
+      primary_source: records[0]?.meta?.primary_source || runtime.searchResource || "pubmed",
+      sources_used: Array.from(new Set(
+        records.flatMap((record) => Array.isArray(record.meta?.sources_used) ? record.meta.sources_used : [])
+      )),
+      cache_hit: false,
+      selected_query_count: records.length,
+      selected_article_count: articles.length,
+    },
+    articles,
+  };
+}
+
+function applySelectedQuerySelection() {
+  const dataset = selectedQueryDataset();
+  if (!dataset) {
+    if (state.activeQueryId) {
+      restoreQueryRecord(state.activeQueryId);
+      return;
+    }
+    if (state.queryHistory.length) {
+      restoreQueryRecord(state.queryHistory[0].id);
+      return;
+    }
+    applyArticleDataset({ meta: null, articles: [] }, { persist: false });
+    renderQueryDetail();
+    return;
+  }
+  applyArticleDataset(dataset, { persist: false });
+}
+
+function syncSelectedQuerySelection() {
+  if (!(state.selectedQueryIds instanceof Set)) {
+    state.selectedQueryIds = new Set();
+  }
+  const validIds = new Set(state.queryHistory.map((item) => item.id));
+  for (const id of [...state.selectedQueryIds]) {
+    if (!validIds.has(id)) {
+      state.selectedQueryIds.delete(id);
+    }
+  }
+}
+
 function renderQueryDetail() {
   if (!els.workspaceQueryDetail) return;
   const record = state.queryHistory.find((item) => item.id === state.queryDetailId) || currentQueryRecord();
@@ -475,6 +598,10 @@ function renderQueryDetail() {
   const sourcesUsed = Array.isArray(meta.sources_used) && meta.sources_used.length
     ? meta.sources_used.map((item) => searchResourceLabel(item)).join(", ")
     : actualSource;
+  const downloadGroup = Array.isArray(state.projectDownloadGroups)
+    ? state.projectDownloadGroups.find((group) => group?.key === record.id)
+    : null;
+  const sharedCount = Number.isInteger(downloadGroup?.shared_item_count) ? downloadGroup.shared_item_count : 0;
   els.workspaceQueryDetail.innerHTML = `
     <div class="native-query-detail-header">
       <div class="native-query-detail-kicker">Query Details</div>
@@ -493,6 +620,10 @@ function renderQueryDetail() {
       <div class="native-query-detail-item">
         <div class="native-query-detail-label">Results</div>
         <div class="native-query-detail-value">${escapeHtml(String(meta.total_results_found ?? 0))} total · ${escapeHtml(String(meta.fetched_results ?? record.articles?.length ?? 0))} fetched</div>
+      </div>
+      <div class="native-query-detail-item">
+        <div class="native-query-detail-label">Shared articles</div>
+        <div class="native-query-detail-value">${escapeHtml(String(sharedCount))} shared across other query groups</div>
       </div>
       <div class="native-query-detail-item">
         <div class="native-query-detail-label">Requests</div>
@@ -520,6 +651,7 @@ function renderQueryDetail() {
 
 function renderQueryHistory() {
   if (!els.workspaceQueryList || !els.workspaceQueryCount) return;
+  syncSelectedQuerySelection();
   els.workspaceQueryCount.textContent = String(state.queryHistory.length);
   if (!state.queryHistory.length) {
     els.workspaceQueryList.innerHTML = `
@@ -531,23 +663,87 @@ function renderQueryHistory() {
     renderQueryDetail();
     return;
   }
-  els.workspaceQueryList.innerHTML = state.queryHistory
+  const selectedCount = state.selectedQueryIds instanceof Set ? state.selectedQueryIds.size : 0;
+  const allChecked = selectedCount > 0 && selectedCount === state.queryHistory.length;
+  const someChecked = selectedCount > 0 && selectedCount < state.queryHistory.length;
+  els.workspaceQueryList.innerHTML = `
+    <button type="button" class="native-query-history-select-all ${allChecked ? "is-active" : ""}" data-select-all-queries="1">
+      <span class="native-query-history-select-all-box ${allChecked ? "is-checked" : someChecked ? "is-indeterminate" : ""}" aria-hidden="true"></span>
+      <span class="native-query-history-select-all-label">All queries</span>
+      <span class="native-query-history-meta">${escapeHtml(String(state.queryHistory.length))} saved</span>
+    </button>
+    ${state.queryHistory
     .map((item) => `
       <button
         type="button"
         class="native-query-history-item ${item.id === state.activeQueryId ? "is-active" : ""}"
         data-query-id="${item.id}"
       >
-        <span class="native-query-history-title">${escapeHtml(item.title || "Saved query")}</span>
-        <span class="native-query-history-meta">${escapeHtml(formatSessionAgeCompact(item.updated_at))} · ${escapeHtml(String(item.meta?.fetched_results ?? item.articles?.length ?? 0))} items</span>
+        <span class="native-query-history-row">
+          <span class="native-query-history-check ${state.selectedQueryIds instanceof Set && state.selectedQueryIds.has(item.id) ? "is-checked" : ""}" aria-hidden="true"></span>
+          <span class="native-query-history-text">
+            <span class="native-query-history-title">${escapeHtml(item.title || "Saved query")}</span>
+            <span class="native-query-history-meta">${escapeHtml(formatSessionAgeCompact(item.updated_at))} · ${escapeHtml(String(item.meta?.fetched_results ?? item.articles?.length ?? 0))} items</span>
+          </span>
+        </span>
       </button>
     `)
-    .join("");
+    .join("")}
+  `;
   els.workspaceQueryList.querySelectorAll("[data-query-id]").forEach((node) => {
     node.addEventListener("click", () => {
       restoreQueryRecord(node.dataset.queryId);
     });
   });
+  els.workspaceQueryList.querySelectorAll("[data-query-id] .native-query-history-check").forEach((node) => {
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const queryButton = node.closest("[data-query-id]");
+      const queryId = queryButton?.dataset.queryId;
+      if (!queryId) return;
+      if (!(state.selectedQueryIds instanceof Set)) {
+        state.selectedQueryIds = new Set();
+      }
+      if (state.selectedQueryIds.has(queryId)) {
+        state.selectedQueryIds.delete(queryId);
+      } else {
+        state.selectedQueryIds.add(queryId);
+      }
+      if (state.selectedQueryIds.size === 0) {
+        if (state.activeQueryId) {
+          restoreQueryRecord(state.activeQueryId);
+        } else if (state.queryHistory.length) {
+          restoreQueryRecord(state.queryHistory[0].id);
+        }
+      } else {
+        applySelectedQuerySelection();
+        renderQueryHistory();
+        scheduleProjectStateSave();
+      }
+    });
+  });
+  const selectAllButton = els.workspaceQueryList.querySelector("[data-select-all-queries]");
+  if (selectAllButton) {
+    selectAllButton.addEventListener("click", () => {
+      if (!(state.selectedQueryIds instanceof Set)) {
+        state.selectedQueryIds = new Set();
+      }
+      if (state.selectedQueryIds.size === state.queryHistory.length && state.queryHistory.length > 0) {
+        state.selectedQueryIds.clear();
+        if (state.activeQueryId) {
+          restoreQueryRecord(state.activeQueryId);
+        } else if (state.queryHistory.length) {
+          restoreQueryRecord(state.queryHistory[0].id);
+        }
+      } else {
+        state.selectedQueryIds = new Set(state.queryHistory.map((item) => item.id));
+        applySelectedQuerySelection();
+        renderQueryHistory();
+        scheduleProjectStateSave();
+      }
+    });
+  }
   renderQueryDetail();
 }
 
@@ -617,6 +813,7 @@ function projectStatePayload() {
   persistAssistantSessions({ scheduleSave: false });
   return {
     active_query_id: state.activeQueryId,
+    selected_query_ids: [...(state.selectedQueryIds instanceof Set ? state.selectedQueryIds : new Set())],
     selected_ids: [...state.selectedIds],
     detail_article_id: state.detailArticleId,
     sidebar_panel: state.sidebarPanel,
@@ -659,13 +856,15 @@ function restoreQueryRecord(queryId) {
   state.activeQueryId = record.id;
   state.queryDetailId = record.id;
   state.lastSearchPayload = cloneJson(record.search_payload || null);
-  applyArticleDataset(
-    {
-      meta: cloneJson(record.meta || null),
-      articles: cloneJson(record.articles || []),
-    },
-    { persist: false }
-  );
+  if (!(state.selectedQueryIds instanceof Set) || state.selectedQueryIds.size === 0) {
+    applyArticleDataset(
+      {
+        meta: cloneJson(record.meta || null),
+        articles: cloneJson(record.articles || []),
+      },
+      { persist: false }
+    );
+  }
   if (record.search_payload) {
     els.query.value = record.search_payload.query || "";
     els.yearStart.value = record.search_payload.year_start ? String(record.search_payload.year_start) : "";
@@ -675,6 +874,9 @@ function restoreQueryRecord(queryId) {
     localStorage.setItem(searchResourceStorageKey, runtime.searchResource);
     if (els.searchResource) els.searchResource.value = runtime.searchResource;
     autoResizeTextarea(els.query);
+  }
+  if (state.selectedQueryIds instanceof Set && state.selectedQueryIds.size > 0) {
+    applySelectedQuerySelection();
   }
   syncSidebarQuickControls();
   renderQueryHistory();
@@ -700,12 +902,16 @@ async function loadProjectState() {
     state.queryHistory = Array.isArray(payload.query_history) ? payload.query_history : [];
     state.activeQueryId = payload.active_query_id || state.queryHistory[0]?.id || null;
     state.queryDetailId = payload.query_detail_id || state.activeQueryId;
+    state.selectedQueryIds = new Set(Array.isArray(payload.selected_query_ids) ? payload.selected_query_ids : []);
     state.downloadabilityCache = sanitizePersistedDownloadabilityCache(payload.downloadability_cache);
     state.selectedIds = new Set();
     state.detailArticleId = null;
     applyAssistantProjectState(payload);
     setSidebarPanel(payload.sidebar_panel || state.sidebarPanel);
     renderQueryHistory();
+    if (state.selectedQueryIds instanceof Set && state.selectedQueryIds.size > 0 && !state.activeQueryId) {
+      applySelectedQuerySelection();
+    }
     if (state.activeQueryId) {
       restoreQueryRecord(state.activeQueryId);
       state.selectedIds = restoredSelectedIds;
@@ -732,9 +938,11 @@ async function loadProjectState() {
     state.queryHistory = [];
     state.activeQueryId = null;
     state.queryDetailId = null;
+    state.selectedQueryIds = new Set();
     state.downloadabilityCache = {};
     state.selectedIds = new Set();
     state.detailArticleId = null;
+    state.selectedQueryIds = new Set();
     state.lastSearchPayload = null;
     state.lastPubmedResponse = null;
     applyArticleDataset({ meta: null, articles: [] }, { persist: false });
@@ -750,17 +958,23 @@ async function loadProjectState() {
 
 async function loadProjectDownloads() {
   if (!state.projectId) {
+    state.projectDownloadGroups = [];
     state.projectDownloads = [];
     renderProjectDownloads();
+    renderQueryDetail();
     return;
   }
   try {
     const payload = await fetchJson(`/app/projects/${encodeURIComponent(state.projectId)}/downloads`);
+    state.projectDownloadGroups = Array.isArray(payload.groups) ? payload.groups : [];
     state.projectDownloads = Array.isArray(payload.items) ? payload.items : [];
     renderProjectDownloads();
+    renderQueryDetail();
   } catch (error) {
+    state.projectDownloadGroups = [];
     state.projectDownloads = [];
     renderProjectDownloads();
+    renderQueryDetail();
     trackAppEvent("error", "project_download_list_failed", error.message || "Project downloads could not be loaded.", {
       project_id: state.projectId || "",
     });
@@ -3202,6 +3416,9 @@ async function runSearch() {
     throw new Error("Search query cannot be empty.");
   }
   els.searchBtn.disabled = true;
+  state.activeQueryId = null;
+  state.queryDetailId = null;
+  state.selectedQueryIds = new Set();
   state.lastSearchPayload = payload;
   trackAppEvent("info", "literature_search_started", payload.query, {
     project_id: state.projectId || "",
@@ -3253,6 +3470,9 @@ async function runSidebarQuickSearch() {
     "openalex",
   );
   if (els.sidebarQuickSearchBtn) els.sidebarQuickSearchBtn.disabled = true;
+  state.activeQueryId = null;
+  state.queryDetailId = null;
+  state.selectedQueryIds = new Set();
   if (els.sidebarQuickStatus) {
     els.sidebarQuickStatus.textContent = `Running ${searchResourceLabel(preferredSource)} search…`;
   }
@@ -3534,6 +3754,9 @@ function applyAssistantActions(actions) {
     const articles = Array.isArray(details.articles) ? details.articles : [];
     const meta = details.meta || null;
     if (typeof details.query === "string") {
+      state.activeQueryId = null;
+      state.queryDetailId = null;
+      state.selectedQueryIds = new Set();
       els.query.value = details.query;
       autoResizeTextarea(els.query);
     }

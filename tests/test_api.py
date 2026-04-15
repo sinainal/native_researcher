@@ -407,10 +407,12 @@ def test_api_endpoints() -> None:
                 assert project_downloads.status_code == 200
                 download_items = project_downloads.json()["items"]
                 assert len(download_items) == 2
-                combined_item = next(item for item in download_items if item["name"] == "sample-paper.pdf")
+                combined_item = next(item for item in download_items if item["path"].endswith("sample-paper.pdf"))
+                assert "sample" in combined_item["name"]
                 assert combined_item["path"].endswith("sample-paper.pdf")
                 assert combined_item["artifact_types"] == ["pdf", "xml"]
-                xml_item = next(item for item in download_items if item["name"] == "xml-only-study.xml")
+                xml_item = next(item for item in download_items if item["path"].endswith("xml-only-study.xml"))
+                assert "xml" in xml_item["name"]
                 assert xml_item["path"].endswith("xml-only-study.xml")
                 assert xml_item["artifact_types"] == ["xml"]
                 assert project.json()["pdf_count"] == 1
@@ -623,6 +625,188 @@ def test_api_endpoints() -> None:
                 )
                 assert pdf_test.status_code == 200
                 assert pdf_test.json()["success_count"] == 1
+
+                grouped_project = await client.post(
+                    "/app/projects",
+                    json={"name": "Grouped Downloads"},
+                )
+                assert grouped_project.status_code == 200
+                grouped_project_payload = grouped_project.json()
+                grouped_project_id = grouped_project_payload["id"]
+                grouped_project_dir = Path(grouped_project_payload["project_path"])
+                grouped_pdf_dir = grouped_project_dir / "pdfs" / "year_2024"
+                grouped_pdf_dir.mkdir(parents=True, exist_ok=True)
+
+                article_one_pdf = grouped_pdf_dir / "Docking_Study_article_oa_pdf.pdf"
+                article_two_pdf = grouped_pdf_dir / "Shared_Therapy_article_oa_pdf.pdf"
+                article_two_xml = grouped_pdf_dir / "Shared_Therapy_pmc_efetch_xml.xml"
+                article_three_xml = grouped_pdf_dir / "OpenAlex_Results_europe_pmc_repo_xml.xml"
+                article_one_pdf.write_bytes(b"%PDF-1.4\n% article one")
+                article_two_pdf.write_bytes(b"%PDF-1.4\n% article two pdf")
+                article_two_xml.write_text("<article><body><p>Article two xml</p></body></article>", encoding="utf-8")
+                article_three_xml.write_text("<article><body><p>Article three xml</p></body></article>", encoding="utf-8")
+
+                grouped_state = await client.put(
+                    f"/app/projects/{grouped_project_id}/state",
+                    json={
+                        "active_query_id": "query_docking",
+                        "selected_ids": [],
+                        "detail_article_id": None,
+                        "sidebar_panel": "downloads",
+                        "query_detail_id": None,
+                        "downloadability_cache": {
+                            "1001": {
+                                "status": "downloaded",
+                                "label": "Downloaded",
+                                "detail": "Ready to open.",
+                                "openUrl": f"/pdf/file?path={article_one_pdf}",
+                            },
+                            "1002": {
+                                "status": "downloaded",
+                                "label": "Downloaded",
+                                "detail": "Ready to open.",
+                                "openUrl": f"/pdf/file?path={article_two_pdf}",
+                            },
+                            "1003": {
+                                "status": "downloaded",
+                                "label": "Downloaded",
+                                "detail": "Ready to open.",
+                                "openUrl": f"/pdf/file?path={article_three_xml}",
+                            },
+                        },
+                        "query_history": [
+                            {
+                                "id": "query_docking",
+                                "title": "Docking query",
+                                "created_at": "2026-04-15T10:00:00+03:00",
+                                "updated_at": "2026-04-15T10:01:00+03:00",
+                                "search_payload": {
+                                    "query": "docking inhibitors",
+                                    "year_start": 2020,
+                                    "year_end": 2026,
+                                    "max_results": 10,
+                                    "batch_size": 10,
+                                    "min_cite": None,
+                                    "article_type": None,
+                                    "use_cache": True,
+                                },
+                                "meta": None,
+                                "articles": [
+                                    {
+                                        "id": 1001,
+                                        "pmid": "1001",
+                                        "title": "Docking study alpha",
+                                        "abstract": "",
+                                        "year": "2024",
+                                        "journal": "Test Journal",
+                                        "publication_date": "2024 Jan",
+                                        "article_type": "article",
+                                        "article_types": [],
+                                        "citation_count": 0,
+                                        "authors": [],
+                                        "keywords": [],
+                                        "mesh_terms": [],
+                                        "related_articles": [],
+                                        "reference_count": 0,
+                                        "doi": "10.1000/alpha",
+                                        "pmc_id": "PMC1001",
+                                    },
+                                    {
+                                        "id": 1002,
+                                        "pmid": "1002",
+                                        "title": "Shared therapy beta",
+                                        "abstract": "",
+                                        "year": "2024",
+                                        "journal": "Test Journal",
+                                        "publication_date": "2024 Feb",
+                                        "article_type": "article",
+                                        "article_types": [],
+                                        "citation_count": 0,
+                                        "authors": [],
+                                        "keywords": [],
+                                        "mesh_terms": [],
+                                        "related_articles": [],
+                                        "reference_count": 0,
+                                        "doi": "10.1000/beta",
+                                        "pmc_id": "PMC1002",
+                                    },
+                                ],
+                            },
+                            {
+                                "id": "query_openalex",
+                                "title": "OpenAlex query",
+                                "created_at": "2026-04-15T10:02:00+03:00",
+                                "updated_at": "2026-04-15T10:03:00+03:00",
+                                "search_payload": {
+                                    "query": "openalex xml extraction",
+                                    "year_start": 2020,
+                                    "year_end": 2026,
+                                    "max_results": 10,
+                                    "batch_size": 10,
+                                    "min_cite": None,
+                                    "article_type": None,
+                                    "use_cache": True,
+                                },
+                                "meta": None,
+                                "articles": [
+                                    {
+                                        "id": 1002,
+                                        "pmid": "1002",
+                                        "title": "Shared therapy beta",
+                                        "abstract": "",
+                                        "year": "2024",
+                                        "journal": "Test Journal",
+                                        "publication_date": "2024 Feb",
+                                        "article_type": "article",
+                                        "article_types": [],
+                                        "citation_count": 0,
+                                        "authors": [],
+                                        "keywords": [],
+                                        "mesh_terms": [],
+                                        "related_articles": [],
+                                        "reference_count": 0,
+                                        "doi": "10.1000/beta",
+                                        "pmc_id": "PMC1002",
+                                    },
+                                    {
+                                        "id": 1003,
+                                        "pmid": "1003",
+                                        "title": "OpenAlex result gamma",
+                                        "abstract": "",
+                                        "year": "2024",
+                                        "journal": "Test Journal",
+                                        "publication_date": "2024 Mar",
+                                        "article_type": "article",
+                                        "article_types": [],
+                                        "citation_count": 0,
+                                        "authors": [],
+                                        "keywords": [],
+                                        "mesh_terms": [],
+                                        "related_articles": [],
+                                        "reference_count": 0,
+                                        "doi": "10.1000/gamma",
+                                        "pmc_id": "PMC1003",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                )
+                assert grouped_state.status_code == 200
+
+                grouped_downloads = await client.get(f"/app/projects/{grouped_project_id}/downloads")
+                assert grouped_downloads.status_code == 200
+                grouped_payload = grouped_downloads.json()
+                assert {group["title"] for group in grouped_payload["groups"]} == {"Docking query", "OpenAlex query"}
+                docking_group = next(group for group in grouped_payload["groups"] if group["title"] == "Docking query")
+                openalex_group = next(group for group in grouped_payload["groups"] if group["title"] == "OpenAlex query")
+                assert docking_group["item_count"] == 2
+                assert openalex_group["item_count"] == 2
+                assert len(grouped_payload["items"]) == 3
+                shared_item = next(item for item in grouped_payload["items"] if item["name"] == "Shared therapy beta")
+                assert shared_item["path"].endswith("Shared_Therapy_article_oa_pdf.pdf")
+                assert shared_item["artifact_types"] == ["pdf", "xml"]
+                assert sorted(shared_item["query_titles"]) == ["Docking query", "OpenAlex query"]
 
     asyncio.run(runner())
 

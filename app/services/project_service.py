@@ -11,7 +11,9 @@ from typing import Any
 
 from app.schemas.project import (
     ProjectCreateRequest,
+    ProjectDownloadGroup,
     ProjectDownloadItem,
+    ProjectDownloadListResponse,
     ProjectSummary,
     ProjectUpdateRequest,
 )
@@ -113,12 +115,14 @@ class ProjectService:
         self._upsert_project_record(metadata)
         return self._read_state_from_db(project_id)
 
-    def list_project_downloads(self, project_id: str) -> list[ProjectDownloadItem] | None:
+    def list_project_downloads(self, project_id: str) -> ProjectDownloadListResponse | None:
         self._sync_workspace_from_disk()
         row = self._fetch_project_row(project_id)
         if row is None:
             return None
-        return self._sync_project_download_index(project_id, Path(row["project_path"]))
+        project_dir = Path(row["project_path"])
+        state = self._read_state_from_db(project_id)
+        return self._sync_project_download_index(project_id, project_dir, state)
 
     def update_project(self, project_id: str, payload: ProjectUpdateRequest) -> ProjectSummary | None:
         self._sync_workspace_from_disk()
@@ -395,7 +399,12 @@ class ProjectService:
             ),
         )
 
-    def _sync_project_download_index(self, project_id: str, project_dir: Path) -> list[ProjectDownloadItem]:
+    def _sync_project_download_index(
+        self,
+        project_id: str,
+        project_dir: Path,
+        state: ProjectStatePayload,
+    ) -> ProjectDownloadListResponse:
         self._ensure_project_layout(project_dir)
         download_dir = project_dir / "pdfs"
         download_dir.mkdir(parents=True, exist_ok=True)
@@ -491,35 +500,172 @@ class ProjectService:
                 }
             )
 
-        items: list[ProjectDownloadItem] = []
-        for group_rows in grouped.values():
+        clusters: dict[tuple[str, str], dict[str, Any]] = {}
+        for group_key, group_rows in grouped.items():
             group_rows.sort(key=lambda item: (item["modified_at"], item["file_name"]), reverse=True)
             preferred = next((item for item in group_rows if item["artifact_type"] == "pdf"), group_rows[0])
-            artifact_types: list[str] = []
             artifact_paths: dict[str, str] = {}
-            if any(item["artifact_type"] == "pdf" for item in group_rows):
-                artifact_types.append("pdf")
-                pdf_item = next((item for item in group_rows if item["artifact_type"] == "pdf"), None)
-                if pdf_item:
-                    artifact_paths["pdf"] = str(project_dir / pdf_item["relative_path"])
-            if any(item["artifact_type"] == "xml" for item in group_rows):
-                artifact_types.append("xml")
-                xml_item = next((item for item in group_rows if item["artifact_type"] == "xml"), None)
-                if xml_item:
-                    artifact_paths["xml"] = str(project_dir / xml_item["relative_path"])
-            items.append(
-                ProjectDownloadItem(
-                    name=preferred["file_name"],
-                    path=str(project_dir / preferred["relative_path"]),
-                    artifact_paths=artifact_paths,
-                    size_bytes=sum(item["size_bytes"] for item in group_rows),
-                    modified_at=group_rows[0]["modified_at"],
-                    artifact_types=artifact_types,
+            artifact_types: list[str] = []
+            for artifact_type in ("pdf", "xml"):
+                artifact_row = next((item for item in group_rows if item["artifact_type"] == artifact_type), None)
+                if artifact_row is None:
+                    continue
+                artifact_types.append(artifact_type)
+                artifact_paths[artifact_type] = str(project_dir / artifact_row["relative_path"])
+            cluster_key = self._download_cluster_key(group_key)
+            clusters[cluster_key] = {
+                "key": self._download_cluster_id(cluster_key),
+                "name": self._download_title_from_filename(preferred["file_name"]),
+                "path": str(project_dir / preferred["relative_path"]),
+                "artifact_paths": artifact_paths,
+                "artifact_types": artifact_types,
+                "size_bytes": sum(item["size_bytes"] for item in group_rows),
+                "modified_at": group_rows[0]["modified_at"],
+                "query_ids": [],
+                "query_titles": [],
+                "item_model": None,
+            }
+        query_records = list(state.query_history)
+        if not query_records:
+            query_records = []
+        grouped_queries: list[dict[str, Any]] = []
+        assigned_clusters: set[tuple[str, str]] = set()
+        ordered_queries = sorted(
+            query_records,
+            key=lambda query: (query.updated_at, query.created_at, query.title),
+            reverse=True,
+        )
+        for query in ordered_queries:
+            query_title = self._query_display_title(query.title, query.search_payload.query)
+            query_text = self._normalize_text(query.search_payload.query or query.title)
+            if not query_text:
+                query_text = self._normalize_text(query.title)
+            matched_cluster_keys: list[tuple[str, str]] = []
+            matched_query_titles: dict[tuple[str, str], str] = {}
+            seen_cluster_keys: set[tuple[str, str]] = set()
+            for article in query.articles:
+                article_title = self._normalize_text(getattr(article, "title", "") or "")
+                if not article_title:
+                    continue
+                for cluster_key, cluster in clusters.items():
+                    if cluster_key in seen_cluster_keys:
+                        continue
+                    cluster_title = self._normalize_text(str(cluster["name"]))
+                    if not self._download_title_matches(article_title, cluster_title):
+                        continue
+                    seen_cluster_keys.add(cluster_key)
+                    matched_cluster_keys.append(cluster_key)
+                    matched_query_titles[cluster_key] = (getattr(article, "title", "") or cluster["name"]).strip() or cluster["name"]
+            if not matched_cluster_keys:
+                continue
+            group_items: list[ProjectDownloadItem] = []
+            for cluster_key in matched_cluster_keys:
+                cluster = clusters.get(cluster_key)
+                if cluster is None:
+                    continue
+                assigned_clusters.add(cluster_key)
+                if query.id not in cluster["query_ids"]:
+                    cluster["query_ids"].append(query.id)
+                if query_title not in cluster["query_titles"]:
+                    cluster["query_titles"].append(query_title)
+                item = cluster.get("item_model")
+                item_name = matched_query_titles.get(cluster_key) or cluster["name"]
+                if item is None:
+                    item = ProjectDownloadItem(
+                        key=cluster["key"],
+                        name=item_name,
+                        path=cluster["path"],
+                        artifact_paths=dict(cluster["artifact_paths"]),
+                        size_bytes=int(cluster["size_bytes"]),
+                        modified_at=str(cluster["modified_at"]),
+                        artifact_types=list(cluster["artifact_types"]),
+                        query_ids=list(cluster["query_ids"]),
+                        query_titles=list(cluster["query_titles"]),
+                    )
+                    cluster["item_model"] = item
+                else:
+                    item.name = item_name
+                    item.query_ids = list(cluster["query_ids"])
+                    item.query_titles = list(cluster["query_titles"])
+                group_items.append(item)
+            if group_items:
+                group_items.sort(key=lambda item: (item.modified_at, item.name), reverse=True)
+                grouped_queries.append(
+                    {
+                        "key": query.id,
+                        "title": query_title,
+                        "query": query.search_payload.query.strip() or query.title.strip(),
+                        "item_count": len(group_items),
+                        "shared_item_count": sum(
+                            1
+                            for item in group_items
+                            if len(item.query_ids) > 1 or len(item.query_titles) > 1
+                        ),
+                        "size_bytes": sum(item.size_bytes for item in group_items),
+                        "modified_at": max(item.modified_at for item in group_items),
+                        "artifact_types": self._group_artifact_types(group_items),
+                        "items": group_items,
+                    }
                 )
+
+        if not grouped_queries and clusters:
+            fallback_items: list[ProjectDownloadItem] = []
+            for cluster in clusters.values():
+                item = cluster.get("item_model")
+                if item is None:
+                    item = ProjectDownloadItem(
+                        key=cluster["key"],
+                        name=cluster["name"],
+                        path=cluster["path"],
+                        artifact_paths=dict(cluster["artifact_paths"]),
+                        size_bytes=int(cluster["size_bytes"]),
+                        modified_at=str(cluster["modified_at"]),
+                        artifact_types=list(cluster["artifact_types"]),
+                        query_ids=[],
+                        query_titles=[],
+                    )
+                    cluster["item_model"] = item
+                fallback_items.append(item)
+            fallback_items.sort(key=lambda item: (item.modified_at, item.name), reverse=True)
+            grouped_queries.append(
+                {
+                    "key": "downloads",
+                    "title": "Downloads",
+                    "query": "",
+                    "item_count": len(fallback_items),
+                    "shared_item_count": sum(
+                        1 for item in fallback_items if len(item.query_ids) > 1 or len(item.query_titles) > 1
+                    ),
+                    "size_bytes": sum(item.size_bytes for item in fallback_items),
+                    "modified_at": max(item.modified_at for item in fallback_items),
+                    "artifact_types": self._group_artifact_types(fallback_items),
+                    "items": fallback_items,
+                }
             )
 
-        items.sort(key=lambda item: (item.modified_at, item.name), reverse=True)
-        return items
+        grouped_queries.sort(key=lambda item: (item["modified_at"], item["title"]), reverse=True)
+        group_models = [
+            ProjectDownloadGroup(
+                key=str(group["key"]),
+                title=str(group["title"]),
+                query=str(group["query"]),
+                item_count=int(group["item_count"]),
+                shared_item_count=int(group.get("shared_item_count", 0)),
+                size_bytes=int(group["size_bytes"]),
+                modified_at=str(group["modified_at"]),
+                artifact_types=list(group.get("artifact_types", [])),
+                items=group["items"],
+            )
+            for group in grouped_queries
+        ]
+
+        flattened: dict[str, ProjectDownloadItem] = {}
+        for group in group_models:
+            for item in group.items:
+                flattened.setdefault(item.key, item)
+
+        items = sorted(flattened.values(), key=lambda item: (item.modified_at, item.name), reverse=True)
+        return ProjectDownloadListResponse(groups=group_models, items=items)
 
     @classmethod
     def _download_group_key(cls, relative_path: Path) -> tuple[str, str]:
@@ -530,6 +676,110 @@ class ProjectService:
                 stem = stem[: -len(marker)]
                 break
         return relative_path.parent.as_posix(), stem.lower()
+
+    @staticmethod
+    def _download_cluster_key(group_key: tuple[str, str]) -> tuple[str, str]:
+        return group_key
+
+    @staticmethod
+    def _download_cluster_id(cluster_key: tuple[str, str]) -> str:
+        return "::".join(cluster_key)
+
+    @staticmethod
+    def _download_title_from_filename(file_name: str) -> str:
+        stem = Path(file_name).stem
+        for suffix in sorted(ProjectService._DOWNLOAD_SOURCE_SUFFIXES, key=len, reverse=True):
+            marker = f"_{suffix}"
+            if stem.endswith(marker):
+                stem = stem[: -len(marker)]
+                break
+        title = re.sub(r"[-_\s]+", " ", stem).strip()
+        return title or file_name
+
+    @staticmethod
+    def _group_artifact_types(items: list[ProjectDownloadItem]) -> list[str]:
+        seen: list[str] = []
+        for item in items:
+            for artifact_type in item.artifact_types:
+                if artifact_type not in seen:
+                    seen.append(artifact_type)
+        return seen
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+    @staticmethod
+    def _download_title_matches(article_title: str, cluster_title: str) -> bool:
+        article_sig = ProjectService._title_signature(article_title)
+        cluster_sig = ProjectService._title_signature(cluster_title)
+        if not article_sig or not cluster_sig:
+            return False
+        if article_sig == cluster_sig:
+            return True
+        article_compact = article_sig.replace(" ", "")
+        cluster_compact = cluster_sig.replace(" ", "")
+        if article_sig in cluster_sig or cluster_sig in article_sig:
+            return True
+        if article_compact in cluster_compact or cluster_compact in article_compact:
+            return True
+        article_tokens = set(article_sig.split())
+        cluster_tokens = set(cluster_sig.split())
+        if not article_tokens or not cluster_tokens:
+            return False
+        overlap = len(article_tokens & cluster_tokens)
+        coverage = overlap / min(len(article_tokens), len(cluster_tokens))
+        return coverage >= 0.58
+
+    @staticmethod
+    def _title_signature(value: str) -> str:
+        normalized = ProjectService._normalize_text(value)
+        if not normalized:
+            return ""
+        tokens: list[str] = []
+        for token in normalized.split():
+            if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+                token = token[:-1]
+            tokens.append(token)
+        return " ".join(tokens)
+
+    @staticmethod
+    def _query_display_title(title: str, query: str) -> str:
+        raw = (title or query or "Query").strip()
+        if len(raw) <= 64:
+            return raw
+        return f"{raw[:61].rstrip()}..."
+
+    @staticmethod
+    def _article_identity_key(article: Any) -> str:
+        if article is None:
+            return ""
+        if not isinstance(article, dict):
+            article = article.model_dump(mode="json") if hasattr(article, "model_dump") else dict(article)
+        pmid = str(article.get("pmid") or "").strip()
+        doi = str(article.get("doi") or "").strip().lower()
+        pmc_id = str(article.get("pmc_id") or "").strip().upper()
+        title = re.sub(r"\s+", " ", str(article.get("title") or "")).strip().lower()
+        return pmid or doi or pmc_id or title
+
+    @staticmethod
+    def _resolve_open_url_path(open_url: Any) -> str | None:
+        if not open_url:
+            return None
+        text = str(open_url)
+        if text.startswith("/pdf/file?path="):
+            return text.split("path=", 1)[1]
+        try:
+            from urllib.parse import urlparse, parse_qs
+
+            parsed = urlparse(text)
+            if parsed.path.endswith("/pdf/file"):
+                query = parse_qs(parsed.query)
+                path = (query.get("path") or [None])[0]
+                return str(path) if path else None
+        except Exception:
+            return None
+        return text if Path(text).is_absolute() else None
 
     @staticmethod
     def _artifact_type_from_path(relative_path: Path) -> str:

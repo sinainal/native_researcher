@@ -33,6 +33,7 @@ class ProjectQueryRecord(BaseModel):
 
 class ProjectStatePayload(BaseModel):
     active_query_id: str | None = Field(default=None, max_length=120)
+    selected_query_ids: list[str] = Field(default_factory=list)
     selected_ids: list[int] = Field(default_factory=list)
     detail_article_id: int | None = Field(default=None, ge=1)
     sidebar_panel: str = Field(default="queries", max_length=32)

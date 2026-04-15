@@ -21,15 +21,31 @@ class ProjectListResponse(BaseModel):
 
 
 class ProjectDownloadItem(BaseModel):
+    key: str = Field(..., min_length=1, max_length=200)
     name: str = Field(..., min_length=1, max_length=260)
     path: str = Field(..., min_length=1)
     artifact_paths: dict[str, str] = Field(default_factory=dict)
     size_bytes: int = Field(default=0, ge=0)
     modified_at: str = Field(..., min_length=1, max_length=64)
     artifact_types: list[str] = Field(default_factory=list)
+    query_ids: list[str] = Field(default_factory=list)
+    query_titles: list[str] = Field(default_factory=list)
+
+
+class ProjectDownloadGroup(BaseModel):
+    key: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=260)
+    query: str = Field(default="", max_length=2000)
+    item_count: int = Field(default=0, ge=0)
+    shared_item_count: int = Field(default=0, ge=0)
+    size_bytes: int = Field(default=0, ge=0)
+    modified_at: str = Field(..., min_length=1, max_length=64)
+    artifact_types: list[str] = Field(default_factory=list)
+    items: list[ProjectDownloadItem] = Field(default_factory=list)
 
 
 class ProjectDownloadListResponse(BaseModel):
+    groups: list[ProjectDownloadGroup] = Field(default_factory=list)
     items: list[ProjectDownloadItem] = Field(default_factory=list)
 
 

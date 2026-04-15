@@ -2182,7 +2182,7 @@ async function renderPdfDocumentViewer(fileUrl, token) {
   const pagesEl = document.getElementById("documentViewerPdfPages");
   const statusEl = document.getElementById("documentViewerPdfStatus");
   if (!outlineStatusEl || !outlineListEl || !pagesEl || !statusEl) return;
-  const outlineScrollPadding = 48;
+  const outlineScrollPadding = 10;
 
   try {
     const response = await fetch(fileUrl, { credentials: "same-origin" });

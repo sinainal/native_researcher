@@ -998,6 +998,305 @@ select {
   min-width: 58px;
 }
 
+.native-workspace-download-item,
+.file-open-btn {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.native-workspace-download-item {
+  text-align: left;
+}
+
+.native-results-card.is-hidden {
+  display: none;
+}
+
+.native-document-viewer {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.is-document-viewer-open .native-main {
+  overflow: hidden;
+}
+
+body.is-document-viewer-open .native-results-card {
+  display: none !important;
+}
+
+body.is-document-viewer-open .native-document-viewer {
+  position: relative;
+  z-index: 5;
+  background: #fff;
+}
+
+.native-document-viewer-toolbar {
+  gap: 14px;
+  align-items: center;
+}
+
+.native-document-viewer-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.native-document-viewer-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(209, 219, 232, 0.95);
+  background: linear-gradient(180deg, #ffffff, #f3f7fc);
+  color: #1f3150;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+  margin-left: auto;
+  order: 2;
+}
+
+.native-document-viewer-back:hover,
+.native-document-viewer-back:focus-visible {
+  border-color: rgba(165, 184, 213, 0.96);
+  background: linear-gradient(180deg, #ffffff, #eef4fb);
+}
+
+.native-document-viewer-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  order: 1;
+}
+
+.native-document-viewer-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7f8ea6;
+}
+
+.native-document-viewer-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1f2937;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 52vw;
+}
+
+.native-document-viewer-meta {
+  font-size: 0.76rem;
+  color: #7c8aa0;
+}
+
+.native-document-viewer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.native-document-viewer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.native-document-frame-shell {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.native-document-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.native-document-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.native-document-summary,
+.native-document-section {
+  padding: 18px 18px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.native-document-section-children {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-left: 14px;
+  border-left: 2px solid rgba(30, 64, 175, 0.12);
+}
+
+.native-document-section-depth-1 {
+  background: linear-gradient(180deg, #fcfdff, #f7faff);
+}
+
+.native-document-section-depth-2 {
+  background: linear-gradient(180deg, #fbfdff, #f6f9ff);
+  border-color: rgba(209, 219, 235, 0.95);
+}
+
+.native-document-section-depth-3 {
+  background: linear-gradient(180deg, #faffff, #f4f8ff);
+  border-color: rgba(205, 216, 232, 0.92);
+}
+
+.native-document-section-depth-4 {
+  background: linear-gradient(180deg, #f9fbff, #f2f7ff);
+  border-color: rgba(200, 212, 229, 0.9);
+}
+
+.native-document-summary-title {
+  font-size: 1.08rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #1f2937;
+}
+
+.native-document-summary-meta {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #6f7f95;
+}
+
+.native-document-summary-body {
+  margin-top: 12px;
+  font-size: 0.92rem;
+  line-height: 1.75;
+  color: #24344d;
+  white-space: pre-wrap;
+}
+
+.native-document-section-title {
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6f7f95;
+  margin-bottom: 12px;
+}
+
+.native-document-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.native-document-metadata-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: linear-gradient(180deg, #fff, #f8fbff);
+}
+
+.native-document-metadata-label {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #75839a;
+}
+
+.native-document-metadata-value {
+  margin-top: 4px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: #233451;
+  word-break: break-word;
+}
+
+.native-document-paragraph {
+  margin: 0 0 12px;
+  font-size: 0.92rem;
+  line-height: 1.75;
+  color: #24344d;
+}
+
+.native-document-section .native-document-section .native-document-paragraph {
+  font-size: 0.9rem;
+  line-height: 1.72;
+}
+
+.native-document-paragraph-empty,
+.native-document-empty {
+  color: #6f7f95;
+}
+
+.native-document-empty {
+  display: grid;
+  place-content: center;
+  text-align: center;
+  min-height: 260px;
+  padding: 20px;
+}
+
+.native-document-empty-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.native-document-empty-copy {
+  margin-top: 6px;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  color: #6f7f95;
+  max-width: 320px;
+}
+
+.native-document-raw {
+  margin: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(221, 228, 239, 0.95);
+  background: #fff;
+  color: #20304a;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.76rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .detail-link {
   color: var(--blue);
   text-decoration: underline;
@@ -3691,6 +3990,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  width: 100%;
   padding: 10px 12px;
   border-radius: 12px;
   text-decoration: none;

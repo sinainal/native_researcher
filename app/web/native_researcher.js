@@ -23,6 +23,10 @@ const state = {
   lastSearchPayload: null,
   lastPubmedResponse: null,
   detailArticleId: null,
+  documentViewer: null,
+  documentViewerMode: "table",
+  documentViewerContentMode: "structured",
+  documentViewerArtifactPaths: {},
   assistantThreadId: null,
   assistantMessages: [],
   assistantOpen: true,
@@ -119,6 +123,17 @@ const els = {
   detailPopupMeta: document.getElementById("detailPopupMeta"),
   detailPopupBody: document.getElementById("detailPopupBody"),
   detailPopupClose: document.getElementById("detailPopupClose"),
+  resultsCard: document.getElementById("resultsCard"),
+  documentViewerCard: document.getElementById("documentViewerCard"),
+  documentViewerBackBtn: document.getElementById("documentViewerBackBtn"),
+  documentViewerPdfBtn: document.getElementById("documentViewerPdfBtn"),
+  documentViewerXmlBtn: document.getElementById("documentViewerXmlBtn"),
+  documentViewerReloadBtn: document.getElementById("documentViewerReloadBtn"),
+  documentViewerRawBtn: document.getElementById("documentViewerRawBtn"),
+  documentViewerEyebrow: document.getElementById("documentViewerEyebrow"),
+  documentViewerTitle: document.getElementById("documentViewerTitle"),
+  documentViewerMeta: document.getElementById("documentViewerMeta"),
+  documentViewerBody: document.getElementById("documentViewerBody"),
 };
 
 const assistantModelLabelMap = {
@@ -379,7 +394,7 @@ function renderProjectDownloads() {
   }
   els.workspaceDownloadList.innerHTML = items
     .map((item) => `
-      <a class="native-workspace-download-item" href="${buildFileOpenUrl(item.path)}" target="_blank" rel="noreferrer">
+      <button type="button" class="native-workspace-download-item" data-file-path="${escapeHtml(item.path)}" data-file-title="${escapeHtml(item.name)}" data-artifact-paths="${escapeHtml(JSON.stringify(item.artifact_paths || {}))}">
         <span class="native-workspace-download-head">
           <span class="native-workspace-download-name">${escapeHtml(item.name)}</span>
           <span class="native-workspace-download-badges">
@@ -391,7 +406,7 @@ function renderProjectDownloads() {
           </span>
         </span>
         <span class="native-workspace-download-meta">${escapeHtml(formatFileSize(item.size_bytes))} · ${escapeHtml(formatRelativeTime(item.modified_at))}</span>
-      </a>
+      </button>
     `)
     .join("");
 }
@@ -1552,6 +1567,392 @@ function buildFileOpenUrl(filePath) {
   return `/pdf/file?path=${encodeURIComponent(filePath)}`;
 }
 
+function filePathFromOpenUrl(openUrl) {
+  if (!openUrl) return "";
+  try {
+    const parsed = new URL(openUrl, window.location.origin);
+    return parsed.searchParams.get("path") || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function normalizeDocumentPath(filePath) {
+  return String(filePath || "").trim();
+}
+
+function documentKindFromPath(filePath) {
+  const suffix = normalizeDocumentPath(filePath).split(".").pop()?.toLowerCase() || "";
+  if (suffix === "pdf") return "pdf";
+  if (suffix === "xml") return "xml";
+  return "text";
+}
+
+function artifactPathsFromValue(value) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return {
+      pdf: normalizeDocumentPath(value.pdf || value.PDF || value["pdf"]),
+      xml: normalizeDocumentPath(value.xml || value.XML || value["xml"]),
+    };
+  }
+  try {
+    const parsed = JSON.parse(String(value));
+    if (parsed && typeof parsed === "object") {
+      return {
+        pdf: normalizeDocumentPath(parsed.pdf || parsed.PDF || parsed["pdf"]),
+        xml: normalizeDocumentPath(parsed.xml || parsed.XML || parsed["xml"]),
+      };
+    }
+  } catch (_error) {
+    return {};
+  }
+  return {};
+}
+
+function availableDocumentKinds(artifactPaths = {}) {
+  const kinds = [];
+  if (normalizeDocumentPath(artifactPaths.pdf)) kinds.push("pdf");
+  if (normalizeDocumentPath(artifactPaths.xml)) kinds.push("xml");
+  return kinds;
+}
+
+function documentTitleFromPath(filePath) {
+  const normalized = normalizeDocumentPath(filePath);
+  if (!normalized) return "Document";
+  return normalized.split("/").pop() || "Document";
+}
+
+function cleanXmlText(value) {
+  return String(value ?? "")
+    .replace(/<\s*\/?\s*[A-Za-z][^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function xmlTextFromNode(node) {
+  return cleanXmlText(node?.textContent || "");
+}
+
+function xmlTextFromSelector(root, selector) {
+  return xmlTextFromNode(root?.querySelector(selector));
+}
+
+function getDocumentViewerState() {
+  return state.documentViewer || null;
+}
+
+function setDocumentViewerOpen(next, { immediate = false } = {}) {
+  void immediate;
+  state.documentViewerMode = next ? "document" : "table";
+  document.body.classList.toggle("is-document-viewer-open", Boolean(next));
+  if (els.resultsCard) {
+    els.resultsCard.hidden = Boolean(next);
+    els.resultsCard.style.display = next ? "none" : "";
+    els.resultsCard.classList.toggle("is-hidden", Boolean(next));
+  }
+  if (els.documentViewerCard) {
+    els.documentViewerCard.hidden = !next;
+  }
+}
+
+function setDocumentViewerRawMode(next) {
+  const viewer = getDocumentViewerState();
+  if (!viewer) return;
+  state.documentViewerContentMode = next ? "raw" : "structured";
+  renderDocumentViewer();
+}
+
+function closeDocumentViewer() {
+  state.documentViewer = null;
+  state.documentViewerContentMode = "structured";
+  state.documentViewerArtifactPaths = {};
+  setDocumentViewerOpen(false);
+  if (els.documentViewerBody) {
+    els.documentViewerBody.innerHTML = "";
+  }
+}
+
+async function openDocumentViewer(filePath, options = {}) {
+  const normalizedPath = normalizeDocumentPath(filePath);
+  if (!normalizedPath) return;
+  const kind = options.kind || documentKindFromPath(normalizedPath);
+  const artifactPaths = artifactPathsFromValue(options.artifactPaths);
+  state.documentViewer = {
+    path: normalizedPath,
+    kind,
+    title: options.title || documentTitleFromPath(normalizedPath),
+    source: options.source || "",
+    displayName: options.displayName || documentTitleFromPath(normalizedPath),
+  };
+  state.documentViewerArtifactPaths = artifactPaths;
+  state.documentViewerContentMode = kind === "xml" ? "structured" : "pdf";
+  setDocumentViewerOpen(true);
+  await renderDocumentViewer();
+}
+
+async function switchDocumentViewerKind(nextKind) {
+  const viewer = getDocumentViewerState();
+  if (!viewer) return;
+  const artifactPath = normalizeDocumentPath(state.documentViewerArtifactPaths?.[nextKind]);
+  if (!artifactPath) return;
+  state.documentViewer = {
+    ...viewer,
+    path: artifactPath,
+    kind: nextKind,
+    displayName: documentTitleFromPath(artifactPath),
+  };
+  state.documentViewerContentMode = nextKind === "xml" ? "structured" : "pdf";
+  await renderDocumentViewer();
+}
+
+function xmlSectionTitle(node) {
+  const titles = [];
+  const titleNodes = node.querySelectorAll(":scope > title, :scope > sec-title");
+  titleNodes.forEach((item) => {
+    const text = xmlTextFromNode(item);
+    if (text) titles.push(text);
+  });
+  const heading = titles[0] || xmlTextFromSelector(node, "title, sec-title") || "";
+  return heading || "Section";
+}
+
+function textContentLines(node) {
+  if (!node) return [];
+  const text = xmlTextFromNode(node);
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function xmlSectionParagraphs(node) {
+  const paragraphs = [];
+  node.querySelectorAll(":scope > p").forEach((item) => {
+    const text = xmlTextFromNode(item);
+    if (text) paragraphs.push(text);
+  });
+  if (!paragraphs.length) {
+    node.querySelectorAll(":scope > list > list-item").forEach((item) => {
+      const text = xmlTextFromNode(item);
+      if (text) paragraphs.push(text);
+    });
+  }
+  if (!paragraphs.length) {
+    const fallback = textContentLines(node);
+    if (fallback.length) paragraphs.push(...fallback);
+  }
+  return paragraphs;
+}
+
+function xmlSectionNode(node) {
+  return {
+    title: xmlSectionTitle(node),
+    paragraphs: xmlSectionParagraphs(node),
+    children: Array.from(node.children || [])
+      .filter((item) => item.localName === "sec")
+      .map((child) => xmlSectionNode(child)),
+  };
+}
+
+function xmlOutlineSections(root) {
+  const body = root.querySelector("body") || root;
+  const sections = [];
+  const topLevelSecs = Array.from(body.children || []).filter((item) => item.localName === "sec");
+  if (topLevelSecs.length) {
+    topLevelSecs.forEach((sec) => sections.push(xmlSectionNode(sec)));
+    return sections;
+  }
+
+  const bodyParagraphs = Array.from(body.children || [])
+    .filter((item) => item.localName === "p")
+    .map((item) => xmlTextFromNode(item))
+    .filter(Boolean);
+  if (bodyParagraphs.length) {
+    sections.push({
+      title: "Body",
+      paragraphs: bodyParagraphs,
+      nested: 0,
+    });
+  }
+  return sections;
+}
+
+function renderXmlSectionTree(sections, depth = 0) {
+  return sections.map((section) => {
+    const childMarkup = section.children?.length ? renderXmlSectionTree(section.children, depth + 1) : "";
+    const paragraphMarkup = section.paragraphs?.length
+      ? section.paragraphs.map((paragraph) => `<p class="native-document-paragraph">${escapeHtml(paragraph)}</p>`).join("")
+      : '<p class="native-document-paragraph native-document-paragraph-empty">No textual content found in this section.</p>';
+    return `
+      <section class="native-document-section native-document-section-depth-${Math.min(depth, 4)}">
+        <div class="native-document-section-title">${escapeHtml(section.title)}</div>
+        ${paragraphMarkup}
+        ${childMarkup ? `<div class="native-document-section-children">${childMarkup}</div>` : ""}
+      </section>
+    `;
+  }).join("");
+}
+
+function xmlDocumentSummary(xmlDoc) {
+  const root = xmlDoc.querySelector("article") || xmlDoc.documentElement;
+  const isElsevierResponse = root?.localName === "full-text-retrieval-response";
+  const title = cleanXmlText(
+    xmlTextFromSelector(root, "article-title")
+    || xmlTextFromSelector(root, "coredata > dc\\:title")
+    || xmlTextFromSelector(root, "title")
+    || "XML Document",
+  );
+  const journal = cleanXmlText(
+    xmlTextFromSelector(root, "journal-title")
+    || xmlTextFromSelector(root, "prism\\:publicationName")
+    || "",
+  );
+  const abstract = cleanXmlText(
+    xmlTextFromSelector(root, "abstract")
+    || xmlTextFromSelector(root, "summary")
+    || "",
+  );
+  return { title, journal, abstract, isElsevierResponse };
+}
+
+function xmlMetadataEntries(xmlDoc) {
+  const root = xmlDoc.querySelector("full-text-retrieval-response") || xmlDoc.documentElement;
+  const entries = [];
+  const add = (label, value) => {
+    const text = cleanXmlText(value);
+    if (text) entries.push({ label, value: text });
+  };
+
+  add("DOI", xmlTextFromSelector(root, "prism\\:doi") || xmlTextFromSelector(root, "article-id[pub-id-type='doi']"));
+  add("PII", xmlTextFromSelector(root, "pii"));
+  add("Journal", xmlTextFromSelector(root, "prism\\:publicationName") || xmlTextFromSelector(root, "journal-title"));
+  add("Date", xmlTextFromSelector(root, "prism\\:coverDisplayDate") || xmlTextFromSelector(root, "pub-date"));
+  add("Access", xmlTextFromSelector(root, "openaccessType") || xmlTextFromSelector(root, "openaccessArticle"));
+  add("Publisher", xmlTextFromSelector(root, "publisher-name") || xmlTextFromSelector(root, "publisher"));
+  const scidirLink = root.querySelector("link[rel='scidir']")?.getAttribute("href") || "";
+  add("Landing", scidirLink);
+  return entries;
+}
+
+function renderXmlStructuredMarkup(xmlText) {
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlText, "application/xml");
+  if (xmlDoc.querySelector("parsererror")) {
+    throw new Error("XML document could not be parsed.");
+  }
+  const summary = xmlDocumentSummary(xmlDoc);
+  const sections = xmlOutlineSections(xmlDoc);
+  const abstractText = summary.abstract
+    ? summary.abstract
+    : xmlTextFromSelector(xmlDoc, "abstract") || "Abstract not available.";
+  const metadataEntries = xmlMetadataEntries(xmlDoc);
+  const metadataMarkup = metadataEntries.length
+    ? `
+      <section class="native-document-section">
+        <div class="native-document-section-title">XML Metadata</div>
+        <div class="native-document-metadata-grid">
+          ${metadataEntries.map((entry) => `
+            <div class="native-document-metadata-item">
+              <div class="native-document-metadata-label">${escapeHtml(entry.label)}</div>
+              <div class="native-document-metadata-value">${escapeHtml(entry.value)}</div>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    `
+    : "";
+  const secMarkup = sections.length
+    ? renderXmlSectionTree(sections)
+    : `<div class="native-document-empty">No article sections were found in this XML file.</div>`;
+
+  return `
+    <div class="native-document-scroll">
+      <section class="native-document-summary">
+        <div class="native-document-summary-title">${escapeHtml(summary.title)}</div>
+        ${summary.journal ? `<div class="native-document-summary-meta">${escapeHtml(summary.journal)}</div>` : ""}
+        <div class="native-document-summary-body">${escapeHtml(abstractText)}</div>
+      </section>
+      ${summary.isElsevierResponse ? `
+        <div class="native-document-empty">
+          <div class="native-document-empty-title">Metadata-only XML</div>
+          <div class="native-document-empty-copy">This XML payload exposes article metadata but not a structured body. Use the landing page or another source for the full text body.</div>
+        </div>
+      ` : ""}
+      ${metadataMarkup}
+      <section class="native-document-section">
+        <div class="native-document-section-title">Structured Sections</div>
+        ${secMarkup}
+      </section>
+    </div>
+  `;
+}
+
+async function renderDocumentViewer() {
+  const viewer = getDocumentViewerState();
+  if (!viewer) return;
+  const availableKinds = availableDocumentKinds(state.documentViewerArtifactPaths);
+  if (els.documentViewerEyebrow) {
+    els.documentViewerEyebrow.textContent = viewer.kind === "xml"
+      ? "XML Viewer"
+      : availableKinds.includes("xml")
+        ? "PDF Viewer"
+        : "PDF Viewer";
+  }
+  if (els.documentViewerTitle) {
+    els.documentViewerTitle.textContent = viewer.title || viewer.displayName || "Document";
+  }
+  if (els.documentViewerMeta) {
+    els.documentViewerMeta.textContent = viewer.source ? `Source ${viewer.source}` : documentTitleFromPath(viewer.path);
+  }
+  if (els.documentViewerPdfBtn) {
+    els.documentViewerPdfBtn.hidden = !availableKinds.includes("pdf") || viewer.kind === "pdf";
+    els.documentViewerPdfBtn.textContent = viewer.kind === "pdf" ? "PDF" : "PDF";
+  }
+  if (els.documentViewerXmlBtn) {
+    els.documentViewerXmlBtn.hidden = !availableKinds.includes("xml") || viewer.kind === "xml";
+    els.documentViewerXmlBtn.textContent = viewer.kind === "xml" ? "XML" : "XML";
+  }
+  if (!els.documentViewerBody) return;
+  const fileUrl = buildFileOpenUrl(viewer.path);
+  if (viewer.kind === "pdf") {
+    if (els.documentViewerRawBtn) els.documentViewerRawBtn.hidden = true;
+    els.documentViewerBody.innerHTML = `
+      <div class="native-document-frame-shell">
+        <iframe class="native-document-frame" src="${escapeHtml(fileUrl)}" title="${escapeHtml(viewer.title || "PDF document")}"></iframe>
+      </div>
+    `;
+    return;
+  }
+
+  if (els.documentViewerRawBtn) {
+    els.documentViewerRawBtn.hidden = false;
+    els.documentViewerRawBtn.textContent = state.documentViewerContentMode === "raw" ? "Structured View" : "Raw XML";
+  }
+
+  try {
+    const response = await fetch(fileUrl, { headers: { Accept: "application/xml,text/xml,text/plain,*/*" } });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const xmlText = await response.text();
+    if (state.documentViewerContentMode === "raw") {
+      els.documentViewerBody.innerHTML = `
+        <pre class="native-document-raw">${escapeHtml(xmlText)}</pre>
+      `;
+    } else {
+      els.documentViewerBody.innerHTML = renderXmlStructuredMarkup(xmlText);
+    }
+  } catch (error) {
+    els.documentViewerBody.innerHTML = `
+      <div class="native-document-empty">
+        <div class="native-document-empty-title">Document could not be loaded</div>
+        <div class="native-document-empty-copy">${escapeHtml(error.message || "Unable to load document.")}</div>
+      </div>
+    `;
+  }
+}
+
 function isDownloadReadyStatus(status) {
   return ["high", "medium", "low", "downloaded"].includes(status);
 }
@@ -1644,7 +2045,7 @@ function downloadControlMarkup(article) {
       ? downloadabilityLabels.unavailable
       : "Download";
   return canOpen
-    ? `<a class="btn btn-primary btn-xs file-open-btn" href="${info.openUrl}" target="_blank" rel="noreferrer">Open</a>`
+    ? `<button type="button" class="btn btn-primary btn-xs file-open-btn" data-file-path="${escapeHtml(filePathFromOpenUrl(info.openUrl))}" data-file-title="${escapeHtml(article.title || "Document")}">Open</button>`
     : `<button type="button" class="${buttonClass}" data-id="${article.id}" ${disabled}>${escapeHtml(buttonLabel)}</button>`;
 }
 
@@ -2415,6 +2816,7 @@ async function enrichCitationsInBackground() {
 function applyArticleDataset(data, options = {}) {
   const { persist = true } = options;
   state.datasetRevision += 1;
+  closeDocumentViewer();
   state.lastPubmedResponse = data;
   state.allArticles = Array.isArray(data.articles) ? data.articles : [];
   state.articles = [...state.allArticles];
@@ -2514,6 +2916,7 @@ function renderResults() {
       openDetailPopup(Number(node.dataset.articleId), node.dataset.popupField);
     });
   });
+
 }
 
 async function runSearch() {
@@ -3291,6 +3694,42 @@ function bindEvents() {
 
   els.detailPopupOverlay.addEventListener("click", closeDetailPopup);
   els.detailPopupClose.addEventListener("click", closeDetailPopup);
+  els.documentViewerBackBtn?.addEventListener("click", () => {
+    closeDocumentViewer();
+  });
+  els.documentViewerPdfBtn?.addEventListener("click", () => {
+    void switchDocumentViewerKind("pdf");
+  });
+  els.documentViewerXmlBtn?.addEventListener("click", () => {
+    void switchDocumentViewerKind("xml");
+  });
+  els.documentViewerReloadBtn?.addEventListener("click", () => {
+    void renderDocumentViewer();
+  });
+  els.documentViewerRawBtn?.addEventListener("click", () => {
+    const next = state.documentViewerContentMode !== "raw";
+    setDocumentViewerRawMode(next);
+  });
+
+  document.addEventListener("click", (event) => {
+    const fileButton = event.target.closest(".file-open-btn");
+    if (fileButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      void openDocumentViewer(fileButton.dataset.filePath, {
+        title: fileButton.dataset.fileTitle || "Document",
+      });
+      return;
+    }
+    const downloadItem = event.target.closest(".native-workspace-download-item");
+    if (downloadItem) {
+      event.preventDefault();
+      void openDocumentViewer(downloadItem.dataset.filePath, {
+        title: downloadItem.dataset.fileTitle || "Document",
+        artifactPaths: artifactPathsFromValue(downloadItem.dataset.artifactPaths),
+      });
+    }
+  });
 }
 
 async function init() {

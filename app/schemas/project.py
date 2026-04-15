@@ -23,6 +23,7 @@ class ProjectListResponse(BaseModel):
 class ProjectDownloadItem(BaseModel):
     name: str = Field(..., min_length=1, max_length=260)
     path: str = Field(..., min_length=1)
+    artifact_paths: dict[str, str] = Field(default_factory=dict)
     size_bytes: int = Field(default=0, ge=0)
     modified_at: str = Field(..., min_length=1, max_length=64)
     artifact_types: list[str] = Field(default_factory=list)

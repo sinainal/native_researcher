@@ -496,14 +496,22 @@ class ProjectService:
             group_rows.sort(key=lambda item: (item["modified_at"], item["file_name"]), reverse=True)
             preferred = next((item for item in group_rows if item["artifact_type"] == "pdf"), group_rows[0])
             artifact_types: list[str] = []
+            artifact_paths: dict[str, str] = {}
             if any(item["artifact_type"] == "pdf" for item in group_rows):
                 artifact_types.append("pdf")
+                pdf_item = next((item for item in group_rows if item["artifact_type"] == "pdf"), None)
+                if pdf_item:
+                    artifact_paths["pdf"] = str(project_dir / pdf_item["relative_path"])
             if any(item["artifact_type"] == "xml" for item in group_rows):
                 artifact_types.append("xml")
+                xml_item = next((item for item in group_rows if item["artifact_type"] == "xml"), None)
+                if xml_item:
+                    artifact_paths["xml"] = str(project_dir / xml_item["relative_path"])
             items.append(
                 ProjectDownloadItem(
                     name=preferred["file_name"],
                     path=str(project_dir / preferred["relative_path"]),
+                    artifact_paths=artifact_paths,
                     size_bytes=sum(item["size_bytes"] for item in group_rows),
                     modified_at=group_rows[0]["modified_at"],
                     artifact_types=artifact_types,

@@ -2118,6 +2118,45 @@ async function findPdfOutlineAnchor(pdfDoc, pageNumber, title, scale, fallbackDe
   return null;
 }
 
+function renderPdfTextAnchors(lines, pageWidth, pageHeight) {
+  if (!lines?.length) return "";
+  return `
+    <div class="native-document-pdf-text-layer" style="width:${Math.max(1, Math.round(pageWidth))}px;height:${Math.max(1, Math.round(pageHeight))}px;">
+      ${lines.map((line) => `
+        <div
+          class="native-document-pdf-text-anchor"
+          data-text="${escapeHtml(line.normText || "")}"
+          data-raw-text="${escapeHtml(line.text || "")}"
+          style="left:${Math.max(0, Math.round(line.x))}px;top:${Math.max(0, Math.round(line.y))}px;"
+        ></div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function findExactPdfLineAnchor(pageNode, title) {
+  if (!pageNode || !title) return null;
+  const titleNorm = normalizePdfOutlineText(title);
+  const anchors = Array.from(pageNode.querySelectorAll(".native-document-pdf-text-anchor"));
+  if (!anchors.length) return null;
+  const scored = anchors
+    .map((anchor) => {
+      const text = String(anchor.dataset.text || "");
+      if (!text) return null;
+      let score = Number.POSITIVE_INFINITY;
+      if (text === titleNorm) score = 0;
+      else if (text.startsWith(titleNorm)) score = 1;
+      else if (text.includes(titleNorm)) score = 2;
+      else if (titleNorm.includes(text) && text.length > 3) score = 3;
+      if (!Number.isFinite(score)) return null;
+      return { anchor, score, len: text.length };
+    })
+    .filter(Boolean);
+  if (!scored.length) return null;
+  scored.sort((a, b) => a.score - b.score || a.len - b.len);
+  return scored[0].anchor;
+}
+
 async function renderPdfDocumentViewer(fileUrl, token) {
   const pdfjsLib = await loadPdfJs();
   if (token !== state.documentViewerRenderToken) return;
@@ -2172,10 +2211,8 @@ async function renderPdfDocumentViewer(fileUrl, token) {
           void (async () => {
             const pageNode = document.getElementById(`documentViewerPdfPage-${pageNumber}`);
             if (!pageNode) return;
-            const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
             const destinationY = Number.parseFloat(button.getAttribute("data-destination-y") || "");
             const outlineTitle = button.getAttribute("data-outline-title") || "";
-            const viewport = pageViewportMap.get(pageNumber);
             let anchor = pageAnchorMap.get(`${pageNumber}:${outlineTitle}`);
             if (!anchor) {
               anchor = await findPdfOutlineAnchor(pdfDoc, pageNumber, outlineTitle, scale, destinationY);
@@ -2183,6 +2220,13 @@ async function renderPdfDocumentViewer(fileUrl, token) {
                 pageAnchorMap.set(`${pageNumber}:${outlineTitle}`, anchor);
               }
             }
+            const exactLine = findExactPdfLineAnchor(pageNode, outlineTitle);
+            if (exactLine) {
+              exactLine.scrollIntoView({ behavior: "smooth", block: "start" });
+              return;
+            }
+            const canvasWrap = pageNode.querySelector(".native-document-pdf-canvas-wrap");
+            const viewport = pageViewportMap.get(pageNumber);
             let nextTop = pageNode.offsetTop;
             if (canvasWrap) {
               nextTop += canvasWrap.offsetTop;
@@ -2222,6 +2266,9 @@ async function renderPdfDocumentViewer(fileUrl, token) {
       if (token !== state.documentViewerRenderToken) return;
       const pageViewport = page.getViewport({ scale });
       pageViewportMap.set(pageNumber, pageViewport);
+      const textContent = await page.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false });
+      if (token !== state.documentViewerRenderToken) return;
+      const textLines = clusterPdfTextLines(textContent?.items || [], pageViewport);
       const pageCard = document.createElement("section");
       pageCard.className = "native-document-pdf-page";
       pageCard.id = `documentViewerPdfPage-${pageNumber}`;
@@ -2232,6 +2279,7 @@ async function renderPdfDocumentViewer(fileUrl, token) {
         </div>
         <div class="native-document-pdf-canvas-wrap">
           <canvas class="native-document-pdf-canvas"></canvas>
+          ${renderPdfTextAnchors(textLines, pageViewport.width, pageViewport.height)}
         </div>
       `;
       pagesEl.appendChild(pageCard);

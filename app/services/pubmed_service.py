@@ -75,7 +75,7 @@ class PubMedService:
         response = PubMedSearchResponse(
             meta=PubMedSearchMeta(
                 full_query=effective_request.query.strip(),
-                total_results_found=len(filtered),
+                total_results_found=int(result.total_results_found or len(result.articles) or len(filtered)),
                 fetched_results=len(filtered),
                 batch_size_used=effective_request.max_results,
                 request_count=result.request_count,

@@ -22,6 +22,7 @@ class SearchOrchestrator:
         return SearchResult(
             articles=self._dedupe_articles(result.articles)[:max_results],
             request_count=result.request_count,
+            total_results_found=result.total_results_found,
         )
 
     @staticmethod

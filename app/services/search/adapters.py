@@ -22,6 +22,7 @@ from app.utils.rate_limit import AsyncRateLimiter
 class SearchResult:
     articles: list[Article]
     request_count: int
+    total_results_found: int | None = None
 
 
 class BaseSearchAdapter:
@@ -47,7 +48,11 @@ class PubMedSearchAdapter(BaseSearchAdapter):
             min_cite=request.min_cite,
             article_type=request.article_type,
         )
-        return SearchResult(articles=result.articles, request_count=result.request_count)
+        return SearchResult(
+            articles=result.articles,
+            request_count=result.request_count,
+            total_results_found=result.total_results_found,
+        )
 
 
 class OpenAlexSearchAdapter(BaseSearchAdapter):
@@ -93,7 +98,8 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
 
         rows = payload.get("results", []) if isinstance(payload, dict) else []
         articles = [self._article_from_openalex(index + 1, row) for index, row in enumerate(rows)]
-        return SearchResult(articles=articles[:max_results], request_count=1)
+        total_results = int(((payload or {}).get("meta") or {}).get("count") or len(rows) or len(articles))
+        return SearchResult(articles=articles[:max_results], request_count=1, total_results_found=total_results)
 
     def _headers(self) -> dict[str, str]:
         headers = {"User-Agent": self.settings.request_user_agent}
@@ -190,7 +196,8 @@ class EuropePMCSearchAdapter(BaseSearchAdapter):
             return SearchResult(articles=[], request_count=1)
         rows = ((payload.get("resultList") or {}).get("result") or []) if isinstance(payload, dict) else []
         articles = [self._article_from_europe_pmc(index + 1, row) for index, row in enumerate(rows)]
-        return SearchResult(articles=articles[:max_results], request_count=1)
+        total_results = int((payload.get("hitCount") or payload.get("hitcount") or len(rows) or len(articles)) if isinstance(payload, dict) else len(articles))
+        return SearchResult(articles=articles[:max_results], request_count=1, total_results_found=total_results)
 
     @staticmethod
     def _article_from_europe_pmc(index: int, raw: dict[str, Any]) -> Article:
@@ -246,11 +253,14 @@ class PMCSearchAdapter(BaseSearchAdapter):
         try:
             search_response = await self.http_client.get("/esearch.fcgi", params=self._augment_params(params))
             search_response.raise_for_status()
-            id_list = (((search_response.json() or {}).get("esearchresult") or {}).get("idlist") or [])
+            search_payload = search_response.json() or {}
+            search_result = search_payload.get("esearchresult") or {}
+            id_list = search_result.get("idlist") or []
+            total_results = int(search_result.get("count", 0) or 0)
         except httpx.HTTPError:
             return SearchResult(articles=[], request_count=1)
         if not id_list:
-            return SearchResult(articles=[], request_count=1)
+            return SearchResult(articles=[], request_count=1, total_results_found=total_results)
         await self.rate_limiter.wait()
         try:
             fetch_response = await self.http_client.get(
@@ -265,8 +275,12 @@ class PMCSearchAdapter(BaseSearchAdapter):
             )
             fetch_response.raise_for_status()
         except httpx.HTTPError:
-            return SearchResult(articles=[], request_count=2)
-        return SearchResult(articles=self._parse_pmc_fetch(fetch_response.text)[:max_results], request_count=2)
+            return SearchResult(articles=[], request_count=2, total_results_found=total_results)
+        return SearchResult(
+            articles=self._parse_pmc_fetch(fetch_response.text)[:max_results],
+            request_count=2,
+            total_results_found=total_results,
+        )
 
     def _augment_params(self, params: dict[str, str | int]) -> dict[str, str | int]:
         if self.settings.ncbi_api_key:

@@ -219,6 +219,8 @@ def test_pubmed_service_prefers_openalex_when_available() -> None:
         assert result.meta.sources_used == ["openalex"]
         assert result.meta.fallback_used is False
         assert len(result.articles) == 2
+        assert result.articles[0].source_name == "openalex"
+        assert result.articles[0].source_record_id == "W1"
         assert result.articles[0].title == "OpenAlex Article One"
         assert result.articles[0].citation_count == 55
         assert result.articles[0].pmid == "10101"
@@ -360,6 +362,7 @@ def test_pubmed_service_supports_europe_pmc_search() -> None:
             )
 
         assert result.meta.primary_source == "europe_pmc"
+        assert result.articles[0].source_name == "europe_pmc"
         assert result.articles[0].pmc_id == "PMC777"
         assert result.articles[0].oa_pdf_url == "https://example.org/epmc.pdf"
 
@@ -415,6 +418,8 @@ def test_pubmed_service_supports_pmc_search() -> None:
             )
 
         assert result.meta.primary_source == "pmc"
+        assert result.articles[0].source_name == "pmc"
+        assert result.articles[0].source_record_id == "PMC12345"
         assert result.articles[0].pmc_id == "PMC12345"
         assert result.articles[0].doi == "10.1000/pmc"
 
@@ -512,5 +517,303 @@ def test_pubmed_service_respects_preferred_pubmed_source() -> None:
         assert result.meta.sources_used == ["pubmed"]
         assert result.meta.fallback_used is False
         assert len(result.articles) == 2
+        assert result.articles[0].source_name == "pubmed"
+        assert result.articles[0].source_record_id == "11"
+
+    asyncio.run(runner())
+
+
+def test_pubmed_service_supports_core_search() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            core_requests_per_second=0,
+            core_api_key="core-test",
+            download_root=Settings().download_root,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "api.core.ac.uk/v3/search/works" in str(request.url):
+                assert request.headers["Authorization"] == "core-test"
+                query = str(request.url.params.get("q") or "")
+                assert "yearPublished:" in query
+                assert "fullText:true" in query
+                return httpx.Response(
+                    200,
+                    json={
+                        "totalHits": 1,
+                        "results": [
+                            {
+                                "id": 445566,
+                                "doi": "https://doi.org/10.1000/core-native",
+                                "title": "CORE Native Article",
+                                "abstract": "Repository abstract.",
+                                "yearPublished": 2024,
+                                "publishedDate": "2024-03-04",
+                                "authors": [{"name": "Jane Doe"}],
+                                "pubmedId": 998877,
+                                "downloadUrl": "https://core.ac.uk/download/pdf/445566.pdf",
+                                "sourceFulltextUrls": ["https://repository.example.org/items/445566"],
+                                "links": [
+                                    {"type": "display", "url": "https://core.ac.uk/works/445566"},
+                                    {"type": "reader", "url": "https://core.ac.uk/reader/445566"},
+                                ],
+                                "journals": [{"title": "Repository Journal", "identifiers": ["1234-5678"]}],
+                                "documentType": ["research-article"],
+                                "citationCount": 19,
+                                "topics": [{"name": "Docking"}],
+                            }
+                        ],
+                    },
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(query="docking", max_results=1, preferred_source="core", year_start=2022, year_end=2026)
+            )
+
+        assert result.meta.primary_source == "core"
+        assert result.meta.request_count == 1
+        assert result.articles[0].source_name == "core"
+        assert result.articles[0].source_record_id == "445566"
+        assert result.articles[0].journal == "Repository Journal"
+        assert result.articles[0].pmid == "998877"
+        assert result.articles[0].oa_pdf_url == "https://core.ac.uk/download/pdf/445566.pdf"
+        assert result.articles[0].landing_page_url == "https://core.ac.uk/works/445566"
+        assert result.articles[0].article_type == "research-article"
+        assert result.articles[0].issns == ["1234-5678"]
+
+    asyncio.run(runner())
+
+
+def test_pubmed_service_uses_core_year_query_to_fill_recent_results() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            core_requests_per_second=0,
+            core_api_key="core-test",
+            download_root=Settings().download_root,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "api.core.ac.uk/v3/search/works" not in str(request.url):
+                raise AssertionError(f"Unexpected URL: {request.url}")
+            query = str(request.url.params.get("q") or "")
+            assert "yearPublished:2024" in query
+            assert "yearPublished:2023" in query
+            assert "yearPublished:2022" in query
+            assert "fullText:true" in query
+            return httpx.Response(
+                200,
+                json={
+                    "totalHits": 120,
+                    "results": [
+                        {
+                            "id": 2,
+                            "title": "Recent docking paper",
+                            "yearPublished": 2024,
+                            "publishedDate": "2024-01-01",
+                            "downloadUrl": "https://core.ac.uk/download/recent.pdf",
+                        }
+                    ],
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(
+                    query="docking",
+                    max_results=1,
+                    year_start=2022,
+                    year_end=2026,
+                    preferred_source="core",
+                )
+            )
+
+        assert result.meta.primary_source == "core"
+        assert result.meta.request_count == 1
+        assert len(result.articles) == 1
+        assert result.articles[0].title == "Recent docking paper"
+        assert result.articles[0].year == "2024"
+
+    asyncio.run(runner())
+
+
+def test_pubmed_service_supports_arxiv_search() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            arxiv_requests_per_second=0,
+            download_root=Settings().download_root,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "export.arxiv.org/api/query" in str(request.url):
+                return httpx.Response(
+                    200,
+                    text=(
+                        "<?xml version='1.0' encoding='UTF-8'?>"
+                        "<feed xmlns='http://www.w3.org/2005/Atom' "
+                        "xmlns:opensearch='http://a9.com/-/spec/opensearch/1.1/' "
+                        "xmlns:arxiv='http://arxiv.org/schemas/atom'>"
+                        "<opensearch:totalResults>1</opensearch:totalResults>"
+                        "<entry>"
+                        "<id>https://arxiv.org/abs/2401.12345v1</id>"
+                        "<updated>2024-01-03T00:00:00Z</updated>"
+                        "<published>2024-01-02T00:00:00Z</published>"
+                        "<title>  arXiv Native   Article </title>"
+                        "<summary>  Preprint abstract. </summary>"
+                        "<author><name>Jane Doe</name></author>"
+                        "<link href='https://arxiv.org/abs/2401.12345v1' rel='alternate' type='text/html'/>"
+                        "<link href='https://arxiv.org/pdf/2401.12345v1' rel='related' type='application/pdf'/>"
+                        "<arxiv:doi>10.1000/arxiv-native</arxiv:doi>"
+                        "<arxiv:journal_ref>Journal Ref</arxiv:journal_ref>"
+                        "<category term='cs.LG'/>"
+                        "<category term='q-bio.BM'/>"
+                        "<arxiv:primary_category term='cs.LG'/>"
+                        "</entry>"
+                        "</feed>"
+                    ),
+                )
+            raise AssertionError(f"Unexpected URL: {request.url}")
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(query="docking", max_results=1, preferred_source="arxiv")
+            )
+
+        assert result.meta.primary_source == "arxiv"
+        assert result.articles[0].source_name == "arxiv"
+        assert result.articles[0].source_record_id == "2401.12345v1"
+        assert result.articles[0].oa_pdf_url == "https://arxiv.org/pdf/2401.12345v1"
+        assert result.articles[0].landing_page_url == "https://arxiv.org/abs/2401.12345v1"
+        assert result.articles[0].mesh_terms == ["cs.LG"]
+        assert result.articles[0].keywords == ["cs.LG", "q-bio.BM"]
+        assert result.articles[0].article_type == "preprint"
+
+    asyncio.run(runner())
+
+
+def test_pubmed_service_paginates_arxiv_until_recent_hits_fill_requested_count() -> None:
+    async def runner() -> None:
+        settings = Settings(
+            pubmed_requests_per_second=0,
+            openalex_requests_per_second=0,
+            europe_pmc_requests_per_second=0,
+            arxiv_requests_per_second=0,
+            download_root=Settings().download_root,
+        )
+
+        def page(total: int, entries: list[tuple[str, str]]) -> str:
+            rendered_entries = "".join(
+                (
+                    "<entry>"
+                    f"<id>https://arxiv.org/abs/{record_id}</id>"
+                    "<updated>2024-01-03T00:00:00Z</updated>"
+                    f"<published>{published}</published>"
+                    f"<title>{record_id}</title>"
+                    "<summary>Abstract.</summary>"
+                    f"<link href='https://arxiv.org/abs/{record_id}' rel='alternate' type='text/html'/>"
+                    f"<link href='https://arxiv.org/pdf/{record_id}' rel='related' type='application/pdf'/>"
+                    "</entry>"
+                )
+                for record_id, published in entries
+            )
+            return (
+                "<?xml version='1.0' encoding='UTF-8'?>"
+                "<feed xmlns='http://www.w3.org/2005/Atom' "
+                "xmlns:opensearch='http://a9.com/-/spec/opensearch/1.1/' "
+                "xmlns:arxiv='http://arxiv.org/schemas/atom'>"
+                f"<opensearch:totalResults>{total}</opensearch:totalResults>"
+                f"{rendered_entries}"
+                "</feed>"
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "export.arxiv.org/api/query" not in str(request.url):
+                raise AssertionError(f"Unexpected URL: {request.url}")
+            assert request.url.params.get("sortBy") == "submittedDate"
+            start = int(request.url.params.get("start", "0"))
+            if start == 0:
+                return httpx.Response(
+                    200,
+                    text=page(
+                        50,
+                        [(f"old-{index}v1", "2016-01-02T00:00:00Z") for index in range(25)],
+                    ),
+                )
+            if start == 25:
+                return httpx.Response(
+                    200,
+                    text=page(
+                        50,
+                        [("recent-1v1", "2024-01-02T00:00:00Z"), ("recent-2v1", "2023-01-02T00:00:00Z")]
+                        + [(f"recent-pad-{index}v1", "2022-01-02T00:00:00Z") for index in range(23)],
+                    ),
+                )
+            return httpx.Response(200, text=page(50, []))
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+        ) as ncbi_client, httpx.AsyncClient(transport=transport) as search_client:
+            service = PubMedService(
+                client=NcbiClient(ncbi_client, settings),
+                cache=TTLCache(ttl_seconds=60, max_entries=8),
+                http_client=search_client,
+                settings=settings,
+            )
+            result = await service.search(
+                PubMedSearchRequest(
+                    query="graph neural networks",
+                    max_results=2,
+                    year_start=2022,
+                    year_end=2026,
+                    preferred_source="arxiv",
+                )
+            )
+
+        assert result.meta.primary_source == "arxiv"
+        assert result.meta.request_count == 2
+        assert len(result.articles) == 2
+        assert [article.source_record_id for article in result.articles] == ["recent-1v1", "recent-2v1"]
 
     asyncio.run(runner())

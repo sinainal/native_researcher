@@ -70,8 +70,8 @@ class HelperAIService:
 
     def _preferred_search_source(self) -> str:
         if self.pubmed_service is None:
-            return "openalex"
-        return getattr(self.pubmed_service.settings, "ai_primary_search_resource", "openalex")
+            return "pubmed"
+        return getattr(self.pubmed_service.settings, "ai_primary_search_resource", "pubmed")
 
     @staticmethod
     def _source_label(source: str) -> str:
@@ -848,7 +848,7 @@ class HelperAIService:
         preferred_source = getattr(
             self.pubmed_service.settings,
             "ai_primary_search_resource",
-            "openalex",
+            "pubmed",
         )
         query = self._sanitize_pubmed_query_text(raw_query) or raw_query
 
@@ -1026,7 +1026,7 @@ class HelperAIService:
             preferred_source=getattr(
                 self.pubmed_service.settings,
                 "ai_primary_search_resource",
-                "openalex",
+                "pubmed",
             ),
         )
         return await self.pubmed_service.search(request)

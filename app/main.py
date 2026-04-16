@@ -89,15 +89,18 @@ def create_app(
                 base_url=resolved_settings.ncbi_base_url,
                 timeout=timeout,
                 headers={"User-Agent": resolved_settings.request_user_agent},
+                follow_redirects=True,
             )
             search_client = httpx.AsyncClient(
                 timeout=timeout,
                 headers={"User-Agent": resolved_settings.request_user_agent},
+                follow_redirects=True,
             )
         if injected_pdf_service is None:
             shared_client = httpx.AsyncClient(
                 timeout=timeout,
                 headers={"User-Agent": resolved_settings.request_user_agent},
+                follow_redirects=True,
             )
         app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
         project_service = ProjectService(resolved_settings.workspace_root)

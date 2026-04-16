@@ -20,7 +20,7 @@ class SearchOrchestrator:
         adapter = self._adapters[source]
         result = await adapter.search(request, max_results=max_results)
         return SearchResult(
-            articles=self._dedupe_articles(result.articles)[:max_results],
+            articles=self._dedupe_articles(result.articles),
             request_count=result.request_count,
             total_results_found=result.total_results_found,
         )

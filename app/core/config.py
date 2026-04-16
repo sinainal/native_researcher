@@ -35,7 +35,7 @@ def _default_journal_metrics_url() -> str:
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"openalex", "pubmed", "europe_pmc", "pmc"}:
+    if normalized in {"openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"}:
         return normalized
     return default
 
@@ -62,17 +62,24 @@ class Settings:
     doi_resolver_base_url: str = "https://doi.org"
     openalex_base_url: str = "https://api.openalex.org"
     unpaywall_base_url: str = "https://api.unpaywall.org/v2"
+    core_base_url: str = "https://api.core.ac.uk/v3"
+    arxiv_base_url: str = "https://export.arxiv.org/api/query"
     assistant_api_key: str | None = None
     assistant_api_key_path: Path = APP_ROOT / "api_key.txt"
     ncbi_api_key_path: Path = APP_ROOT / "ncbi_api"
     unpaywall_email_path: Path = APP_ROOT / "unpaywall_email"
     openalex_api_key_path: Path = APP_ROOT / "openalex_api_key"
+    core_api_key_path: Path = APP_ROOT / "core_api_key"
     pubmed_oa_only_path: Path = APP_ROOT / "pubmed_oa_only"
     ai_primary_search_resource_path: Path = APP_ROOT / "ai_primary_search_resource"
     pdf_downloader_mode_path: Path = APP_ROOT / "pdf_downloader_mode"
+    pdf_unpaywall_fallback_enabled_path: Path = APP_ROOT / "pdf_unpaywall_fallback_enabled"
+    pdf_core_fallback_enabled_path: Path = APP_ROOT / "pdf_core_fallback_enabled"
+    pdf_arxiv_fallback_enabled_path: Path = APP_ROOT / "pdf_arxiv_fallback_enabled"
     unpaywall_email: str | None = None
     ncbi_api_key: str | None = None
     openalex_api_key: str | None = None
+    core_api_key: str | None = None
     pubmed_oa_only: bool = True
     ai_primary_search_resource: str = "pubmed"
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
@@ -81,6 +88,8 @@ class Settings:
     pubmed_requests_per_second: float = 2.5
     openalex_requests_per_second: float = 4.5
     europe_pmc_requests_per_second: float = 3.5
+    core_requests_per_second: float = 1.5
+    arxiv_requests_per_second: float = 2.0
     search_cache_ttl_seconds: int = 900
     search_cache_max_entries: int = 128
     helper_cache_ttl_seconds: int = 7200
@@ -91,6 +100,9 @@ class Settings:
     pdf_cache_max_entries: int = 256
     pdf_resolve_requests_per_second: float = 20.0
     pdf_downloader_mode: str = "pdf_xml"
+    pdf_unpaywall_fallback_enabled: bool = True
+    pdf_core_fallback_enabled: bool = False
+    pdf_arxiv_fallback_enabled: bool = False
     journal_metrics_enabled: bool = True
     journal_metrics_bootstrap_url: str = _default_journal_metrics_url()
     journal_metrics_source_name: str = "scimago_sjr_2023_zenodo"
@@ -103,6 +115,7 @@ class Settings:
         ncbi_api_key_path = Path(os.getenv("NCBI_API_KEY_FILE", str(APP_ROOT / "ncbi_api")))
         unpaywall_email_path = Path(os.getenv("UNPAYWALL_EMAIL_FILE", str(APP_ROOT / "unpaywall_email")))
         openalex_api_key_path = Path(os.getenv("OPENALEX_API_KEY_FILE", str(APP_ROOT / "openalex_api_key")))
+        core_api_key_path = Path(os.getenv("CORE_API_KEY_FILE", str(APP_ROOT / "core_api_key")))
         pubmed_oa_only_path = Path(os.getenv("PUBMED_OA_ONLY_FILE", str(APP_ROOT / "pubmed_oa_only")))
         ai_primary_search_resource_path = Path(
             os.getenv("AI_PRIMARY_SEARCH_RESOURCE_FILE", str(APP_ROOT / "ai_primary_search_resource"))
@@ -110,10 +123,24 @@ class Settings:
         pdf_downloader_mode_path = Path(
             os.getenv("PDF_DOWNLOADER_MODE_FILE", str(APP_ROOT / "pdf_downloader_mode"))
         )
+        pdf_unpaywall_fallback_enabled_path = Path(
+            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_unpaywall_fallback_enabled"))
+        )
+        pdf_core_fallback_enabled_path = Path(
+            os.getenv("PDF_CORE_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_core_fallback_enabled"))
+        )
+        pdf_arxiv_fallback_enabled_path = Path(
+            os.getenv("PDF_ARXIV_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_arxiv_fallback_enabled"))
+        )
         assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_secret_file(assistant_api_key_path)
         api_key = os.getenv("NCBI_API_KEY") or _read_secret_file(ncbi_api_key_path)
         unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_secret_file(unpaywall_email_path)
         openalex_api_key = os.getenv("OPENALEX_API_KEY") or _read_secret_file(openalex_api_key_path)
+        core_api_key = (
+            os.getenv("CORE_API_KEY")
+            or _read_secret_file(core_api_key_path)
+            or _read_secret_file(APP_ROOT.parent / "core_api_key")
+        )
         pubmed_oa_only = _parse_bool(
             os.getenv("PUBMED_OA_ONLY") or _read_secret_file(pubmed_oa_only_path),
             True,
@@ -125,6 +152,18 @@ class Settings:
         pdf_downloader_mode = _normalize_pdf_downloader_mode(
             os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
             "pdf_xml",
+        )
+        pdf_unpaywall_fallback_enabled = _parse_bool(
+            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED") or _read_secret_file(pdf_unpaywall_fallback_enabled_path),
+            True,
+        )
+        pdf_core_fallback_enabled = _parse_bool(
+            os.getenv("PDF_CORE_FALLBACK_ENABLED") or _read_secret_file(pdf_core_fallback_enabled_path),
+            False,
+        )
+        pdf_arxiv_fallback_enabled = _parse_bool(
+            os.getenv("PDF_ARXIV_FALLBACK_ENABLED") or _read_secret_file(pdf_arxiv_fallback_enabled_path),
+            False,
         )
         default_rps = 10.0 if api_key else 2.5
         download_root = Path(os.getenv("DOWNLOAD_ROOT", "downloads"))
@@ -141,17 +180,24 @@ class Settings:
                 "UNPAYWALL_BASE_URL",
                 "https://api.unpaywall.org/v2",
             ),
+            core_base_url=os.getenv("CORE_BASE_URL", "https://api.core.ac.uk/v3"),
+            arxiv_base_url=os.getenv("ARXIV_BASE_URL", "https://export.arxiv.org/api/query"),
             assistant_api_key=assistant_api_key,
             assistant_api_key_path=assistant_api_key_path,
             ncbi_api_key_path=ncbi_api_key_path,
             unpaywall_email_path=unpaywall_email_path,
             openalex_api_key_path=openalex_api_key_path,
+            core_api_key_path=core_api_key_path,
             pubmed_oa_only_path=pubmed_oa_only_path,
             ai_primary_search_resource_path=ai_primary_search_resource_path,
             pdf_downloader_mode_path=pdf_downloader_mode_path,
+            pdf_unpaywall_fallback_enabled_path=pdf_unpaywall_fallback_enabled_path,
+            pdf_core_fallback_enabled_path=pdf_core_fallback_enabled_path,
+            pdf_arxiv_fallback_enabled_path=pdf_arxiv_fallback_enabled_path,
             unpaywall_email=unpaywall_email,
             ncbi_api_key=api_key,
             openalex_api_key=openalex_api_key,
+            core_api_key=core_api_key,
             pubmed_oa_only=pubmed_oa_only,
             ai_primary_search_resource=ai_primary_search_resource,
             request_user_agent=os.getenv(
@@ -163,6 +209,8 @@ class Settings:
             pubmed_requests_per_second=float(os.getenv("PUBMED_REQUESTS_PER_SECOND", str(default_rps))),
             openalex_requests_per_second=float(os.getenv("OPENALEX_REQUESTS_PER_SECOND", "4.5")),
             europe_pmc_requests_per_second=float(os.getenv("EUROPE_PMC_REQUESTS_PER_SECOND", "3.5")),
+            core_requests_per_second=float(os.getenv("CORE_REQUESTS_PER_SECOND", "1.5")),
+            arxiv_requests_per_second=float(os.getenv("ARXIV_REQUESTS_PER_SECOND", "2.0")),
             search_cache_ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "900")),
             search_cache_max_entries=int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "128")),
             helper_cache_ttl_seconds=int(os.getenv("HELPER_CACHE_TTL_SECONDS", "7200")),
@@ -175,6 +223,9 @@ class Settings:
                 os.getenv("PDF_RESOLVE_REQUESTS_PER_SECOND", "20")
             ),
             pdf_downloader_mode=pdf_downloader_mode,
+            pdf_unpaywall_fallback_enabled=pdf_unpaywall_fallback_enabled,
+            pdf_core_fallback_enabled=pdf_core_fallback_enabled,
+            pdf_arxiv_fallback_enabled=pdf_arxiv_fallback_enabled,
             journal_metrics_enabled=journal_metrics_enabled,
             journal_metrics_bootstrap_url=os.getenv(
                 "JOURNAL_METRICS_BOOTSTRAP_URL",

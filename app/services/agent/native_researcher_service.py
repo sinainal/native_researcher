@@ -57,7 +57,7 @@ class NativeResearcherService:
         self.log_service.log(event, **payload)
 
     def _preferred_search_source(self) -> str:
-        return getattr(self.pubmed_service.settings, "ai_primary_search_resource", "openalex")
+        return getattr(self.pubmed_service.settings, "ai_primary_search_resource", "pubmed")
 
     @staticmethod
     def _source_label(source: str) -> str:
@@ -426,7 +426,7 @@ class NativeResearcherService:
                 preferred_source=getattr(
                     self.pubmed_service.settings,
                     "ai_primary_search_resource",
-                    "openalex",
+                    "pubmed",
                 ),
             )
         )

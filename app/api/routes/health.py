@@ -52,6 +52,10 @@ async def bootstrap(request: Request) -> dict[str, str | bool]:
         "ncbi_api_key": settings.ncbi_api_key or "",
         "unpaywall_email": settings.unpaywall_email or "",
         "openalex_api_key": settings.openalex_api_key or "",
+        "core_api_key": settings.core_api_key or "",
         "pubmed_oa_only": settings.pubmed_oa_only,
         "pdf_downloader_mode": settings.pdf_downloader_mode,
+        "pdf_unpaywall_fallback_enabled": settings.pdf_unpaywall_fallback_enabled,
+        "pdf_core_fallback_enabled": settings.pdf_core_fallback_enabled,
+        "pdf_arxiv_fallback_enabled": settings.pdf_arxiv_fallback_enabled,
     }

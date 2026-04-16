@@ -10,6 +10,12 @@ def source_label(source: str) -> str:
         return "PubMed"
     if source == "europe_pmc":
         return "Europe PMC"
+    if source == "pmc":
+        return "PMC"
+    if source == "core":
+        return "CORE"
+    if source == "arxiv":
+        return "arXiv"
     return "OpenAlex"
 
 
@@ -23,6 +29,21 @@ def source_query_guidance(source: str) -> str:
         return (
             "Write one concise Europe PMC friendly literature query string. "
             "Do not use PubMed field syntax."
+        )
+    if source == "pmc":
+        return (
+            "Write one concise PMC friendly literature query string focused on full text coverage. "
+            "Do not use PubMed field syntax."
+        )
+    if source == "core":
+        return (
+            "Write one concise CORE friendly literature query string for repository discovery. "
+            "Prefer plain concept phrases, not PubMed field syntax."
+        )
+    if source == "arxiv":
+        return (
+            "Write one concise arXiv friendly query string for preprint discovery. "
+            "Prefer plain concept phrases, not PubMed field syntax."
         )
     return (
         "Write one concise OpenAlex friendly literature query string. "
@@ -49,6 +70,33 @@ def source_tool_description(source: str) -> tuple[str, str]:
                 "Results can later be read in detail with `get_article_details` using `source=last_search`."
             ),
             "Concise Europe PMC friendly literature query string, not PubMed field syntax.",
+        )
+    if source == "pmc":
+        return (
+            (
+                f"Runs a new {label} full-text search. Use this when PMC coverage matters. "
+                "Pass one concise PMC friendly literature query string with the core concepts only. "
+                "Results can later be read in detail with `get_article_details` using `source=last_search`."
+            ),
+            "Concise PMC friendly literature query string, not PubMed field syntax.",
+        )
+    if source == "core":
+        return (
+            (
+                f"Runs a new {label} repository search. Use this when repository-hosted full text is likely helpful. "
+                "Pass one concise CORE friendly literature query string with the core concepts only. "
+                "Results can later be read in detail with `get_article_details` using `source=last_search`."
+            ),
+            "Concise CORE friendly literature query string, not PubMed field syntax.",
+        )
+    if source == "arxiv":
+        return (
+            (
+                f"Runs a new {label} preprint search. Use this when arXiv coverage is likely relevant. "
+                "Pass one concise arXiv friendly literature query string with the core concepts only. "
+                "Results can later be read in detail with `get_article_details` using `source=last_search`."
+            ),
+            "Concise arXiv friendly literature query string, not PubMed field syntax.",
         )
     return (
         (

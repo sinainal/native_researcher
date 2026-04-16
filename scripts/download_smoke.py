@@ -28,7 +28,7 @@ from app.utils.cache import TTLCache
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a simple search + download smoke test.")
     parser.add_argument("--query", required=True, help="Literature query to search.")
-    parser.add_argument("--source", default="pubmed", choices=["pubmed", "openalex", "europe_pmc", "pmc"], help="Primary search source.")
+    parser.add_argument("--source", default="pubmed", choices=["pubmed", "openalex", "europe_pmc", "pmc", "core", "arxiv"], help="Primary search source.")
     parser.add_argument("--mode", default="pdf_xml", choices=["pdf_xml", "xml", "pdf"], help="Downloader mode to test.")
     parser.add_argument("--max-results", type=int, default=1, help="Number of search hits to inspect.")
     parser.add_argument("--year-start", type=int, default=None)
@@ -44,14 +44,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _article_reference(item: Any) -> ArticleReference:
     return ArticleReference(
-        title=item.title,
-        year=item.year,
-        journal=item.journal,
-        doi=item.doi,
-        pmc_id=item.pmc_id,
-        pmid=item.pmid,
-        oa_pdf_url=item.oa_pdf_url,
-        landing_page_url=item.landing_page_url,
+        source_name=getattr(item, "source_name", None),
+        source_record_id=getattr(item, "source_record_id", None),
+        title=getattr(item, "title", None),
+        year=getattr(item, "year", None),
+        journal=getattr(item, "journal", None),
+        doi=getattr(item, "doi", None),
+        pmc_id=getattr(item, "pmc_id", None),
+        pmid=getattr(item, "pmid", None),
+        oa_pdf_url=getattr(item, "oa_pdf_url", None),
+        landing_page_url=getattr(item, "landing_page_url", None),
     )
 
 

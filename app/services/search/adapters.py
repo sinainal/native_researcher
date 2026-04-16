@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -148,6 +149,8 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
         related = [str(item).rstrip("/").rsplit("/", 1)[-1] for item in raw.get("related_works", []) or []]
         return Article(
             id=index,
+            source_name="openalex",
+            source_record_id=str(raw.get("id") or "").rstrip("/").rsplit("/", 1)[-1] or None,
             pmid=self._extract_pmid(raw.get("ids")),
             title=str(raw.get("display_name") or "Title not available"),
             abstract=self._reconstruct_abstract(raw.get("abstract_inverted_index")),
@@ -217,6 +220,8 @@ class EuropePMCSearchAdapter(BaseSearchAdapter):
                 landing_page_url = url
         return Article(
             id=index,
+            source_name="europe_pmc",
+            source_record_id=str(raw.get("id") or raw.get("pmcid") or raw.get("pmid") or "") or None,
             pmid=str(raw.get("pmid") or ""),
             title=str(raw.get("title") or "Title not available"),
             abstract=str(raw.get("abstractText") or ""),
@@ -315,6 +320,8 @@ class PMCSearchAdapter(BaseSearchAdapter):
             articles.append(
                 Article(
                     id=index,
+                    source_name="pmc",
+                    source_record_id=pmc_id or pmid or None,
                     pmid=pmid,
                     title=title,
                     abstract=abstract,
@@ -326,3 +333,416 @@ class PMCSearchAdapter(BaseSearchAdapter):
                 )
             )
         return articles
+
+
+class CoreSearchAdapter(BaseSearchAdapter):
+    source_name = "core"
+
+    def __init__(self, http_client: httpx.AsyncClient, settings: Settings) -> None:
+        self.http_client = http_client
+        self.settings = settings
+        self.rate_limiter = AsyncRateLimiter(settings.core_requests_per_second)
+
+    async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
+        if not self.settings.core_api_key:
+            return SearchResult(articles=[], request_count=0, total_results_found=0)
+        headers = {
+            "User-Agent": self.settings.request_user_agent,
+            "Authorization": self.settings.core_api_key,
+        }
+        page_size = min(max(max_results * 2, 25), 100)
+        query = self._build_core_query(request)
+        max_pages = 4 if (request.year_start is not None or request.year_end is not None or self.settings.pubmed_oa_only) else 6
+        request_count = 0
+        total_results: int | None = None
+        articles: list[Article] = []
+        recent_matches = 0
+        consecutive_failures = 0
+
+        for offset in range(0, page_size * max_pages, page_size):
+            await self.rate_limiter.wait()
+            await asyncio.sleep(0.05 + random.uniform(0.0, 0.03))
+            request_count += 1
+            try:
+                response = await self.http_client.get(
+                    f"{self.settings.core_base_url.rstrip('/')}/search/works",
+                    params={"q": query, "limit": page_size, "offset": offset},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                payload = response.json() or {}
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in {429, 500, 502, 503, 504} and consecutive_failures < 2:
+                    consecutive_failures += 1
+                    await asyncio.sleep(0.4 * consecutive_failures)
+                    continue
+                if request_count == 1:
+                    return SearchResult(articles=[], request_count=1)
+                break
+            except ValueError:
+                if consecutive_failures < 2:
+                    consecutive_failures += 1
+                    continue
+                break
+            except httpx.HTTPError:
+                break
+
+            rows = payload.get("results") or []
+            consecutive_failures = 0
+            total_results = int(payload.get("totalHits") or payload.get("total_hits") or total_results or 0)
+            page_articles = [
+                self._article_from_core(len(articles) + index + 1, row)
+                for index, row in enumerate(rows)
+                if isinstance(row, dict)
+            ]
+            articles.extend(page_articles)
+            recent_matches += sum(
+                1 for article in page_articles if self._matches_year_window(article, request.year_start, request.year_end)
+            )
+
+            if recent_matches >= max_results:
+                break
+            if not rows or (total_results is not None and offset + page_size >= total_results):
+                break
+
+        return SearchResult(
+            articles=articles,
+            request_count=request_count,
+            total_results_found=total_results or len(articles),
+        )
+
+    def _build_core_query(self, request: PubMedSearchRequest) -> str:
+        parts = [request.query.strip()]
+        year_filter = self._core_year_filter(request.year_start, request.year_end)
+        if year_filter:
+            parts.append(year_filter)
+        if self.settings.pubmed_oa_only:
+            parts.append("fullText:true")
+        return " AND ".join(part for part in parts if part)
+
+    @staticmethod
+    def _core_year_filter(year_start: int | None, year_end: int | None) -> str | None:
+        if year_start is None and year_end is None:
+            return None
+        start = year_start if year_start is not None else year_end
+        end = year_end if year_end is not None else year_start
+        if start is None or end is None:
+            return None
+        if start > end:
+            start, end = end, start
+        if end - start > 10:
+            return None
+        return "(" + " OR ".join(f"yearPublished:{year}" for year in range(end, start - 1, -1)) + ")"
+
+    @staticmethod
+    def _matches_year_window(article: Article, year_start: int | None, year_end: int | None) -> bool:
+        year_value = str(article.year or "").strip()
+        if not year_value.isdigit():
+            return False
+        year = int(year_value)
+        if year_start is not None and year < year_start:
+            return False
+        if year_end is not None and year > year_end:
+            return False
+        return True
+
+    @staticmethod
+    def _core_authors(raw: dict[str, Any]) -> list[str]:
+        authors: list[str] = []
+        for item in raw.get("authors") or []:
+            if isinstance(item, str):
+                label = item.strip()
+            elif isinstance(item, dict):
+                label = str(item.get("name") or item.get("displayName") or "").strip()
+            else:
+                label = ""
+            if label and label not in authors:
+                authors.append(label)
+        return authors
+
+    @staticmethod
+    def _core_journal(raw: dict[str, Any]) -> tuple[str | None, list[str]]:
+        journals = raw.get("journals") or []
+        journal_name: str | None = None
+        identifiers: list[str] = []
+        for item in journals:
+            if not isinstance(item, dict):
+                continue
+            if journal_name is None:
+                journal_name = str(item.get("title") or item.get("name") or "").strip() or None
+            for identifier in item.get("identifiers") or []:
+                value = str(identifier or "").strip()
+                if value and value not in identifiers:
+                    identifiers.append(value)
+        if journal_name is None:
+            journal_name = str(raw.get("publisher") or "").strip() or None
+        return journal_name, identifiers
+
+    @staticmethod
+    def _core_identifier(raw: dict[str, Any], target_type: str) -> str | None:
+        expected = target_type.strip().upper()
+        for item in raw.get("identifiers") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().upper() != expected:
+                continue
+            value = str(item.get("identifier") or "").strip()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _core_document_types(raw: dict[str, Any]) -> tuple[str | None, list[str]]:
+        value = raw.get("documentType")
+        if isinstance(value, list):
+            types = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            text = str(value or "").strip()
+            types = [text] if text else []
+        return (types[0] if types else None), types
+
+    @staticmethod
+    def _core_keywords(raw: dict[str, Any]) -> list[str]:
+        for key in ("topics", "subjects", "keywords"):
+            values = raw.get(key) or []
+            labels: list[str] = []
+            for item in values:
+                if isinstance(item, str):
+                    label = item.strip()
+                elif isinstance(item, dict):
+                    label = str(item.get("name") or item.get("label") or item.get("display_name") or "").strip()
+                else:
+                    label = ""
+                if label and label not in labels:
+                    labels.append(label)
+            if labels:
+                return labels
+        return []
+
+    @staticmethod
+    def _normalize_core_download_url(url: str) -> str:
+        value = url.strip()
+        if not value:
+            return ""
+        lowered = value.lower()
+        if "arxiv.org/abs/" in lowered:
+            record_id = value.rstrip("/").rsplit("/", 1)[-1]
+            return f"https://arxiv.org/pdf/{record_id}.pdf"
+        return value
+
+    @staticmethod
+    def _core_fulltext_urls(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+        download_url = CoreSearchAdapter._normalize_core_download_url(str(raw.get("downloadUrl") or ""))
+        download_url = download_url or None
+        landing_url: str | None = None
+        for item in raw.get("links") or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            link_type = str(item.get("type") or "").strip().lower()
+            normalized_url = CoreSearchAdapter._normalize_core_download_url(url)
+            if link_type == "download" and normalized_url and download_url is None:
+                download_url = normalized_url
+            if link_type in {"display", "reader"} and landing_url is None:
+                landing_url = url
+        for item in raw.get("sourceFulltextUrls") or []:
+            if isinstance(item, str):
+                url = item.strip()
+            elif isinstance(item, dict):
+                url = str(item.get("url") or "").strip()
+            else:
+                url = ""
+            if not url:
+                continue
+            normalized_url = CoreSearchAdapter._normalize_core_download_url(url)
+            if landing_url is None and ".pdf" not in url.lower():
+                landing_url = url
+            if download_url is None:
+                download_url = normalized_url or url
+        return download_url, landing_url
+
+    def _article_from_core(self, index: int, raw: dict[str, Any]) -> Article:
+        doi = (
+            str(raw.get("doi") or "").strip().removeprefix("https://doi.org/").removeprefix("doi:")
+            or self._core_identifier(raw, "DOI")
+            or None
+        )
+        journal, issns = self._core_journal(raw)
+        article_type, article_types = self._core_document_types(raw)
+        oa_pdf_url, landing_page_url = self._core_fulltext_urls(raw)
+        published = str(raw.get("publishedDate") or "").strip() or None
+        year = str(raw.get("yearPublished") or "").strip() or None
+        pmid = str(raw.get("pubmedId") or self._core_identifier(raw, "PMID") or "").strip()
+        if landing_page_url is None and doi:
+            landing_page_url = f"https://doi.org/{doi}"
+        return Article(
+            id=index,
+            source_name="core",
+            source_record_id=str(raw.get("id") or "").strip() or None,
+            pmid=pmid,
+            title=str(raw.get("title") or "Title not available"),
+            abstract=str(raw.get("abstract") or ""),
+            year=year or (published[:4] if published else None),
+            journal=journal,
+            publication_date=published,
+            article_type=article_type,
+            article_types=article_types,
+            citation_count=int(raw.get("citationCount") or 0),
+            authors=self._core_authors(raw),
+            keywords=self._core_keywords(raw),
+            doi=doi,
+            oa_pdf_url=oa_pdf_url,
+            landing_page_url=landing_page_url,
+            issns=issns,
+        )
+
+
+class ArxivSearchAdapter(BaseSearchAdapter):
+    source_name = "arxiv"
+
+    def __init__(self, http_client: httpx.AsyncClient, settings: Settings) -> None:
+        self.http_client = http_client
+        self.settings = settings
+        self.rate_limiter = AsyncRateLimiter(settings.arxiv_requests_per_second)
+
+    async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "arxiv": "http://arxiv.org/schemas/atom",
+            "opensearch": "http://a9.com/-/spec/opensearch/1.1/",
+        }
+        page_size = min(max(max_results * 4, 25), 100)
+        request_count = 0
+        total_results: int | None = None
+        articles: list[Article] = []
+        recent_matches = 0
+        max_pages = 4
+
+        for start in range(0, page_size * max_pages, page_size):
+            await self.rate_limiter.wait()
+            await asyncio.sleep(0.05 + random.uniform(0.0, 0.03))
+            request_count += 1
+            params = {
+                "search_query": self._build_arxiv_query(request.query),
+                "start": start,
+                "max_results": page_size,
+                "sortBy": "submittedDate" if (request.year_start is not None or request.year_end is not None) else "relevance",
+                "sortOrder": "descending",
+            }
+            try:
+                response = await self.http_client.get(
+                    self.settings.arxiv_base_url,
+                    params=params,
+                    headers={"User-Agent": self.settings.request_user_agent},
+                )
+                response.raise_for_status()
+                root = ET.fromstring(response.text)
+            except (httpx.HTTPError, ET.ParseError):
+                if request_count == 1:
+                    return SearchResult(articles=[], request_count=1)
+                break
+
+            entries = root.findall("atom:entry", ns)
+            total_results = int(root.findtext("opensearch:totalResults", default=str(len(entries)), namespaces=ns) or len(entries))
+            page_articles = [
+                self._article_from_arxiv(len(articles) + index + 1, entry, ns)
+                for index, entry in enumerate(entries)
+            ]
+            articles.extend(page_articles)
+            recent_matches += sum(
+                1 for article in page_articles if self._matches_year_window(article, request.year_start, request.year_end)
+            )
+
+            if recent_matches >= max_results:
+                break
+            if len(entries) < page_size or (total_results is not None and start + page_size >= total_results):
+                break
+
+        return SearchResult(
+            articles=articles,
+            request_count=request_count,
+            total_results_found=total_results or len(articles),
+        )
+
+    @staticmethod
+    def _clean_text(value: str | None) -> str:
+        return " ".join((value or "").split()).strip()
+
+    @classmethod
+    def _build_arxiv_query(cls, query: str) -> str:
+        normalized = cls._clean_text(query)
+        if not normalized:
+            return "all:*"
+        lowered = normalized.lower()
+        if any(token in lowered for token in ("all:", "ti:", "au:", "abs:", "cat:", "and", "or", "not")):
+            return normalized
+        terms = [term for term in re.findall(r"[a-z0-9]+", lowered) if term]
+        if not terms:
+            return normalized
+        return " AND ".join(f"all:{term}" for term in terms[:8])
+
+    @staticmethod
+    def _matches_year_window(article: Article, year_start: int | None, year_end: int | None) -> bool:
+        year_value = str(article.year or "").strip()
+        if not year_value.isdigit():
+            return False
+        year = int(year_value)
+        if year_start is not None and year < year_start:
+            return False
+        if year_end is not None and year > year_end:
+            return False
+        return True
+
+    def _article_from_arxiv(
+        self,
+        index: int,
+        entry: ET.Element,
+        ns: dict[str, str],
+    ) -> Article:
+        entry_id = self._clean_text(entry.findtext("atom:id", default="", namespaces=ns))
+        record_id = entry_id.rstrip("/").rsplit("/", 1)[-1] or None
+        authors = [
+            self._clean_text(author.findtext("atom:name", default="", namespaces=ns))
+            for author in entry.findall("atom:author", ns)
+        ]
+        authors = [name for name in authors if name]
+        categories: list[str] = []
+        for category in entry.findall("atom:category", ns):
+            term = self._clean_text(category.attrib.get("term"))
+            if term and term not in categories:
+                categories.append(term)
+        primary_category_element = entry.find("arxiv:primary_category", ns)
+        primary_category = self._clean_text(
+            primary_category_element.attrib.get("term") if primary_category_element is not None else ""
+        ) or None
+        doi = self._clean_text(entry.findtext("arxiv:doi", default="", namespaces=ns)) or None
+        journal_ref = self._clean_text(entry.findtext("arxiv:journal_ref", default="", namespaces=ns)) or None
+        pdf_url = None
+        for link in entry.findall("atom:link", ns):
+            href = self._clean_text(link.attrib.get("href"))
+            if link.attrib.get("type") == "application/pdf" and href:
+                pdf_url = href
+                break
+        published = self._clean_text(entry.findtext("atom:published", default="", namespaces=ns)) or None
+        return Article(
+            id=index,
+            source_name="arxiv",
+            source_record_id=record_id,
+            pmid="",
+            title=self._clean_text(entry.findtext("atom:title", default="Title not available", namespaces=ns)),
+            abstract=self._clean_text(entry.findtext("atom:summary", default="", namespaces=ns)),
+            year=published[:4] if published else None,
+            journal=journal_ref or "arXiv",
+            publication_date=published,
+            article_type="preprint",
+            article_types=["preprint"],
+            authors=authors,
+            keywords=categories,
+            mesh_terms=[primary_category] if primary_category else [],
+            doi=doi,
+            oa_pdf_url=pdf_url,
+            landing_page_url=entry_id or None,
+        )

@@ -88,6 +88,8 @@
                   <option value="pubmed" selected>PubMed</option>
                   <option value="europe_pmc">Europe PMC</option>
                   <option value="pmc">PMC</option>
+                  <option value="core">CORE</option>
+                  <option value="arxiv">arXiv</option>
                 </select>
               </label>
               <label class="native-query-quick-field" for="sidebarQuickMaxResults">
@@ -187,6 +189,8 @@
                       <option value="pubmed" selected>PubMed</option>
                       <option value="europe_pmc">Europe PMC</option>
                       <option value="pmc">PMC</option>
+                      <option value="core">CORE</option>
+                      <option value="arxiv">arXiv</option>
                     </select>
                   </label>
                 </div>
@@ -211,6 +215,46 @@
                   </label>
                 </div>
                 <div id="pdfDownloaderModeStatus" class="native-settings-note">PDF + XML mode saves the XML first and the PDF when available.</div>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">Safe PDF Fallbacks</div>
+                    <div class="native-settings-description">
+                      Adds optional repository fallbacks after the normal PMC, Europe PMC, Crossref and DOI candidates.
+                    </div>
+                  </div>
+                </div>
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">Unpaywall</div>
+                    <div id="pdfUnpaywallFallbackStatus" class="native-settings-description">Uses OA location metadata when an email is set.</div>
+                  </div>
+                  <label class="native-settings-switch" for="pdfUnpaywallFallbackToggle">
+                    <input id="pdfUnpaywallFallbackToggle" type="checkbox" checked>
+                    <span class="native-settings-switch-ui" aria-hidden="true"></span>
+                  </label>
+                </div>
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">CORE</div>
+                    <div id="pdfCoreFallbackStatus" class="native-settings-description">Uses CORE only as a strict title/DOI matched fallback.</div>
+                  </div>
+                  <label class="native-settings-switch" for="pdfCoreFallbackToggle">
+                    <input id="pdfCoreFallbackToggle" type="checkbox">
+                    <span class="native-settings-switch-ui" aria-hidden="true"></span>
+                  </label>
+                </div>
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
+                    <div class="native-settings-title">arXiv</div>
+                    <div id="pdfArxivFallbackStatus" class="native-settings-description">Uses arXiv only for exact DOI or very high title matches.</div>
+                  </div>
+                  <label class="native-settings-switch" for="pdfArxivFallbackToggle">
+                    <input id="pdfArxivFallbackToggle" type="checkbox">
+                    <span class="native-settings-switch-ui" aria-hidden="true"></span>
+                  </label>
+                </div>
               </div>
               <div class="native-settings-card">
                 <div class="native-settings-row">
@@ -304,7 +348,7 @@
                   </th>
                   <th>
                     <button class="table-sort-btn" type="button" data-sort-key="pmid">
-                      <span>PMID</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                      <span>Identifier</span><span class="table-sort-indicator" aria-hidden="true"></span>
                     </button>
                   </th>
                   <th>
@@ -481,6 +525,8 @@
       <option value="pubmed" selected>PubMed</option>
       <option value="europe_pmc">Europe PMC</option>
       <option value="pmc">PMC</option>
+      <option value="core">CORE</option>
+      <option value="arxiv">arXiv</option>
     </select>
     <button id="searchBtn" type="button">Search</button>
   </div>
@@ -532,6 +578,10 @@
       <label class="api-keys-field">
         <span class="api-keys-label">OpenAlex API Key</span>
         <input id="openalexApiKeyInput" class="api-keys-input" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="api-keys-field">
+        <span class="api-keys-label">CORE API Key</span>
+        <input id="coreApiKeyInput" class="api-keys-input" type="password" autocomplete="off" spellcheck="false">
       </label>
       <label class="api-keys-field">
         <span class="api-keys-label">API Email <small style="font-weight:400;opacity:.65">(NCBI polite

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas.article import Article
 from app.schemas.pubmed import PubMedSearchMeta
+from app.schemas.pubmed import SearchResource
 
 
 class ProjectSearchPayload(BaseModel):
@@ -19,6 +20,7 @@ class ProjectSearchPayload(BaseModel):
     min_cite: int | None = Field(default=None, ge=0, le=1000000)
     article_type: str | None = Field(default=None, max_length=200)
     use_cache: bool = True
+    preferred_source: SearchResource = "pubmed"
 
 
 class ProjectQueryRecord(BaseModel):

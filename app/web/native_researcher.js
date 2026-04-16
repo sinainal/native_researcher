@@ -116,6 +116,7 @@ const els = {
   assistantApiKeyInput: document.getElementById("assistantApiKeyInput"),
   ncbiApiKeyInput: document.getElementById("ncbiApiKeyInput"),
   openalexApiKeyInput: document.getElementById("openalexApiKeyInput"),
+  coreApiKeyInput: document.getElementById("coreApiKeyInput"),
   unpaywallEmailInput: document.getElementById("unpaywallEmailInput"),
   workspaceSettingsState: document.getElementById("workspaceSettingsState"),
   pubmedOaOnlyToggle: document.getElementById("pubmedOaOnlyToggle"),
@@ -124,6 +125,12 @@ const els = {
   aiPrimarySearchResourceStatus: document.getElementById("aiPrimarySearchResourceStatus"),
   pdfDownloaderModeInput: document.getElementById("pdfDownloaderModeInput"),
   pdfDownloaderModeStatus: document.getElementById("pdfDownloaderModeStatus"),
+  pdfUnpaywallFallbackToggle: document.getElementById("pdfUnpaywallFallbackToggle"),
+  pdfUnpaywallFallbackStatus: document.getElementById("pdfUnpaywallFallbackStatus"),
+  pdfCoreFallbackToggle: document.getElementById("pdfCoreFallbackToggle"),
+  pdfCoreFallbackStatus: document.getElementById("pdfCoreFallbackStatus"),
+  pdfArxivFallbackToggle: document.getElementById("pdfArxivFallbackToggle"),
+  pdfArxivFallbackStatus: document.getElementById("pdfArxivFallbackStatus"),
   downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
   downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
@@ -209,8 +216,12 @@ const runtime = {
   apiKey: "",
   ncbiApiKey: "",
   openalexApiKey: "",
+  coreApiKey: "",
   unpaywallEmail: "",
   pubmedOaOnly: localStorage.getItem(pubmedOaOnlyStorageKey) !== "false",
+  pdfUnpaywallFallbackEnabled: true,
+  pdfCoreFallbackEnabled: false,
+  pdfArxivFallbackEnabled: false,
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "pubmed"),
   aiPrimarySearchResource: "pubmed",
@@ -226,7 +237,7 @@ function clampDownloadWorkers(value) {
 
 function normalizeSearchResource(value, fallback = "pubmed") {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (["openalex", "pubmed", "europe_pmc", "pmc"].includes(normalized)) {
+  if (["openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"].includes(normalized)) {
     return normalized;
   }
   return fallback;
@@ -238,6 +249,8 @@ function searchResourceLabel(value) {
   if (normalized === "pubmed") return "PubMed";
   if (normalized === "europe_pmc") return "Europe PMC";
   if (normalized === "pmc") return "PMC";
+  if (normalized === "core") return "CORE";
+  if (normalized === "arxiv") return "arXiv";
   return "PubMed";
 }
 
@@ -1033,7 +1046,12 @@ function updateProjectUI() {
 function renderSettingsPanel() {
   const enabled = Boolean(runtime.pubmedOaOnly);
   if (els.workspaceSettingsState) {
-    els.workspaceSettingsState.textContent = `${enabled ? "OA" : "Custom"} · ${searchResourceLabel(runtime.aiPrimarySearchResource)} · ${pdfDownloaderModeLabel(runtime.pdfDownloaderMode)} · x${runtime.downloadWorkers}`;
+    const fallbackCount = [
+      runtime.pdfUnpaywallFallbackEnabled,
+      runtime.pdfCoreFallbackEnabled,
+      runtime.pdfArxivFallbackEnabled,
+    ].filter(Boolean).length;
+    els.workspaceSettingsState.textContent = `${enabled ? "OA" : "Custom"} · ${searchResourceLabel(runtime.aiPrimarySearchResource)} · ${pdfDownloaderModeLabel(runtime.pdfDownloaderMode)} · ${fallbackCount} fallback${fallbackCount === 1 ? "" : "s"} · x${runtime.downloadWorkers}`;
   }
   if (els.pubmedOaOnlyToggle) {
     els.pubmedOaOnlyToggle.checked = enabled;
@@ -1071,6 +1089,30 @@ function renderSettingsPanel() {
       els.pdfDownloaderModeStatus.textContent = "PDF + XML mode saves the XML first and the PDF when available.";
     }
   }
+  if (els.pdfUnpaywallFallbackToggle) {
+    els.pdfUnpaywallFallbackToggle.checked = Boolean(runtime.pdfUnpaywallFallbackEnabled);
+  }
+  if (els.pdfUnpaywallFallbackStatus) {
+    els.pdfUnpaywallFallbackStatus.textContent = runtime.pdfUnpaywallFallbackEnabled
+      ? "Unpaywall fallback is enabled and runs only when an email is configured."
+      : "Unpaywall fallback is disabled.";
+  }
+  if (els.pdfCoreFallbackToggle) {
+    els.pdfCoreFallbackToggle.checked = Boolean(runtime.pdfCoreFallbackEnabled);
+  }
+  if (els.pdfCoreFallbackStatus) {
+    els.pdfCoreFallbackStatus.textContent = runtime.pdfCoreFallbackEnabled
+      ? "CORE fallback is enabled. It accepts only strict DOI/title matches."
+      : "CORE fallback is disabled, preserving the fastest default download path.";
+  }
+  if (els.pdfArxivFallbackToggle) {
+    els.pdfArxivFallbackToggle.checked = Boolean(runtime.pdfArxivFallbackEnabled);
+  }
+  if (els.pdfArxivFallbackStatus) {
+    els.pdfArxivFallbackStatus.textContent = runtime.pdfArxivFallbackEnabled
+      ? "arXiv fallback is enabled for exact DOI or very high confidence title matches."
+      : "arXiv fallback is disabled.";
+  }
   if (els.searchResource) {
     els.searchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
   }
@@ -1091,6 +1133,7 @@ function applyApiKeyValues(payload = {}) {
   runtime.apiKey = payload.assistant_api_key || localStorage.getItem("researcher2_api_key") || "";
   runtime.ncbiApiKey = payload.ncbi_api_key || "";
   runtime.openalexApiKey = payload.openalex_api_key || "";
+  runtime.coreApiKey = payload.core_api_key || "";
   runtime.unpaywallEmail = payload.unpaywall_email || "";
   runtime.pubmedOaOnly = payload.pubmed_oa_only !== undefined
     ? Boolean(payload.pubmed_oa_only)
@@ -1103,11 +1146,17 @@ function applyApiKeyValues(payload = {}) {
     payload.pdf_downloader_mode,
     runtime.pdfDownloaderMode || "pdf_xml",
   );
+  runtime.pdfUnpaywallFallbackEnabled = payload.pdf_unpaywall_fallback_enabled !== undefined
+    ? Boolean(payload.pdf_unpaywall_fallback_enabled)
+    : true;
+  runtime.pdfCoreFallbackEnabled = Boolean(payload.pdf_core_fallback_enabled);
+  runtime.pdfArxivFallbackEnabled = Boolean(payload.pdf_arxiv_fallback_enabled);
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
   if (els.ncbiApiKeyInput) els.ncbiApiKeyInput.value = runtime.ncbiApiKey;
   if (els.openalexApiKeyInput) els.openalexApiKeyInput.value = runtime.openalexApiKey;
+  if (els.coreApiKeyInput) els.coreApiKeyInput.value = runtime.coreApiKey;
   if (els.unpaywallEmailInput) els.unpaywallEmailInput.value = runtime.unpaywallEmail;
   renderSettingsPanel();
 }
@@ -1125,10 +1174,14 @@ async function saveApiKeys(overrides = {}, options = {}) {
       assistant_api_key: runtime.apiKey,
       ncbi_api_key: runtime.ncbiApiKey,
       openalex_api_key: runtime.openalexApiKey,
+      core_api_key: runtime.coreApiKey,
       unpaywall_email: runtime.unpaywallEmail,
       pubmed_oa_only: runtime.pubmedOaOnly,
       ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed"),
       pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
+      pdf_unpaywall_fallback_enabled: Boolean(runtime.pdfUnpaywallFallbackEnabled),
+      pdf_core_fallback_enabled: Boolean(runtime.pdfCoreFallbackEnabled),
+      pdf_arxiv_fallback_enabled: Boolean(runtime.pdfArxivFallbackEnabled),
       ...overrides,
     }),
   });
@@ -1136,10 +1189,14 @@ async function saveApiKeys(overrides = {}, options = {}) {
   trackAppEvent("info", "api_keys_saved_ui", "API keys updated from the native UI.", {
     has_ncbi_api_key: Boolean(runtime.ncbiApiKey),
     has_openalex_api_key: Boolean(runtime.openalexApiKey),
+    has_core_api_key: Boolean(runtime.coreApiKey),
     has_unpaywall_email: Boolean(runtime.unpaywallEmail),
     pubmed_oa_only: Boolean(runtime.pubmedOaOnly),
-      ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed"),
-      pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
+    ai_primary_search_resource: normalizeSearchResource(runtime.aiPrimarySearchResource, "pubmed"),
+    pdf_downloader_mode: normalizePdfDownloaderMode(runtime.pdfDownloaderMode, "pdf_xml"),
+    pdf_unpaywall_fallback_enabled: Boolean(runtime.pdfUnpaywallFallbackEnabled),
+    pdf_core_fallback_enabled: Boolean(runtime.pdfCoreFallbackEnabled),
+    pdf_arxiv_fallback_enabled: Boolean(runtime.pdfArxivFallbackEnabled),
   });
   if (closeDialog) {
     setApiKeysDialogOpen(false);
@@ -1734,6 +1791,24 @@ function detailFieldPresentation(field) {
         break;
     }
   }
+  if (source === "arxiv") {
+    switch (field) {
+      case "mesh":
+        return {
+          label: "Primary Category",
+          title: "Primary Category",
+          empty: "Primary category not available.",
+        };
+      case "keywords":
+        return {
+          label: "Categories",
+          title: "Categories",
+          empty: "Categories not available.",
+        };
+      default:
+        break;
+    }
+  }
   switch (field) {
     case "mesh":
       return {
@@ -1764,7 +1839,29 @@ function detailFieldPresentation(field) {
 
 function articleTitleMeta(article) {
   const bits = [article.journal || "", article.publication_date || ""].filter(Boolean);
-  return bits.join(" · ");
+  const sourceId = sourceRecordLabel(article);
+  if (sourceId) bits.push(sourceId);
+  if (article.doi) bits.push(`DOI ${article.doi}`);
+  return bits.slice(0, 4).join(" · ");
+}
+
+function sourceRecordLabel(article) {
+  const recordId = article?.source_record_id || "";
+  if (!recordId) return "";
+  const source = String(article?.source_name || "").toLowerCase();
+  if (source === "arxiv") return `arXiv ${recordId}`;
+  if (source === "core") return `CORE ${recordId}`;
+  if (source === "openalex") return `OpenAlex ${recordId}`;
+  return recordId;
+}
+
+function tableIdentifier(article) {
+  if (article?.pmid) return article.pmid;
+  if (article?.pmc_id) return article.pmc_id;
+  const sourceId = sourceRecordLabel(article);
+  if (sourceId) return sourceId;
+  if (article?.doi) return article.doi;
+  return "-";
 }
 
 function journalQuartileLabel(article) {
@@ -1794,11 +1891,16 @@ function articleLinks(article) {
 
 function bestArticleLink(article) {
   const links = articleLinks(article);
-  return links.pmc || links.doi || links.pubmed || null;
+  if (["core", "arxiv"].includes(String(article?.source_name || "").toLowerCase())) {
+    return article.landing_page_url || links.doi || links.pubmed || links.pmc || null;
+  }
+  return links.pmc || links.doi || links.pubmed || article.landing_page_url || null;
 }
 
 function articleReference(article) {
   return {
+    source_name: article.source_name || null,
+    source_record_id: article.source_record_id || null,
     title: article.title || null,
     year: article.year || null,
     journal: article.journal || null,
@@ -2567,7 +2669,12 @@ function seedDownloadability(articles) {
       }
       return [
         article.id,
-        article.pmc_id || article.doi || article.pmid
+        article.pmc_id
+          || article.doi
+          || article.pmid
+          || article.oa_pdf_url
+          || article.landing_page_url
+          || article.source_record_id
           ? {
             status: "high",
             label: downloadabilityLabels.high,
@@ -2577,7 +2684,7 @@ function seedDownloadability(articles) {
           : {
             status: "unavailable",
             label: downloadabilityLabels.unavailable,
-            detail: "No PMID, DOI, or PMCID signal.",
+            detail: "No download signal is available for this article.",
             openUrl: null,
           },
       ];
@@ -2745,7 +2852,11 @@ function activeArticles() {
 }
 
 function articleIdentityKey(article) {
-  return article?.pmid || article?.doi || article?.pmc_id || article?.title || "";
+  if (article?.pmid) return article.pmid;
+  if (article?.doi) return article.doi;
+  if (article?.pmc_id) return article.pmc_id;
+  if (article?.source_name && article?.source_record_id) return `${article.source_name}:${article.source_record_id}`;
+  return article?.title || "";
 }
 
 function applyBatchDownloadResults(chosen, results) {
@@ -2953,6 +3064,7 @@ function detailMetaMarkup(article) {
   lines.push(`Source ${currentSearchSourceLabel()}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
+  if (sourceRecordLabel(article)) lines.push(sourceRecordLabel(article));
   if (article.doi) lines.push(`DOI ${article.doi}`);
   if (article.pmc_id) lines.push(`PMC ${article.pmc_id}`);
   return lines.map((item) => `<span class="detail-meta-chip">${item}</span>`).join("");
@@ -2964,6 +3076,7 @@ function detailMetaText(article) {
   lines.push(`Source ${currentSearchSourceLabel()}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
+  if (sourceRecordLabel(article)) lines.push(sourceRecordLabel(article));
   if (article.doi) lines.push(`DOI ${article.doi}`);
   return lines.join(" • ");
 }
@@ -3562,7 +3675,7 @@ function renderResults() {
         <tr class="article-row ${state.detailArticleId === article.id ? "is-active" : ""}" data-row-id="${article.id}">
           <td><input type="checkbox" class="row-check" data-id="${article.id}" ${state.selectedIds.has(article.id) ? "checked" : ""}></td>
           <td>${article.id}</td>
-          <td>${escapeHtml(article.pmid || "-")}</td>
+          <td>${escapeHtml(tableIdentifier(article))}</td>
           <td class="year-cell">${escapeHtml(article.year || "-")}</td>
           <td class="type-cell">${escapeHtml(articleTypeLabel(article))}</td>
           <td class="count-cell">${escapeHtml(citationLabel(article))}</td>
@@ -3633,7 +3746,7 @@ async function runSearch() {
     use_cache: true,
     preferred_source: normalizeSearchResource(
       els.searchResource?.value || runtime.searchResource,
-      "openalex",
+      "pubmed",
     ),
   };
   if (!payload.query) {
@@ -3693,7 +3806,7 @@ async function runSidebarQuickSearch() {
   const yearEnd = els.sidebarQuickYearEnd?.value ? Number(els.sidebarQuickYearEnd.value) : null;
   const preferredSource = normalizeSearchResource(
     els.sidebarQuickSearchResource?.value || runtime.searchResource,
-    "openalex",
+    "pubmed",
   );
   if (els.sidebarQuickSearchBtn) els.sidebarQuickSearchBtn.disabled = true;
   state.activeQueryId = null;
@@ -4286,6 +4399,7 @@ function bindEvents() {
       assistant_api_key: els.assistantApiKeyInput?.value || "",
       ncbi_api_key: els.ncbiApiKeyInput?.value || "",
       openalex_api_key: els.openalexApiKeyInput?.value || "",
+      core_api_key: els.coreApiKeyInput?.value || "",
       unpaywall_email: els.unpaywallEmailInput?.value || "",
     });
   });
@@ -4341,6 +4455,53 @@ function bindEvents() {
     } finally {
       if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = false;
     }
+  });
+  const saveFallbackToggle = async (key, value, element, eventName) => {
+    if (element) element.disabled = true;
+    const previous = runtime[key];
+    runtime[key] = value;
+    try {
+      await saveApiKeys({
+        pdf_unpaywall_fallback_enabled: Boolean(runtime.pdfUnpaywallFallbackEnabled),
+        pdf_core_fallback_enabled: Boolean(runtime.pdfCoreFallbackEnabled),
+        pdf_arxiv_fallback_enabled: Boolean(runtime.pdfArxivFallbackEnabled),
+      }, { closeDialog: false });
+      trackAppEvent("info", eventName, "PDF fallback setting updated.", {
+        pdf_unpaywall_fallback_enabled: Boolean(runtime.pdfUnpaywallFallbackEnabled),
+        pdf_core_fallback_enabled: Boolean(runtime.pdfCoreFallbackEnabled),
+        pdf_arxiv_fallback_enabled: Boolean(runtime.pdfArxivFallbackEnabled),
+      });
+    } catch (error) {
+      runtime[key] = previous;
+      renderSettingsPanel();
+      trackAppEvent("error", `${eventName}_failed`, error.message || "PDF fallback setting could not be saved.", {});
+    } finally {
+      if (element) element.disabled = false;
+    }
+  };
+  els.pdfUnpaywallFallbackToggle?.addEventListener("change", async () => {
+    await saveFallbackToggle(
+      "pdfUnpaywallFallbackEnabled",
+      Boolean(els.pdfUnpaywallFallbackToggle?.checked),
+      els.pdfUnpaywallFallbackToggle,
+      "pdf_unpaywall_fallback_updated",
+    );
+  });
+  els.pdfCoreFallbackToggle?.addEventListener("change", async () => {
+    await saveFallbackToggle(
+      "pdfCoreFallbackEnabled",
+      Boolean(els.pdfCoreFallbackToggle?.checked),
+      els.pdfCoreFallbackToggle,
+      "pdf_core_fallback_updated",
+    );
+  });
+  els.pdfArxivFallbackToggle?.addEventListener("change", async () => {
+    await saveFallbackToggle(
+      "pdfArxivFallbackEnabled",
+      Boolean(els.pdfArxivFallbackToggle?.checked),
+      els.pdfArxivFallbackToggle,
+      "pdf_arxiv_fallback_updated",
+    );
   });
   els.downloadWorkerCountInput?.addEventListener("change", () => {
     const nextValue = clampDownloadWorkers(els.downloadWorkerCountInput?.value);

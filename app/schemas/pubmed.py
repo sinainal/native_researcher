@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.article import ArticleReference
 from app.schemas.article import Article
 
-SearchResource = Literal["openalex", "pubmed", "europe_pmc", "pmc"]
+SearchResource = Literal["openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"]
 
 
 class PubMedSearchRequest(BaseModel):

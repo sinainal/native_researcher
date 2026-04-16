@@ -222,6 +222,8 @@ class NcbiClient:
             articles.append(
                 Article(
                     id=start_index + offset,
+                    source_name="pubmed",
+                    source_record_id=uid,
                     pmid=uid,
                     title=details.get("title") or summary.get("title") or "Title not available",
                     abstract=(details.get("abstract") or "").strip(),

@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 class Article(BaseModel):
     id: int = Field(..., ge=1)
+    source_name: str | None = None
+    source_record_id: str | None = None
     pmid: str
     title: str
     abstract: str = ""
@@ -34,6 +36,8 @@ class Article(BaseModel):
 
 
 class ArticleReference(BaseModel):
+    source_name: str | None = None
+    source_record_id: str | None = None
     title: str | None = None
     year: str | None = None
     journal: str | None = None

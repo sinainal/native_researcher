@@ -15,6 +15,8 @@ __pycache__/
 api_key.txt
 ncbi_api
 unpaywall_email
+openalex_api_key
+core_api_key
 ai_primary_search_resource
 pubmed_oa_only
 pdf_downloader_mode

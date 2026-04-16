@@ -11,6 +11,7 @@ import httpx
 from app.core.config import Settings
 from app.schemas.article import ArticleReference
 from app.schemas.pdf import PDFDownloadRequest
+from app.services.downloader.service import PDFPipeline
 from app.services.pdf_service import PDFService
 from app.utils.cache import TTLCache
 
@@ -173,6 +174,251 @@ def test_pdf_mode_extracts_pdf_from_pmc_package(tmp_path) -> None:
         result = response.results[0]
         assert result.source == "pmc_oa_package"
         assert result.file_path and result.file_path.endswith(".pdf")
+
+    asyncio.run(runner())
+
+
+def test_pmid_to_pmcid_resolver_ignores_source_pubmed_id(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "elink.fcgi" in url:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/xml"},
+                    text=(
+                        "<eLinkResult><LinkSet>"
+                        "<DbFrom>pubmed</DbFrom><IdList><Id>20431534</Id></IdList>"
+                        "<LinkSetDb><DbTo>pmc</DbTo><LinkName>pubmed_pmc</LinkName>"
+                        "<Link><Id>10910284</Id></Link>"
+                        "</LinkSetDb></LinkSet></eLinkResult>"
+                    ),
+                )
+            if "pmc/utils/idconv" in url:
+                return httpx.Response(200, json={"records": []})
+            if "europepmc.org/api/fulltextRepo" in url:
+                return httpx.Response(200, json={"version": 1, "files": []})
+            if "pmc/utils/oa/oa.fcgi" in url:
+                return httpx.Response(200, headers={"content-type": "text/xml"}, text="<OA></OA>")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(client, Settings(download_root=tmp_path, pdf_downloader_mode="pdf"), TTLCache(60, 16))
+            response = await service.resolve(
+                ArticleReference(title="PMID resolver", pmid="20431534"),
+                downloader_mode="pdf",
+            )
+
+        urls = [candidate.url for candidate in response.candidates]
+        assert "https://pmc.ncbi.nlm.nih.gov/articles/PMC10910284/pdf/" in urls
+        assert "https://pmc.ncbi.nlm.nih.gov/articles/PMC20431534/pdf/" not in urls
+
+    asyncio.run(runner())
+
+
+def test_landing_pdf_extractor_supports_meta_and_pdf_buttons() -> None:
+    html = """
+    <html><head>
+      <meta name="citation_pdf_url" content="/article/main.pdf">
+      <link rel="alternate pdf" href="/article/alternate.pdf">
+    </head><body>
+      <a href="/article/pdf/" aria-label="Download PDF">PDF</a>
+      <a href="/article/supplement.docx">Supplement</a>
+    </body></html>
+    """
+
+    urls = PDFPipeline._extract_pdf_links_from_html(html, "https://example.org/article")
+
+    assert urls == [
+        "https://example.org/article/main.pdf",
+        "https://example.org/article/alternate.pdf",
+        "https://example.org/article/pdf/",
+    ]
+
+
+def test_pdf_mode_uses_unpaywall_landing_page_pdf_links(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/idconv" in url:
+                return httpx.Response(200, json={"records": []})
+            if "europepmc.org" in url:
+                return httpx.Response(200, json={"resultList": {"result": []}})
+            if "api.crossref.org/works/" in url:
+                return httpx.Response(200, json={"message": {"link": []}})
+            if "api.unpaywall.org/v2/" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "best_oa_location": {
+                            "url": "https://repository.example.org/articles/PMC12345/",
+                            "url_for_pdf": None,
+                        },
+                        "oa_locations": [],
+                    },
+                )
+            if url == "https://repository.example.org/articles/PMC12345/":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html"},
+                    text='<html><meta name="citation_pdf_url" content="/articles/PMC12345/paper.pdf"></html>',
+                )
+            if url == "https://repository.example.org/articles/PMC12345/paper.pdf":
+                return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 unpaywall")
+            if "doi.org/" in url:
+                return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(
+                client,
+                Settings(download_root=tmp_path, pdf_downloader_mode="pdf", unpaywall_email="test@example.org"),
+                TTLCache(60, 16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[ArticleReference(title="Unpaywall landing", year="2025", doi="10.1000/unpaywall")],
+                    downloader_mode="pdf",
+                )
+            )
+
+        assert response.success_count == 1
+        result = response.results[0]
+        assert result.source == "unpaywall_pdf"
+        assert result.file_path and result.file_path.endswith(".pdf")
+
+    asyncio.run(runner())
+
+
+def test_pdf_mode_uses_core_fallback_when_enabled(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "pmc/utils/idconv" in url:
+                return httpx.Response(200, json={"records": []})
+            if "europepmc.org" in url:
+                return httpx.Response(200, json={"resultList": {"result": []}})
+            if "api.crossref.org/works/" in url:
+                return httpx.Response(200, json={"message": {"link": []}})
+            if "api.core.ac.uk/v3/search/works" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "totalHits": 1,
+                        "results": [
+                            {
+                                "title": "CORE Exact Match Study",
+                                "doi": "10.1000/core",
+                                "downloadUrl": "https://core.ac.uk/download/123.pdf",
+                                "sourceFulltextUrls": [],
+                            }
+                        ],
+                    },
+                )
+            if url == "https://core.ac.uk/download/123.pdf":
+                return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 core")
+            if "doi.org/" in url:
+                return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(
+                client,
+                Settings(
+                    download_root=tmp_path,
+                    pdf_downloader_mode="pdf",
+                    core_api_key="core-test",
+                    pdf_core_fallback_enabled=True,
+                    pdf_unpaywall_fallback_enabled=False,
+                ),
+                TTLCache(60, 16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[ArticleReference(title="CORE Exact Match Study", year="2025", doi="10.1000/core")],
+                    downloader_mode="pdf",
+                )
+            )
+
+        assert response.success_count == 1
+        result = response.results[0]
+        assert result.source == "core_pdf"
+        assert result.file_path and result.file_path.endswith(".pdf")
+
+    asyncio.run(runner())
+
+
+def test_pdf_mode_prefers_core_native_pdf_for_core_articles(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == "https://core.ac.uk/download/pdf/native.pdf":
+                return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 core-native")
+            if "pmc/utils/idconv" in url or "europepmc.org" in url or "api.crossref.org" in url or "doi.org/" in url:
+                raise AssertionError(f"Unexpected fallback URL: {url}")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(
+                client,
+                Settings(download_root=tmp_path, pdf_downloader_mode="pdf"),
+                TTLCache(60, 16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[
+                        ArticleReference(
+                            source_name="core",
+                            source_record_id="445566",
+                            title="CORE Native Article",
+                            year="2025",
+                            oa_pdf_url="https://core.ac.uk/download/pdf/native.pdf",
+                        )
+                    ],
+                    downloader_mode="pdf",
+                )
+            )
+
+        assert response.success_count == 1
+        assert response.results[0].source == "core_native_pdf"
+        assert response.results[0].file_path and response.results[0].file_path.endswith(".pdf")
+
+    asyncio.run(runner())
+
+
+def test_pdf_mode_builds_arxiv_native_pdf_from_record_id(tmp_path) -> None:
+    async def runner() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url == "https://arxiv.org/pdf/2401.12345v1.pdf":
+                return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 arxiv-native")
+            if "pmc/utils/idconv" in url or "europepmc.org" in url or "api.crossref.org" in url or "doi.org/" in url:
+                raise AssertionError(f"Unexpected fallback URL: {url}")
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = PDFService(
+                client,
+                Settings(download_root=tmp_path, pdf_downloader_mode="pdf"),
+                TTLCache(60, 16),
+            )
+            response = await service.download_articles(
+                PDFDownloadRequest(
+                    articles=[
+                        ArticleReference(
+                            source_name="arxiv",
+                            source_record_id="2401.12345v1",
+                            title="arXiv Native Article",
+                            year="2024",
+                        )
+                    ],
+                    downloader_mode="pdf",
+                )
+            )
+
+        assert response.success_count == 1
+        assert response.results[0].source == "arxiv_native_pdf"
+        assert response.results[0].file_path and response.results[0].file_path.endswith(".pdf")
 
     asyncio.run(runner())
 

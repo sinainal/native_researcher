@@ -88,12 +88,16 @@ async def test_pdf_pipeline(
         )
         articles = [
             ArticleReference(
+                source_name=article.source_name,
+                source_record_id=article.source_record_id,
                 title=article.title,
                 year=article.year,
                 journal=article.journal,
                 doi=article.doi,
                 pmc_id=article.pmc_id,
                 pmid=article.pmid,
+                oa_pdf_url=article.oa_pdf_url,
+                landing_page_url=article.landing_page_url,
             )
             for article in search.articles
         ]

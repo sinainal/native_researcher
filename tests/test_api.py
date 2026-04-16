@@ -189,9 +189,13 @@ def test_api_endpoints() -> None:
                 ncbi_api_key_path=temp_root / "ncbi_api",
                 unpaywall_email_path=temp_root / "unpaywall_email",
                 openalex_api_key_path=temp_root / "openalex_api_key",
+                core_api_key_path=temp_root / "core_api_key",
                 pubmed_oa_only_path=temp_root / "pubmed_oa_only",
                 ai_primary_search_resource_path=temp_root / "ai_primary_search_resource",
                 pdf_downloader_mode_path=temp_root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=temp_root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=temp_root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=temp_root / "pdf_arxiv_fallback_enabled",
             )
             app = create_app(
                 settings=settings,
@@ -243,8 +247,12 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
                     "openalex_api_key": "",
+                    "core_api_key": "",
                     "pubmed_oa_only": True,
                     "pdf_downloader_mode": "pdf_xml",
+                    "pdf_unpaywall_fallback_enabled": True,
+                    "pdf_core_fallback_enabled": False,
+                    "pdf_arxiv_fallback_enabled": False,
                 }
 
                 api_keys = await client.get("/app/api-keys")
@@ -254,9 +262,13 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "",
                     "unpaywall_email": "",
                     "openalex_api_key": "",
+                    "core_api_key": "",
                     "pubmed_oa_only": True,
                     "ai_primary_search_resource": "pubmed",
                     "pdf_downloader_mode": "pdf_xml",
+                    "pdf_unpaywall_fallback_enabled": True,
+                    "pdf_core_fallback_enabled": False,
+                    "pdf_arxiv_fallback_enabled": False,
                 }
 
                 update_api_keys = await client.put(
@@ -266,9 +278,13 @@ def test_api_endpoints() -> None:
                         "ncbi_api_key": "ncbi-secret",
                         "unpaywall_email": "me@example.com",
                         "openalex_api_key": "openalex-secret",
+                        "core_api_key": "core-secret",
                         "pubmed_oa_only": False,
                         "ai_primary_search_resource": "pubmed",
                         "pdf_downloader_mode": "article_downloader",
+                        "pdf_unpaywall_fallback_enabled": True,
+                        "pdf_core_fallback_enabled": True,
+                        "pdf_arxiv_fallback_enabled": True,
                     },
                 )
                 assert update_api_keys.status_code == 200
@@ -277,9 +293,13 @@ def test_api_endpoints() -> None:
                     "ncbi_api_key": "ncbi-secret",
                     "unpaywall_email": "me@example.com",
                     "openalex_api_key": "openalex-secret",
+                    "core_api_key": "core-secret",
                     "pubmed_oa_only": False,
                     "ai_primary_search_resource": "pubmed",
                     "pdf_downloader_mode": "pdf_xml",
+                    "pdf_unpaywall_fallback_enabled": True,
+                    "pdf_core_fallback_enabled": True,
+                    "pdf_arxiv_fallback_enabled": True,
                 }
 
                 update_hybrid_mode = await client.put(
@@ -289,9 +309,13 @@ def test_api_endpoints() -> None:
                         "ncbi_api_key": "ncbi-secret",
                         "unpaywall_email": "me@example.com",
                         "openalex_api_key": "openalex-secret",
+                        "core_api_key": "core-secret",
                         "pubmed_oa_only": False,
                         "ai_primary_search_resource": "pubmed",
                         "pdf_downloader_mode": "hybrid",
+                        "pdf_unpaywall_fallback_enabled": True,
+                        "pdf_core_fallback_enabled": True,
+                        "pdf_arxiv_fallback_enabled": True,
                     },
                 )
                 assert update_hybrid_mode.status_code == 200
@@ -354,16 +378,17 @@ def test_api_endpoints() -> None:
                                     "title": "legacy serotonin",
                                     "created_at": "2026-03-20T10:00:00+00:00",
                                     "updated_at": "2026-03-20T10:00:00+00:00",
-                                    "search_payload": {
-                                        "query": "legacy serotonin",
-                                        "year_start": None,
-                                        "year_end": None,
-                                        "max_results": 5,
-                                        "batch_size": None,
-                                        "min_cite": None,
-                                        "article_type": None,
-                                        "use_cache": True,
-                                    },
+                                "search_payload": {
+                                    "query": "legacy serotonin",
+                                    "year_start": None,
+                                    "year_end": None,
+                                    "max_results": 5,
+                                    "batch_size": None,
+                                    "min_cite": None,
+                                    "article_type": None,
+                                    "use_cache": True,
+                                    "preferred_source": "pubmed",
+                                },
                                     "meta": None,
                                     "articles": [],
                                 }
@@ -474,6 +499,7 @@ def test_api_endpoints() -> None:
                                     "min_cite": None,
                                     "article_type": None,
                                     "use_cache": True,
+                                    "preferred_source": "arxiv",
                                 },
                                 "meta": {
                                     "full_query": "ndm inhibitor",
@@ -512,6 +538,7 @@ def test_api_endpoints() -> None:
                 assert saved_state.status_code == 200
                 assert saved_state.json()["active_query_id"] == "qry_1"
                 assert saved_state.json()["query_history"][0]["title"] == "ndm inhibitor"
+                assert saved_state.json()["query_history"][0]["search_payload"]["preferred_source"] == "arxiv"
                 assert saved_state.json()["current_session_id"] == "chat_1"
                 assert saved_state.json()["assistant_sessions"][0]["threadId"] == "thread_123"
                 assert saved_state.json()["downloadability_cache"]["123"]["status"] == "high"

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import re
 import tarfile
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
@@ -106,22 +108,48 @@ class _BasePipeline:
     ) -> dict[str, Any] | None:
         started = time.perf_counter()
         headers = self._candidate_headers(candidate)
-        try:
-            response = await self.http_client.get(
-                candidate.url,
-                headers=headers,
-                follow_redirects=True,
-                timeout=self._candidate_timeout(candidate),
-            )
-        except Exception as exc:
-            logger.record(
-                step="download",
-                source=candidate.source,
-                url=candidate.url,
-                status="error",
-                started=started,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
+        attempts = 2 if candidate.source == "core_native_pdf" else 1
+        response = None
+        last_exc: Exception | None = None
+        for attempt_index in range(attempts):
+            try:
+                response = await self.http_client.get(
+                    candidate.url,
+                    headers=headers,
+                    follow_redirects=True,
+                    timeout=self._candidate_timeout(candidate),
+                )
+            except Exception as exc:
+                last_exc = exc
+                response = None
+                if attempt_index + 1 < attempts:
+                    await asyncio.sleep(0.35)
+                    continue
+                logger.record(
+                    step="download",
+                    source=candidate.source,
+                    url=candidate.url,
+                    status="error",
+                    started=started,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+                return None
+
+            if response.status_code in {502, 503, 504} and attempt_index + 1 < attempts:
+                await asyncio.sleep(0.35)
+                continue
+            break
+
+        if response is None:
+            if last_exc is not None:
+                logger.record(
+                    step="download",
+                    source=candidate.source,
+                    url=candidate.url,
+                    status="error",
+                    started=started,
+                    detail=f"{type(last_exc).__name__}: {last_exc}",
+                )
             return None
 
         content_type = (response.headers.get("content-type") or "").lower()
@@ -294,36 +322,44 @@ class _BasePipeline:
                 timeout=10.0,
             )
             response.raise_for_status()
-            match = re.search(r"<Id>(\d+)</Id>", response.text)
-            if match:
-                return f"PMC{match.group(1)}"
+            root = ET.fromstring(response.text)
         except Exception:
             return None
+        for linkset_db in root.findall(".//LinkSetDb"):
+            link_name = (linkset_db.findtext("LinkName") or "").strip().lower()
+            db_to = (linkset_db.findtext("DbTo") or "").strip().lower()
+            if db_to != "pmc" and "pubmed_pmc" not in link_name:
+                continue
+            for id_node in linkset_db.findall(".//Link/Id"):
+                raw_id = (id_node.text or "").strip()
+                if raw_id.isdigit():
+                    return f"PMC{raw_id}"
         return None
 
     async def _pmcid_from_europe_pmc(self, article: ArticleReference) -> str | None:
-        query_parts = []
+        query_parts: list[str] = []
         if article.doi:
             query_parts.append(f'DOI:"{article.doi}"')
         if article.pmid:
             query_parts.append(f"EXT_ID:{article.pmid}")
         if not query_parts:
             return None
-        try:
-            response = await self.http_client.get(
-                f"{self.settings.europe_pmc_base_url}/search",
-                params={"query": " OR ".join(query_parts), "format": "json", "pageSize": 1, "resultType": "core"},
-                follow_redirects=True,
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            result = (((response.json() or {}).get("resultList") or {}).get("result") or [])
-            if result:
-                pmcid = str((result[0] or {}).get("pmcid") or "").strip()
-                if pmcid:
-                    return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
-        except Exception:
-            return None
+        for query in query_parts:
+            try:
+                response = await self.http_client.get(
+                    f"{self.settings.europe_pmc_base_url}/search",
+                    params={"query": query, "format": "json", "pageSize": 1, "resultType": "core"},
+                    follow_redirects=True,
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                result = (((response.json() or {}).get("resultList") or {}).get("result") or [])
+                if result:
+                    pmcid = str((result[0] or {}).get("pmcid") or "").strip()
+                    if pmcid:
+                        return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
+            except Exception:
+                continue
         return None
 
     async def _crossref_links(self, doi: str, *, want_xml: bool) -> list[str]:
@@ -349,6 +385,15 @@ class _BasePipeline:
             if not want_xml and ("pdf" in content_type or url.lower().endswith(".pdf")):
                 urls.append(url)
         return urls
+
+    @staticmethod
+    def _repo_pdf_priority_key(url: str) -> tuple[int, str]:
+        lowered = url.lower()
+        if any(token in lowered for token in ("supp", "supplement", "supplementary", "additional", "appendix", "mmc")):
+            return (5, lowered)
+        if any(token in lowered for token in ("article", "main", "nihms", "paper")):
+            return (0, lowered)
+        return (2, lowered)
 
     async def _europe_pmc_repo_candidates(self, pmc_id: str, *, file_type: str) -> list[str]:
         try:
@@ -381,6 +426,8 @@ class _BasePipeline:
                 f"&mimeType={quote(mime_type, safe='')}"
                 f"&version={version}&pmc_pageType=pdf&pmc_domain=null"
             )
+        if file_type == "pdf":
+            urls.sort(key=self._repo_pdf_priority_key)
         return urls
 
     async def _europe_pmc_fulltext_links(self, article: ArticleReference, *, want_xml: bool) -> list[str]:
@@ -442,7 +489,196 @@ class _BasePipeline:
             urls.append(href)
         return urls
 
+    async def _unpaywall_pdf_links(self, doi: str) -> list[str]:
+        if not self.settings.pdf_unpaywall_fallback_enabled or not self.settings.unpaywall_email:
+            return []
+        email = self.settings.unpaywall_email
+        try:
+            response = await self.http_client.get(
+                f"{self.settings.unpaywall_base_url}/{quote(doi, safe='')}",
+                params={"email": email},
+                headers={"User-Agent": self.settings.request_user_agent},
+                follow_redirects=True,
+                timeout=10.0,
+            )
+            if response.status_code != 200:
+                return []
+            payload = response.json() or {}
+        except Exception:
+            return []
+
+        locations = []
+        best_location = payload.get("best_oa_location")
+        if isinstance(best_location, dict):
+            locations.append(best_location)
+        for item in payload.get("oa_locations") or []:
+            if isinstance(item, dict):
+                locations.append(item)
+
+        urls: list[str] = []
+        landing_urls: list[str] = []
+        for location in locations:
+            pdf_url = str(location.get("url_for_pdf") or "").strip()
+            landing_url = str(location.get("url") or location.get("url_for_landing_page") or "").strip()
+            if pdf_url:
+                urls.append(pdf_url)
+            if landing_url:
+                if self._looks_like_pdf_url(landing_url):
+                    urls.append(landing_url)
+                else:
+                    landing_urls.append(landing_url)
+
+        for landing_url in landing_urls[:3]:
+            urls.extend(await self._doi_landing_pdf_links(doi, landing_url))
+        return self._dedupe_urls(urls)
+
+    async def _core_pdf_links(self, article: ArticleReference) -> list[str]:
+        if not self.settings.pdf_core_fallback_enabled or not self.settings.core_api_key:
+            return []
+        queries = self._fallback_search_queries(article)
+        if not queries:
+            return []
+        headers = {
+            "User-Agent": self.settings.request_user_agent,
+            "Authorization": self.settings.core_api_key,
+        }
+        urls: list[str] = []
+        for query in queries[:3]:
+            try:
+                response = await self.http_client.get(
+                    f"{self.settings.core_base_url.rstrip('/')}/search/works",
+                    params={"q": query, "limit": 5, "offset": 0},
+                    headers=headers,
+                    follow_redirects=True,
+                    timeout=12.0,
+                )
+                if response.status_code in {401, 403, 429}:
+                    continue
+                response.raise_for_status()
+                rows = (response.json() or {}).get("results") or []
+            except Exception:
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if not self._is_same_article(article, row.get("title"), row.get("doi")):
+                    continue
+                urls.extend(self._core_row_pdf_urls(row))
+        return self._dedupe_urls(urls)
+
+    async def _arxiv_pdf_links(self, article: ArticleReference) -> list[str]:
+        if not self.settings.pdf_arxiv_fallback_enabled:
+            return []
+        queries = self._fallback_search_queries(article)
+        if not queries:
+            return []
+        ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+        urls: list[str] = []
+        for query in queries[:3]:
+            try:
+                response = await self.http_client.get(
+                    self.settings.arxiv_base_url,
+                    params={"search_query": query, "start": 0, "max_results": 5},
+                    headers={"User-Agent": self.settings.request_user_agent},
+                    follow_redirects=True,
+                    timeout=12.0,
+                )
+                response.raise_for_status()
+                root = ET.fromstring(response.text)
+            except Exception:
+                continue
+            for entry in root.findall("atom:entry", ns):
+                title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+                doi = (entry.findtext("arxiv:doi", default="", namespaces=ns) or "").strip()
+                if not self._is_same_article(article, title, doi, threshold=0.94):
+                    continue
+                for link in entry.findall("atom:link", ns):
+                    href = (link.attrib.get("href") or "").strip()
+                    if link.attrib.get("type") == "application/pdf" and href:
+                        urls.append(href)
+        return self._dedupe_urls(urls)
+
+    @classmethod
+    def _fallback_search_queries(cls, article: ArticleReference) -> list[str]:
+        queries: list[str] = []
+        doi = (article.doi or "").strip()
+        if doi:
+            queries.extend([f'doi:"{doi}"', f'"{doi}"'])
+        normalized_title = cls._normalize_text(article.title or "")
+        if normalized_title:
+            title_tokens = normalized_title.split()
+            queries.append(article.title or "")
+            if len(title_tokens) >= 4:
+                queries.append(" ".join(title_tokens[:8]))
+        return cls._dedupe_urls([query for query in queries if query.strip()])
+
+    @classmethod
+    def _is_same_article(
+        cls,
+        article: ArticleReference,
+        candidate_title: Any,
+        candidate_doi: Any,
+        *,
+        threshold: float = 0.90,
+    ) -> bool:
+        expected_doi = (article.doi or "").strip().lower()
+        row_doi = str(candidate_doi or "").strip().lower().removeprefix("https://doi.org/").removeprefix("doi:")
+        if expected_doi and row_doi and row_doi == expected_doi:
+            return True
+        expected_title = article.title or ""
+        row_title = str(candidate_title or "")
+        return cls._title_similarity(expected_title, row_title) >= threshold
+
+    @classmethod
+    def _title_similarity(cls, first: str, second: str) -> float:
+        a = cls._normalize_text(first)
+        b = cls._normalize_text(second)
+        if not a or not b:
+            return 0.0
+        sequence_score = SequenceMatcher(None, a, b).ratio()
+        a_tokens = set(a.split())
+        b_tokens = set(b.split())
+        overlap_score = len(a_tokens & b_tokens) / max(len(a_tokens), len(b_tokens)) if a_tokens and b_tokens else 0.0
+        return max(sequence_score, overlap_score)
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        normalized = html.unescape(value).lower()
+        normalized = re.sub(r"<[^>]+>", " ", normalized)
+        normalized = re.sub(r"[\u2010-\u2015]", "-", normalized)
+        normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @classmethod
+    def _core_row_pdf_urls(cls, row: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+        for value in [row.get("downloadUrl"), *(row.get("sourceFulltextUrls") or [])]:
+            if not isinstance(value, str):
+                continue
+            normalized = cls._normalize_external_pdf_url(value.strip())
+            if normalized:
+                urls.append(normalized)
+        return cls._dedupe_urls(urls)
+
+    @staticmethod
+    def _normalize_external_pdf_url(url: str) -> str | None:
+        if not url:
+            return None
+        lowered = url.lower()
+        if "arxiv.org/abs/" in lowered:
+            arxiv_id = url.rstrip("/").rsplit("/", 1)[-1]
+            return f"https://arxiv.org/pdf/{arxiv_id}"
+        if "arxiv.org/pdf/" in lowered:
+            return url
+        if lowered.endswith(".pdf") or ".pdf?" in lowered:
+            return url
+        if "core.ac.uk/download/" in lowered:
+            return url
+        return None
+
     async def _doi_landing_pdf_links(self, doi: str, landing_url: str | None = None) -> list[str]:
+        if not doi and not landing_url:
+            return []
         target_url = landing_url or f"{self.settings.doi_resolver_base_url}/{quote(doi, safe='')}"
         try:
             response = await self.http_client.get(
@@ -460,21 +696,39 @@ class _BasePipeline:
             return []
         html = response.text
         base_url = str(response.url)
+        return self._extract_pdf_links_from_html(html, base_url)
+
+    @classmethod
+    def _extract_pdf_links_from_html(cls, html_text: str, base_url: str) -> list[str]:
         urls: list[str] = []
         for pattern in (
-            r'citation_pdf_url[^>]+content=["\']([^"\']+)',
-            r'href=["\']([^"\']*\.pdf[^"\']*)["\']',
-            r'href=["\']([^"\']*type=printable[^"\']*)["\']',
+            r'<meta[^>]+(?:name|property)=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|property)=["\']citation_pdf_url["\']',
+            r'<link[^>]+href=["\']([^"\']+)["\'][^>]+(?:type=["\']application/pdf["\']|rel=["\'][^"\']*pdf[^"\']*["\'])',
+            r'<link[^>]+(?:type=["\']application/pdf["\']|rel=["\'][^"\']*pdf[^"\']*["\'])[^>]+href=["\']([^"\']+)["\']',
+            r'<a[^>]+href=["\']([^"\']*\.pdf(?:\?[^"\']*)?)["\']',
+            r'<a[^>]+href=["\']([^"\']*(?:pdfdirect|/pdf/|type=printable)[^"\']*)["\']',
+            r'<a[^>]+href=["\']([^"\']+)["\'][^>]+(?:title|aria-label)=["\'][^"\']*pdf[^"\']*["\']',
         ):
-            for match in re.finditer(pattern, html, re.IGNORECASE):
-                urls.append(urljoin(base_url, match.group(1)))
+            for match in re.finditer(pattern, html_text, re.IGNORECASE):
+                urls.append(urljoin(base_url, html.unescape(match.group(1))))
+        return cls._dedupe_urls([url for url in urls if cls._looks_like_pdf_url(url)])
+
+    @staticmethod
+    def _looks_like_pdf_url(url: str) -> bool:
+        lowered = url.lower()
+        return any(token in lowered for token in (".pdf", "/pdf/", "pdfdirect", "type=printable", "pdf=render"))
+
+    @staticmethod
+    def _dedupe_urls(urls: list[str]) -> list[str]:
         deduped: list[str] = []
         seen: set[str] = set()
         for url in urls:
-            if url in seen:
+            normalized = url.strip()
+            if not normalized or normalized in seen:
                 continue
-            seen.add(url)
-            deduped.append(url)
+            seen.add(normalized)
+            deduped.append(normalized)
         return deduped
 
     async def _ncbi_linkout_candidates(self, pmid: str) -> list[str]:
@@ -542,7 +796,7 @@ class _BasePipeline:
     def _dedupe_candidates(candidates: list[DownloadCandidate]) -> list[DownloadCandidate]:
         deduped: list[DownloadCandidate] = []
         seen: set[tuple[str, str]] = set()
-        for candidate in sorted(candidates, key=lambda item: (item.priority, item.source, item.url)):
+        for candidate in sorted(candidates, key=lambda item: item.priority):
             key = (candidate.source, candidate.url)
             if key in seen:
                 continue
@@ -577,11 +831,47 @@ class XMLPipeline(_BasePipeline):
 
 
 class PDFPipeline(_BasePipeline):
+    @staticmethod
+    def _normalize_arxiv_record_id(value: str | None) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if "arxiv.org/" in raw:
+            raw = raw.rstrip("/").rsplit("/", 1)[-1]
+        return raw.removesuffix(".pdf") or None
+
+    def _native_pdf_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
+        source = (article.source_name or "").strip().lower()
+        candidates: list[DownloadCandidate] = []
+        if source == "core" and article.oa_pdf_url:
+            candidates.append(
+                DownloadCandidate(source="core_native_pdf", url=article.oa_pdf_url, file_type="pdf", priority=0)
+            )
+        if source == "arxiv":
+            if article.oa_pdf_url:
+                candidates.append(
+                    DownloadCandidate(source="arxiv_native_pdf", url=article.oa_pdf_url, file_type="pdf", priority=0)
+                )
+            record_id = self._normalize_arxiv_record_id(article.source_record_id)
+            if record_id:
+                candidates.append(
+                    DownloadCandidate(
+                        source="arxiv_native_pdf",
+                        url=f"https://arxiv.org/pdf/{quote(record_id)}.pdf",
+                        file_type="pdf",
+                        priority=0,
+                    )
+                )
+        return self._dedupe_candidates(candidates)
+
     async def resolve_candidates(self, article: ArticleReference) -> list[DownloadCandidate]:
         candidates: list[DownloadCandidate] = []
         pmc_id = await self._resolve_pmc_id(article)
         enriched_article = article.model_copy(update={"pmc_id": pmc_id or article.pmc_id})
-        if article.oa_pdf_url:
+        native_candidates = self._native_pdf_candidates(article)
+        candidates.extend(native_candidates)
+        native_urls = {candidate.url for candidate in native_candidates}
+        if article.oa_pdf_url and article.oa_pdf_url not in native_urls:
             candidates.append(DownloadCandidate(source="article_oa_pdf", url=article.oa_pdf_url, file_type="pdf", priority=0))
         if pmc_id:
             candidates.append(
@@ -609,6 +899,8 @@ class PDFPipeline(_BasePipeline):
         if article.doi:
             for url in await self._crossref_links(article.doi, want_xml=False):
                 candidates.append(DownloadCandidate(source="crossref_pdf", url=url, file_type="pdf", priority=5))
+            for url in await self._unpaywall_pdf_links(article.doi):
+                candidates.append(DownloadCandidate(source="unpaywall_pdf", url=url, file_type="pdf", priority=5))
             for url in await self._doi_landing_pdf_links(article.doi, article.landing_page_url):
                 candidates.append(DownloadCandidate(source="doi_landing_pdf", url=url, file_type="pdf", priority=6))
         if article.landing_page_url and article.doi:
@@ -626,6 +918,10 @@ class PDFPipeline(_BasePipeline):
         if article.pmid:
             for url in await self._ncbi_linkout_candidates(article.pmid):
                 candidates.append(DownloadCandidate(source="ncbi_linkout_pdf", url=url, file_type="pdf", priority=7))
+        for url in await self._core_pdf_links(article):
+            candidates.append(DownloadCandidate(source="core_pdf", url=url, file_type="pdf", priority=9))
+        for url in await self._arxiv_pdf_links(article):
+            candidates.append(DownloadCandidate(source="arxiv_pdf", url=url, file_type="pdf", priority=10))
         return self._dedupe_candidates(candidates)
 
 

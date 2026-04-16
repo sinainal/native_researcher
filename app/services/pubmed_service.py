@@ -20,6 +20,8 @@ from app.schemas.pubmed import (
 from app.services.agent.search_policy import apply_default_year_window
 from app.services.journal_metrics_service import JournalMetricsService
 from app.services.search.adapters import (
+    ArxivSearchAdapter,
+    CoreSearchAdapter,
     EuropePMCSearchAdapter,
     OpenAlexSearchAdapter,
     PMCSearchAdapter,
@@ -50,6 +52,8 @@ class PubMedService:
                     OpenAlexSearchAdapter(http_client, self.settings),
                     EuropePMCSearchAdapter(http_client, self.settings),
                     PMCSearchAdapter(client.http_client, self.settings),
+                    CoreSearchAdapter(http_client, self.settings),
+                    ArxivSearchAdapter(http_client, self.settings),
                 ]
             )
         self.orchestrator = SearchOrchestrator(adapters)
@@ -136,20 +140,24 @@ class PubMedService:
                 (request.article_type or "").strip().lower(),
                 request.preferred_source,
                 str(bool(getattr(self.client.settings, "pubmed_oa_only", False))),
-                "search_orchestrator_v5",
+                "search_orchestrator_v7",
             ]
         )
 
     @staticmethod
     def _normalize_search_resource(value: str | None, default: str = "openalex") -> str:
         normalized = (value or "").strip().lower()
-        if normalized in {"openalex", "pubmed", "europe_pmc", "pmc"}:
+        if normalized in {"openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"}:
             return normalized
         return default
 
     @staticmethod
     def _apply_request_filters(articles: list[Article], request: PubMedSearchRequest) -> list[Article]:
         filtered = list(articles)
+        if request.year_start is not None:
+            filtered = [item for item in filtered if (item.year or "").isdigit() and int(item.year) >= request.year_start]
+        if request.year_end is not None:
+            filtered = [item for item in filtered if (item.year or "").isdigit() and int(item.year) <= request.year_end]
         if request.min_cite is not None:
             filtered = [item for item in filtered if (item.citation_count or 0) >= request.min_cite]
         if request.article_type:

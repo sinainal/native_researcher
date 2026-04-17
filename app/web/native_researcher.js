@@ -190,6 +190,14 @@ const assistantModelLabelMap = {
   "Gemini 2.5 Flash": "Gemini 2.5 Flash",
   "Gemini 2.5 Flash Lite": "Gemini 2.5 Flash Lite",
 };
+const assistantBaseModels = [
+  "Gemini 3.1 Pro",
+  "Gemini 3 Flash",
+  "Gemini 3.1 Flash Lite",
+  "Gemini 2.5 Pro",
+  "Gemini 2.5 Flash",
+  "Gemini 2.5 Flash Lite",
+];
 
 const assistantModelThinkingSupport = {
   "Gemini 3.1 Pro": true,
@@ -312,6 +320,42 @@ function ollamaModelLabel(model) {
     ? ` (${(sizeValue / (1024 * 1024 * 1024)).toFixed(1)} GB)`
     : "";
   return `${model.name}${sizeLabel}`;
+}
+
+function currentOllamaAssistantModel() {
+  return runtime.ollamaModel ? `ollama:${runtime.ollamaModel}` : "";
+}
+
+function isOllamaAssistantModel(model) {
+  return String(model || "").startsWith("ollama:");
+}
+
+function assistantModelOptions() {
+  const options = assistantBaseModels.map((model) => ({
+    value: model,
+    label: assistantModelLabelMap[model] || model,
+  }));
+  if (isOllamaAssistantModel(runtime.assistantModel)) {
+    options.push({
+      value: runtime.assistantModel,
+      label: `Ollama · ${runtime.assistantModel.slice("ollama:".length)}`,
+    });
+  }
+  if (runtime.ollamaModel && !options.some((item) => item.value === currentOllamaAssistantModel())) {
+    options.push({
+      value: currentOllamaAssistantModel(),
+      label: `Ollama · ${runtime.ollamaModel}`,
+    });
+  }
+  return options;
+}
+
+function normalizeAssistantModel(model) {
+  const requested = String(model || "").trim();
+  if (isOllamaAssistantModel(requested)) {
+    return currentOllamaAssistantModel() || requested;
+  }
+  return assistantBaseModels.includes(requested) ? requested : "Gemini 3 Flash";
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -1248,6 +1292,7 @@ function applyApiKeyValues(payload = {}) {
 }
 
 function applyOllamaValues(payload = {}) {
+  const previousOllamaModel = currentOllamaAssistantModel();
   runtime.ollamaBaseUrl = normalizeOllamaBaseUrl(
     payload.ollama_base_url,
     runtime.ollamaBaseUrl || "http://localhost:11434",
@@ -1260,6 +1305,14 @@ function applyOllamaValues(payload = {}) {
   if (runtime.ollamaModel && !runtime.ollamaModels.some((model) => model.name === runtime.ollamaModel)) {
     runtime.ollamaModels = [...runtime.ollamaModels];
   }
+  if (isOllamaAssistantModel(runtime.assistantModel)) {
+    const nextOllamaModel = currentOllamaAssistantModel();
+    runtime.assistantModel = nextOllamaModel || "Gemini 3 Flash";
+  } else if (runtime.assistantModel === previousOllamaModel) {
+    runtime.assistantModel = currentOllamaAssistantModel() || "Gemini 3 Flash";
+  }
+  updateAssistantModelUI();
+  updateThinkingLabel();
   renderSettingsPanel();
 }
 
@@ -3978,15 +4031,26 @@ function setAssistantOpen(next) {
 }
 
 function updateAssistantModelUI() {
-  els.assistantModelLabel.textContent = assistantModelLabelMap[runtime.assistantModel] || runtime.assistantModel;
-  els.assistantModelItems.forEach((item) => {
+  const options = assistantModelOptions();
+  const activeModel = normalizeAssistantModel(runtime.assistantModel);
+  runtime.assistantModel = activeModel;
+  localStorage.setItem(assistantModelStorageKey, activeModel);
+  if (els.assistantModelMenu) {
+    els.assistantModelMenu.innerHTML = options.map((item) => `
+      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="${escapeHtml(item.value)}">${escapeHtml(item.label)}</button>
+    `).join("");
+  }
+  els.assistantModelLabel.textContent = assistantModelLabelMap[activeModel]
+    || options.find((item) => item.value === activeModel)?.label
+    || activeModel;
+  document.querySelectorAll(".assistant-model-item").forEach((item) => {
     item.classList.toggle("is-selected", item.dataset.model === runtime.assistantModel);
   });
   updateThinkingControlsUI();
 }
 
 function currentModelSupportsThinking() {
-  return Boolean(assistantModelThinkingSupport[runtime.assistantModel]);
+  return !isOllamaAssistantModel(runtime.assistantModel) && Boolean(assistantModelThinkingSupport[runtime.assistantModel]);
 }
 
 function effectiveThinkingLevel() {
@@ -4251,7 +4315,7 @@ function applyAssistantActions(actions) {
 async function sendAssistantMessage() {
   const message = els.assistantInput.value.trim();
   if (!message) return;
-  if (!runtime.apiKey) {
+  if (!isOllamaAssistantModel(runtime.assistantModel) && !runtime.apiKey) {
     trackAppEvent("error", "assistant_missing_api_key", "Assistant API key not found.", {
       project_id: state.projectId || "",
     });
@@ -4298,7 +4362,7 @@ async function sendAssistantMessage() {
         idleTimeoutMs: 45000,
         responseTimeoutMs: 20000,
         body: JSON.stringify({
-          api_key: runtime.apiKey,
+          api_key: isOllamaAssistantModel(runtime.assistantModel) ? "" : runtime.apiKey,
           message,
           model: runtime.assistantModel,
           mode: "fast",
@@ -4747,15 +4811,15 @@ function bindEvents() {
     els.thinkMenu.hidden = true;
     els.thinkToggleBtn.setAttribute("aria-expanded", "false");
   });
-  els.assistantModelItems.forEach((item) => {
-    item.addEventListener("click", () => {
-      runtime.assistantModel = item.dataset.model;
-      localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
-      updateAssistantModelUI();
-      updateThinkingLabel();
-      els.assistantModelMenu.hidden = true;
-      els.assistantModelBtn.setAttribute("aria-expanded", "false");
-    });
+  els.assistantModelMenu?.addEventListener("click", (event) => {
+    const item = event.target.closest(".assistant-model-item");
+    if (!item) return;
+    runtime.assistantModel = normalizeAssistantModel(item.dataset.model);
+    localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
+    updateAssistantModelUI();
+    updateThinkingLabel();
+    els.assistantModelMenu.hidden = true;
+    els.assistantModelBtn.setAttribute("aria-expanded", "false");
   });
 
   els.thinkToggleBtn.addEventListener("click", () => {

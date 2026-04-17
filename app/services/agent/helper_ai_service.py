@@ -11,7 +11,8 @@ from datetime import date
 from typing import Any
 from uuid import uuid4
 
-from app.genai import create_genai_client, load_genai_sdk, resolve_helper_model_name
+from app.genai import create_genai_client, load_genai_sdk
+from app.llm import extract_ollama_tool_calls, ollama_chat, resolve_chat_model_target
 from app.schemas.article import Article
 from app.schemas.helper import (
     HelperArticle,
@@ -83,8 +84,52 @@ class HelperAIService:
     def _fast_mode_system_instruction(self) -> str:
         return build_helper_fast_mode_system_instruction(self._preferred_search_source())
 
+    def _runtime_settings(self) -> Any | None:
+        return getattr(self.pubmed_service, "settings", None)
+
+    def _resolve_model_target(self, requested_model: str | None):
+        return resolve_chat_model_target(requested_model, settings=self._runtime_settings())
+
+    def _require_gemini_api_key(self, api_key: str) -> None:
+        if len((api_key or "").strip()) >= 10:
+            return
+        raise RuntimeError("Gemini modeli icin API key gerekli.")
+
+    def _ollama_base_url(self) -> str:
+        settings = self._runtime_settings()
+        return str(getattr(settings, "ollama_base_url", "http://localhost:11434") or "http://localhost:11434")
+
+    def _ollama_request_user_agent(self) -> str:
+        settings = self._runtime_settings()
+        return str(getattr(settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1")
+
+    @staticmethod
+    def _history_to_ollama_messages(history: list[dict[str, str]]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for item in history:
+            role = "assistant" if item.get("role") == "model" else "user"
+            text = str(item.get("text") or "")
+            if not text:
+                continue
+            messages.append({"role": role, "content": text})
+        return messages
+
+    @staticmethod
+    def _ollama_assistant_message(
+        *,
+        content: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant"}
+        if content:
+            message["content"] = content
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message
+
     async def chat(self, payload: HelperChatRequest) -> HelperChatResponse:
-        model_name = resolve_helper_model_name(payload.model)
+        model_target = self._resolve_model_target(payload.model)
+        model_name = model_target.model_name
         thread_id = payload.thread_id or f"thread_{uuid4().hex[:16]}"
         thread_state = self.thread_cache.get(thread_id) or HelperThreadState()
         self._log(
@@ -97,6 +142,8 @@ class HelperAIService:
             article_count=len(payload.articles),
             thinking_level=payload.thinking_level,
         )
+        if model_target.provider == "ollama":
+            return await self._chat_with_ollama(payload, thread_id=thread_id, thread_state=thread_state, model_name=model_name)
 
         if payload.mode != "fast":
             answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
@@ -119,6 +166,7 @@ class HelperAIService:
                 history_size=len(thread_state.history),
             )
 
+        self._require_gemini_api_key(payload.api_key)
         _genai, types = load_genai_sdk()
         article_index = {article.id: article for article in payload.articles}
         last_search_index: dict[int, HelperArticle] = {}
@@ -244,7 +292,8 @@ class HelperAIService:
         )
 
     async def chat_stream(self, payload: HelperChatRequest) -> AsyncIterator[dict[str, Any]]:
-        model_name = resolve_helper_model_name(payload.model)
+        model_target = self._resolve_model_target(payload.model)
+        model_name = model_target.model_name
         thread_id = payload.thread_id or f"thread_{uuid4().hex[:16]}"
         thread_state = self.thread_cache.get(thread_id) or HelperThreadState()
         self._log(
@@ -257,6 +306,15 @@ class HelperAIService:
             article_count=len(payload.articles),
             thinking_level=payload.thinking_level,
         )
+        if model_target.provider == "ollama":
+            async for event in self._chat_stream_with_ollama(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            ):
+                yield event
+            return
 
         if payload.mode != "fast":
             answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
@@ -287,6 +345,7 @@ class HelperAIService:
             yield {"type": "final", "response": response.model_dump()}
             return
 
+        self._require_gemini_api_key(payload.api_key)
         client = create_genai_client(payload.api_key)
         _genai, types = load_genai_sdk()
         article_index = {article.id: article for article in payload.articles}
@@ -524,6 +583,384 @@ class HelperAIService:
         )
         yield {"type": "final", "response": response.model_dump()}
 
+    async def _chat_with_ollama(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> HelperChatResponse:
+        if payload.mode != "fast":
+            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            self._append_history(thread_state, payload.message, answer)
+            self.thread_cache.set(thread_id, thread_state)
+            self._log(
+                "assistant_chat_final",
+                thread_id=thread_id,
+                mode=payload.mode,
+                model=model_name,
+                answer=answer,
+                used_article_ids=[],
+                executed_actions=[],
+            )
+            return HelperChatResponse(
+                thread_id=thread_id,
+                answer=answer,
+                model=model_name,
+                mode=payload.mode,
+                history_size=len(thread_state.history),
+            )
+
+        article_index = {article.id: article for article in payload.articles}
+        last_search_index: dict[int, HelperArticle] = {}
+        selected_set = set(payload.selected_ids)
+        used_article_ids: set[int] = set()
+        executed_actions: list[HelperExecutedAction] = []
+        step_notes: list[str] = []
+        thinking_notes: list[str] = []
+        messages = [
+            {"role": "system", "content": self._fast_mode_system_instruction()},
+            *self._history_to_ollama_messages(thread_state.history),
+            {"role": "user", "content": self._build_fast_prompt(payload, today_stamp=date.today().isoformat())},
+        ]
+        remaining_tool_calls = MAX_FAST_TOOL_CALLS
+        answer = "Yanit uretilemedi."
+        finalizer_needed = False
+
+        while True:
+            response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=messages,
+                tools=self._build_ollama_fast_toolset() if remaining_tool_calls > 0 else None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            message = response.get("message") or {}
+            answer_text = str(message.get("content") or "").strip()
+            thinking_text = str(message.get("thinking") or "").strip()
+            if thinking_text:
+                thinking_notes.append(thinking_text)
+            tool_calls = extract_ollama_tool_calls(message)
+            if tool_calls and remaining_tool_calls > 0:
+                messages.append(
+                    self._ollama_assistant_message(
+                        content=answer_text,
+                        tool_calls=[call.raw for call in tool_calls],
+                    )
+                )
+                for call in tool_calls:
+                    if remaining_tool_calls <= 0:
+                        break
+                    result, action = await self._execute_tool_call(
+                        call.name,
+                        call.args,
+                        api_key=payload.api_key,
+                        model_name=model_name,
+                        article_index=article_index,
+                        last_search_index=last_search_index,
+                        selected_set=selected_set,
+                        used_article_ids=used_article_ids,
+                    )
+                    executed_actions.append(action)
+                    step_notes.append(self._step_note_from_action(action))
+                    self._log(
+                        "assistant_tool_result",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        call_id=call.call_id,
+                        action=action.model_dump(),
+                    )
+                    if self._is_terminal_empty_search_action(action):
+                        answer = self._build_no_results_answer(action)
+                        self._append_history(thread_state, payload.message, answer)
+                        self.thread_cache.set(thread_id, thread_state)
+                        return HelperChatResponse(
+                            thread_id=thread_id,
+                            answer=answer,
+                            model=model_name,
+                            mode="fast",
+                            used_article_ids=sorted(used_article_ids),
+                            history_size=len(thread_state.history),
+                            thinking="\n\n".join(thinking_notes).strip()
+                            or self._build_thinking_summary(
+                                payload.thinking_level,
+                                total_articles=len(payload.articles),
+                                selected_count=len(selected_set),
+                                steps=step_notes,
+                                used_article_ids=sorted(used_article_ids),
+                            ),
+                            executed_actions=executed_actions,
+                        )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": call.name,
+                            "content": json.dumps({"result": result}, ensure_ascii=False),
+                        }
+                    )
+                    remaining_tool_calls -= 1
+                continue
+
+            if answer_text:
+                messages.append(self._ollama_assistant_message(content=answer_text))
+            answer = answer_text or "Yanit uretilemedi."
+            if not answer_text and executed_actions:
+                finalizer_needed = True
+            break
+
+        if finalizer_needed:
+            final_response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=[*messages, {"role": "user", "content": HELPER_FINALIZER_PROMPT}],
+                tools=None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            final_message = final_response.get("message") or {}
+            final_answer = str(final_message.get("content") or "").strip()
+            final_thinking = str(final_message.get("thinking") or "").strip()
+            if final_thinking:
+                thinking_notes.append(final_thinking)
+            answer = final_answer or answer
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_chat_final",
+            thread_id=thread_id,
+            mode="fast",
+            model=model_name,
+            answer=answer,
+            used_article_ids=sorted(used_article_ids),
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        return HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode="fast",
+            used_article_ids=sorted(used_article_ids),
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(thinking_notes).strip()
+            or self._build_thinking_summary(
+                payload.thinking_level,
+                total_articles=len(payload.articles),
+                selected_count=len(selected_set),
+                steps=step_notes,
+                used_article_ids=sorted(used_article_ids),
+            ),
+            executed_actions=executed_actions,
+        )
+
+    async def _chat_stream_with_ollama(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if payload.mode != "fast":
+            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            self._append_history(thread_state, payload.message, answer)
+            self.thread_cache.set(thread_id, thread_state)
+            response = HelperChatResponse(
+                thread_id=thread_id,
+                answer=answer,
+                model=model_name,
+                mode=payload.mode,
+                history_size=len(thread_state.history),
+            )
+            yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": payload.mode}
+            yield {"type": "final", "response": response.model_dump()}
+            return
+
+        article_index = {article.id: article for article in payload.articles}
+        last_search_index: dict[int, HelperArticle] = {}
+        selected_set = set(payload.selected_ids)
+        used_article_ids: set[int] = set()
+        executed_actions: list[HelperExecutedAction] = []
+        step_notes: list[str] = []
+        streamed_thoughts: list[str] = []
+        messages = [
+            {"role": "system", "content": self._fast_mode_system_instruction()},
+            *self._history_to_ollama_messages(thread_state.history),
+            {"role": "user", "content": self._build_fast_prompt(payload, today_stamp=date.today().isoformat())},
+        ]
+
+        yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "fast"}
+        yield {"type": "status", "text": "İstek analiz ediliyor."}
+
+        remaining_tool_calls = MAX_FAST_TOOL_CALLS
+        answer = "Yanit uretilemedi."
+        finalizer_needed = False
+
+        while True:
+            response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=messages,
+                tools=self._build_ollama_fast_toolset() if remaining_tool_calls > 0 else None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            message = response.get("message") or {}
+            answer_text = str(message.get("content") or "")
+            thinking_text = str(message.get("thinking") or "").strip()
+            if thinking_text:
+                streamed_thoughts.append(thinking_text)
+                yield {"type": "thinking_delta", "text": thinking_text}
+            tool_calls = extract_ollama_tool_calls(message)
+            if tool_calls and remaining_tool_calls > 0:
+                messages.append(
+                    self._ollama_assistant_message(
+                        content=answer_text.strip(),
+                        tool_calls=[call.raw for call in tool_calls],
+                    )
+                )
+                for call in tool_calls:
+                    if remaining_tool_calls <= 0:
+                        break
+                    self._log(
+                        "assistant_tool_call",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        call_id=call.call_id,
+                        name=call.name,
+                        args=call.args,
+                    )
+                    yield {
+                        "type": "tool_call",
+                        "call_id": call.call_id,
+                        "action": {
+                            "type": "tool_call",
+                            "name": call.name,
+                            "title": self._tool_pending_title(call.name),
+                            "status": "running",
+                            "details": call.args,
+                        },
+                    }
+                    result, action = await self._execute_tool_call(
+                        call.name,
+                        call.args,
+                        api_key=payload.api_key,
+                        model_name=model_name,
+                        article_index=article_index,
+                        last_search_index=last_search_index,
+                        selected_set=selected_set,
+                        used_article_ids=used_article_ids,
+                    )
+                    executed_actions.append(action)
+                    step_notes.append(self._step_note_from_action(action))
+                    self._log(
+                        "assistant_tool_result",
+                        thread_id=thread_id,
+                        mode="fast",
+                        model=model_name,
+                        call_id=call.call_id,
+                        action=action.model_dump(),
+                    )
+                    yield {"type": "tool_result", "call_id": call.call_id, "action": action.model_dump()}
+                    if self._is_terminal_empty_search_action(action):
+                        answer = self._build_no_results_answer(action)
+                        yield {"type": "answer_delta", "text": answer}
+                        self._append_history(thread_state, payload.message, answer)
+                        self.thread_cache.set(thread_id, thread_state)
+                        response_payload = HelperChatResponse(
+                            thread_id=thread_id,
+                            answer=answer,
+                            model=model_name,
+                            mode="fast",
+                            used_article_ids=sorted(used_article_ids),
+                            history_size=len(thread_state.history),
+                            thinking="\n\n".join(streamed_thoughts).strip()
+                            or self._build_thinking_summary(
+                                payload.thinking_level,
+                                total_articles=len(payload.articles),
+                                selected_count=len(selected_set),
+                                steps=step_notes,
+                                used_article_ids=sorted(used_article_ids),
+                            ),
+                            executed_actions=executed_actions,
+                        )
+                        yield {"type": "final", "response": response_payload.model_dump()}
+                        return
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": call.name,
+                            "content": json.dumps({"result": result}, ensure_ascii=False),
+                        }
+                    )
+                    remaining_tool_calls -= 1
+                continue
+
+            answer = answer_text.strip()
+            if answer:
+                messages.append(self._ollama_assistant_message(content=answer))
+                yield {"type": "answer_delta", "text": answer}
+            if not answer and executed_actions:
+                finalizer_needed = True
+            answer = answer or "Yanit uretilemedi."
+            break
+
+        if finalizer_needed:
+            yield {"type": "status", "text": "Araç çıktıları birleştiriliyor."}
+            final_response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=[*messages, {"role": "user", "content": HELPER_FINALIZER_PROMPT}],
+                tools=None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            final_message = final_response.get("message") or {}
+            final_thinking = str(final_message.get("thinking") or "").strip()
+            if final_thinking:
+                streamed_thoughts.append(final_thinking)
+                yield {"type": "thinking_delta", "text": final_thinking}
+            final_answer = str(final_message.get("content") or "").strip()
+            if final_answer:
+                answer = final_answer
+                yield {"type": "answer_delta", "text": final_answer}
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_stream_final",
+            thread_id=thread_id,
+            mode="fast",
+            model=model_name,
+            answer=answer,
+            used_article_ids=sorted(used_article_ids),
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode="fast",
+            used_article_ids=sorted(used_article_ids),
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(streamed_thoughts).strip()
+            or self._build_thinking_summary(
+                payload.thinking_level,
+                total_articles=len(payload.articles),
+                selected_count=len(selected_set),
+                steps=step_notes,
+                used_article_ids=sorted(used_article_ids),
+            ),
+            executed_actions=executed_actions,
+        )
+        yield {"type": "final", "response": response.model_dump()}
+
     def reset(self, thread_id: str) -> None:
         self.thread_cache.delete(thread_id)
 
@@ -741,6 +1178,104 @@ class HelperAIService:
                 ),
             ]
         )
+
+    def _build_ollama_fast_toolset(self) -> list[dict[str, Any]]:
+        source = self._preferred_search_source()
+        search_description, query_description = source_tool_description(source)
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_catalog_articles",
+                    "description": "Quickly scans the loaded catalog using title, article type, and MeSH metadata.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Free-text filter for title and MeSH fields.",
+                            },
+                            "article_type": {
+                                "type": "string",
+                                "description": "Optional article type filter.",
+                            },
+                            "selected_only": {
+                                "type": "boolean",
+                                "description": "Limit the scan to selected articles only.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum result count, between 1 and 20.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_pubmed",
+                    "description": search_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": query_description,
+                            },
+                            "year_start": {
+                                "type": "integer",
+                                "description": "Optional start year.",
+                            },
+                            "year_end": {
+                                "type": "integer",
+                                "description": "Optional end year.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of articles to fetch, between 1 and 100. Defaults to 100 when omitted.",
+                            },
+                            "article_type": {
+                                "type": "string",
+                                "description": "Optional article type filter, for example Review, Clinical Trial, or Meta-Analysis.",
+                            },
+                            "min_cite": {
+                                "type": "integer",
+                                "description": "Optional minimum citation-count threshold applied after retrieval.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_article_details",
+                    "description": (
+                        "Reads abstracts and detailed metadata for specific article IDs. "
+                        "You must use this tool before answering abstract-level or detailed article questions. "
+                        "Default source is `loaded`; use `last_search` after a new search."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source": {
+                                "type": "string",
+                                "enum": ["loaded", "last_search"],
+                                "description": "Source to read details from.",
+                            },
+                            "ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "List of numeric article IDs.",
+                            },
+                        },
+                        "required": ["ids"],
+                    },
+                },
+            },
+        ]
 
     async def _execute_tool_call(
         self,

@@ -10,7 +10,8 @@ from datetime import date
 from typing import Any
 from uuid import uuid4
 
-from app.genai import create_genai_client, load_genai_sdk, resolve_helper_model_name
+from app.genai import create_genai_client, load_genai_sdk
+from app.llm import extract_ollama_tool_calls, ollama_chat, resolve_chat_model_target
 from app.schemas.helper import (
     HelperChatRequest,
     HelperChatResponse,
@@ -69,11 +70,50 @@ class NativeResearcherService:
     def _system_instruction(self) -> str:
         return build_native_system_instruction(self._preferred_search_source())
 
+    def _resolve_model_target(self, requested_model: str | None):
+        return resolve_chat_model_target(requested_model, settings=self.pubmed_service.settings)
+
+    @staticmethod
+    def _history_to_ollama_messages(history: list[dict[str, str]]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for item in history:
+            role = "assistant" if item.get("role") == "model" else "user"
+            text = str(item.get("text") or "")
+            if text:
+                messages.append({"role": role, "content": text})
+        return messages
+
+    def _ollama_base_url(self) -> str:
+        return str(getattr(self.pubmed_service.settings, "ollama_base_url", "http://localhost:11434") or "http://localhost:11434")
+
+    def _ollama_request_user_agent(self) -> str:
+        return str(getattr(self.pubmed_service.settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1")
+
+    @staticmethod
+    def _ollama_assistant_message(
+        *,
+        content: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant"}
+        if content:
+            message["content"] = content
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message
+
+    @staticmethod
+    def _require_gemini_api_key(api_key: str) -> None:
+        if len((api_key or "").strip()) >= 10:
+            return
+        raise RuntimeError("Gemini modeli icin API key gerekli.")
+
     def reset(self, thread_id: str) -> None:
         self.thread_cache.delete(thread_id)
 
     async def chat_stream(self, payload: HelperChatRequest) -> AsyncIterator[dict[str, Any]]:
-        model_name = resolve_helper_model_name(payload.model)
+        model_target = self._resolve_model_target(payload.model)
+        model_name = model_target.model_name
         thread_id = payload.thread_id or f"native_{uuid4().hex[:16]}"
         thread_state = self.thread_cache.get(thread_id) or NativeThreadState()
         self.log_event(
@@ -83,7 +123,17 @@ class NativeResearcherService:
             message=payload.message,
             thinking_level=payload.thinking_level,
         )
+        if model_target.provider == "ollama":
+            async for event in self._chat_stream_with_ollama(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            ):
+                yield event
+            return
 
+        self._require_gemini_api_key(payload.api_key)
         client = create_genai_client(payload.api_key)
         _genai, types = load_genai_sdk()
         last_search_ids: list[int] = []
@@ -272,6 +322,149 @@ class NativeResearcherService:
         )
         yield {"type": "final", "response": response.model_dump()}
 
+    async def _chat_stream_with_ollama(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: NativeThreadState,
+        model_name: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        last_search_ids: list[int] = []
+        executed_actions: list[HelperExecutedAction] = []
+        streamed_thoughts: list[str] = []
+        messages = [
+            {"role": "system", "content": self._system_instruction()},
+            *self._history_to_ollama_messages(thread_state.history),
+            {"role": "user", "content": self._build_prompt(payload.message, date.today().isoformat())},
+        ]
+
+        yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "search"}
+        yield {"type": "status", "text": "İstek analiz ediliyor."}
+
+        remaining_tool_calls = MAX_NATIVE_TOOL_CALLS
+        answer = "Yanit uretilemedi."
+        finalizer_needed = False
+
+        while True:
+            response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=messages,
+                tools=self._build_ollama_toolset() if remaining_tool_calls > 0 else None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            message = response.get("message") or {}
+            answer_text = str(message.get("content") or "")
+            thinking_text = str(message.get("thinking") or "").strip()
+            if thinking_text:
+                streamed_thoughts.append(thinking_text)
+                yield {"type": "thinking_delta", "text": thinking_text}
+            tool_calls = extract_ollama_tool_calls(message)
+            if tool_calls and remaining_tool_calls > 0:
+                messages.append(
+                    self._ollama_assistant_message(
+                        content=answer_text.strip(),
+                        tool_calls=[call.raw for call in tool_calls],
+                    )
+                )
+                for call in tool_calls:
+                    if remaining_tool_calls <= 0:
+                        break
+                    self.log_event(
+                        "native_tool_call",
+                        thread_id=thread_id,
+                        model=model_name,
+                        call_id=call.call_id,
+                        name=call.name,
+                        args=call.args,
+                    )
+                    yield {
+                        "type": "tool_call",
+                        "call_id": call.call_id,
+                        "action": {
+                            "type": "tool_call",
+                            "name": call.name,
+                            "title": "Searching Literature",
+                            "status": "running",
+                            "details": call.args,
+                        },
+                    }
+                    result, action, last_search_ids = await self._execute_tool_call(
+                        call.name,
+                        call.args,
+                    )
+                    executed_actions.append(action)
+                    self.log_event(
+                        "native_tool_result",
+                        thread_id=thread_id,
+                        model=model_name,
+                        call_id=call.call_id,
+                        action=action.model_dump(),
+                    )
+                    yield {"type": "tool_result", "call_id": call.call_id, "action": action.model_dump()}
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": call.name,
+                            "content": json.dumps({"result": result}, ensure_ascii=False),
+                        }
+                    )
+                    remaining_tool_calls -= 1
+                continue
+
+            answer = answer_text.strip()
+            if answer:
+                messages.append(self._ollama_assistant_message(content=answer))
+                yield {"type": "answer_delta", "text": answer}
+            if not answer and executed_actions:
+                finalizer_needed = True
+            answer = answer or "Yanit uretilemedi."
+            break
+
+        if finalizer_needed:
+            yield {"type": "status", "text": "Son yanıt hazırlanıyor."}
+            final_response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=[*messages, {"role": "user", "content": NATIVE_FINALIZER_PROMPT}],
+                tools=None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            final_message = final_response.get("message") or {}
+            final_thinking = str(final_message.get("thinking") or "").strip()
+            if final_thinking:
+                streamed_thoughts.append(final_thinking)
+                yield {"type": "thinking_delta", "text": final_thinking}
+            final_answer = str(final_message.get("content") or "").strip()
+            if final_answer:
+                answer = final_answer
+                yield {"type": "answer_delta", "text": final_answer}
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode="search",
+            used_article_ids=last_search_ids,
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(streamed_thoughts).strip() or None,
+            executed_actions=executed_actions,
+        )
+        self.log_event(
+            "native_stream_final",
+            thread_id=thread_id,
+            model=model_name,
+            answer=answer,
+            used_article_ids=last_search_ids,
+            executed_actions=[item.model_dump() for item in executed_actions],
+        )
+        yield {"type": "final", "response": response.model_dump()}
+
     @staticmethod
     def _append_history(thread_state: NativeThreadState, user_message: str, answer: str) -> None:
         thread_state.history.extend(
@@ -388,6 +581,53 @@ class NativeResearcherService:
                 )
             ]
         )
+
+    def _build_ollama_toolset(self) -> list[dict[str, Any]]:
+        source = self._preferred_search_source()
+        label = self._source_label(source)
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_pubmed",
+                    "description": (
+                        "Run a literature search. "
+                        f"This tool searches only the active source: {label}. "
+                        f"{self._source_query_guidance(source)}"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Concise literature search query string.",
+                            },
+                            "year_start": {
+                                "type": "integer",
+                                "description": "Optional start year.",
+                            },
+                            "year_end": {
+                                "type": "integer",
+                                "description": "Optional end year.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of articles to fetch, between 1 and 100.",
+                            },
+                            "article_type": {
+                                "type": "string",
+                                "description": "Optional article type filter.",
+                            },
+                            "min_cite": {
+                                "type": "integer",
+                                "description": "Optional minimum citation-count threshold.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            }
+        ]
 
     async def _execute_tool_call(
         self,

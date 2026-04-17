@@ -21,7 +21,7 @@ class HelperArticle(BaseModel):
 
 
 class HelperChatRequest(BaseModel):
-    api_key: str = Field(..., min_length=10)
+    api_key: str = Field(default="", max_length=4096)
     message: str = Field(..., min_length=1, max_length=12000)
     model: str | None = Field(default=None, max_length=100)
     thread_id: str | None = Field(default=None, max_length=100)

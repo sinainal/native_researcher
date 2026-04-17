@@ -4665,6 +4665,13 @@ body.is-document-viewer-open .native-document-viewer {
   min-width: 0;
 }
 
+.native-settings-connect {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  width: min(100%, 360px);
+}
+
 .native-settings-field span {
   font-size: 0.72rem;
   font-weight: 700;
@@ -4685,6 +4692,10 @@ body.is-document-viewer-open .native-document-viewer {
   font-size: 0.9rem;
   font-weight: 700;
   box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.55);
+}
+
+.native-settings-text {
+  appearance: none;
 }
 
 .native-settings-select {

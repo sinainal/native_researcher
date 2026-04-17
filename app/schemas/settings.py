@@ -22,3 +22,24 @@ class AppAPIKeysPayload(BaseModel):
     pdf_unpaywall_fallback_enabled: bool = True
     pdf_core_fallback_enabled: bool = False
     pdf_arxiv_fallback_enabled: bool = False
+
+
+class OllamaSettingsPayload(BaseModel):
+    ollama_base_url: str = Field(default="http://localhost:11434", max_length=1024)
+    ollama_model: str = Field(default="", max_length=256)
+
+
+class OllamaModelInfo(BaseModel):
+    name: str
+    size: int | None = None
+    modified_at: str | None = None
+    digest: str | None = None
+
+
+class OllamaStatusResponse(BaseModel):
+    ollama_base_url: str
+    connected: bool
+    version: str | None = None
+    ollama_model: str = ""
+    models: list[OllamaModelInfo] = Field(default_factory=list)
+    error: str | None = None

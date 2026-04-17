@@ -73,6 +73,8 @@ class Settings:
     pubmed_oa_only_path: Path = APP_ROOT / "pubmed_oa_only"
     ai_primary_search_resource_path: Path = APP_ROOT / "ai_primary_search_resource"
     pdf_downloader_mode_path: Path = APP_ROOT / "pdf_downloader_mode"
+    ollama_base_url_path: Path = APP_ROOT / "ollama_base_url"
+    ollama_model_path: Path = APP_ROOT / "ollama_model"
     pdf_unpaywall_fallback_enabled_path: Path = APP_ROOT / "pdf_unpaywall_fallback_enabled"
     pdf_core_fallback_enabled_path: Path = APP_ROOT / "pdf_core_fallback_enabled"
     pdf_arxiv_fallback_enabled_path: Path = APP_ROOT / "pdf_arxiv_fallback_enabled"
@@ -82,6 +84,8 @@ class Settings:
     core_api_key: str | None = None
     pubmed_oa_only: bool = True
     ai_primary_search_resource: str = "pubmed"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = ""
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
     pubmed_default_batch_size: int = 250
     pubmed_max_batch_size: int = 250
@@ -123,6 +127,8 @@ class Settings:
         pdf_downloader_mode_path = Path(
             os.getenv("PDF_DOWNLOADER_MODE_FILE", str(APP_ROOT / "pdf_downloader_mode"))
         )
+        ollama_base_url_path = Path(os.getenv("OLLAMA_BASE_URL_FILE", str(APP_ROOT / "ollama_base_url")))
+        ollama_model_path = Path(os.getenv("OLLAMA_MODEL_FILE", str(APP_ROOT / "ollama_model")))
         pdf_unpaywall_fallback_enabled_path = Path(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_unpaywall_fallback_enabled"))
         )
@@ -153,6 +159,10 @@ class Settings:
             os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
             "pdf_xml",
         )
+        ollama_base_url = (os.getenv("OLLAMA_BASE_URL") or _read_secret_file(ollama_base_url_path) or "http://localhost:11434").strip()
+        if ollama_base_url and "://" not in ollama_base_url:
+            ollama_base_url = f"http://{ollama_base_url}"
+        ollama_model = os.getenv("OLLAMA_MODEL") or _read_secret_file(ollama_model_path) or ""
         pdf_unpaywall_fallback_enabled = _parse_bool(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED") or _read_secret_file(pdf_unpaywall_fallback_enabled_path),
             True,
@@ -191,6 +201,8 @@ class Settings:
             pubmed_oa_only_path=pubmed_oa_only_path,
             ai_primary_search_resource_path=ai_primary_search_resource_path,
             pdf_downloader_mode_path=pdf_downloader_mode_path,
+            ollama_base_url_path=ollama_base_url_path,
+            ollama_model_path=ollama_model_path,
             pdf_unpaywall_fallback_enabled_path=pdf_unpaywall_fallback_enabled_path,
             pdf_core_fallback_enabled_path=pdf_core_fallback_enabled_path,
             pdf_arxiv_fallback_enabled_path=pdf_arxiv_fallback_enabled_path,
@@ -200,6 +212,8 @@ class Settings:
             core_api_key=core_api_key,
             pubmed_oa_only=pubmed_oa_only,
             ai_primary_search_resource=ai_primary_search_resource,
+            ollama_base_url=ollama_base_url.rstrip("/"),
+            ollama_model=ollama_model.strip(),
             request_user_agent=os.getenv(
                 "REQUEST_USER_AGENT",
                 "NativeResearcher/0.1 (FastAPI Searcher AI Service)",

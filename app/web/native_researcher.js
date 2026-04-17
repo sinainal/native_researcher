@@ -45,6 +45,12 @@ const state = {
   assistantStreamAbort: null,
   assistantSessions: [],
   currentSessionId: null,
+  ollamaBaseUrl: "http://localhost:11434",
+  ollamaModel: "",
+  ollamaModels: [],
+  ollamaConnected: false,
+  ollamaVersion: "",
+  ollamaError: "",
   sidebarOpen: localStorage.getItem("native_researcher_sidebar_open") !== "false",
   chatHistoryExpanded: false,
   chatHistoryOpen: false,
@@ -131,6 +137,18 @@ const els = {
   pdfCoreFallbackStatus: document.getElementById("pdfCoreFallbackStatus"),
   pdfArxivFallbackToggle: document.getElementById("pdfArxivFallbackToggle"),
   pdfArxivFallbackStatus: document.getElementById("pdfArxivFallbackStatus"),
+  sidebarOpenOllamaBtn: document.getElementById("sidebarOpenOllamaBtn"),
+  ollamaOverlay: document.getElementById("ollamaOverlay"),
+  ollamaPopup: document.getElementById("ollamaPopup"),
+  ollamaClose: document.getElementById("ollamaClose"),
+  ollamaCancel: document.getElementById("ollamaCancel"),
+  ollamaForm: document.getElementById("ollamaForm"),
+  ollamaBaseUrlInput: document.getElementById("ollamaBaseUrlInput"),
+  ollamaModelSelect: document.getElementById("ollamaModelSelect"),
+  ollamaDetectBtn: document.getElementById("ollamaDetectBtn"),
+  ollamaSaveBtn: document.getElementById("ollamaSaveBtn"),
+  ollamaStatus: document.getElementById("ollamaStatus"),
+  ollamaPopupStatus: document.getElementById("ollamaPopupStatus"),
   downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
   downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
@@ -222,6 +240,12 @@ const runtime = {
   pdfUnpaywallFallbackEnabled: true,
   pdfCoreFallbackEnabled: false,
   pdfArxivFallbackEnabled: false,
+  ollamaBaseUrl: "http://localhost:11434",
+  ollamaModel: "",
+  ollamaModels: [],
+  ollamaConnected: false,
+  ollamaVersion: "",
+  ollamaError: "",
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "pubmed"),
   aiPrimarySearchResource: "pubmed",
@@ -265,12 +289,29 @@ function normalizePdfDownloaderMode(value, fallback = "pdf_xml") {
   return fallback;
 }
 
+function normalizeOllamaBaseUrl(value, fallback = "http://localhost:11434") {
+  let normalized = String(value ?? "").trim() || fallback.trim();
+  if (!normalized.includes("://")) {
+    normalized = `http://${normalized}`;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
 function pdfDownloaderModeLabel(value) {
   const normalized = normalizePdfDownloaderMode(value, "pdf_xml");
   if (normalized === "pdf_xml") return "PDF + XML";
   if (normalized === "xml") return "XML Only";
   if (normalized === "pdf") return "PDF Only";
   return "PDF + XML";
+}
+
+function ollamaModelLabel(model) {
+  if (!model?.name) return "";
+  const sizeValue = Number(model.size || 0);
+  const sizeLabel = Number.isFinite(sizeValue) && sizeValue > 0
+    ? ` (${(sizeValue / (1024 * 1024 * 1024)).toFixed(1)} GB)`
+    : "";
+  return `${model.name}${sizeLabel}`;
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -1113,6 +1154,43 @@ function renderSettingsPanel() {
       ? "arXiv fallback is enabled for exact DOI or very high confidence title matches."
       : "arXiv fallback is disabled.";
   }
+  if (els.ollamaBaseUrlInput) {
+    els.ollamaBaseUrlInput.value = runtime.ollamaBaseUrl || "http://localhost:11434";
+  }
+  if (els.ollamaModelSelect) {
+    const models = Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [];
+    const currentValue = runtime.ollamaModel || "";
+    const options = models.length
+      ? models.map((model) => {
+        const label = ollamaModelLabel(model) || model.name;
+        return `<option value="${escapeHtml(model.name)}">${escapeHtml(label)}</option>`;
+      }).join("")
+      : '<option value="">No models yet</option>';
+    els.ollamaModelSelect.innerHTML = options;
+    const normalizedCurrent = models.some((model) => model.name === currentValue)
+      ? currentValue
+      : (models[0]?.name || "");
+    els.ollamaModelSelect.disabled = !runtime.ollamaConnected || !models.length;
+    els.ollamaModelSelect.value = normalizedCurrent;
+  }
+  if (els.ollamaStatus || els.ollamaPopupStatus) {
+    const parts = [];
+    if (runtime.ollamaConnected) {
+      parts.push(`Ollama is reachable${runtime.ollamaVersion ? ` (v${runtime.ollamaVersion})` : ""}.`);
+      parts.push(`${Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels.length : 0} model${(runtime.ollamaModels?.length || 0) === 1 ? "" : "s"} detected.`);
+      if (runtime.ollamaModel) {
+        parts.push(`Selected model: ${runtime.ollamaModel}.`);
+      }
+    } else {
+      parts.push(`Ollama is not reachable at ${runtime.ollamaBaseUrl || "http://localhost:11434"}.`);
+    }
+    if (runtime.ollamaError) {
+      parts.push(runtime.ollamaError);
+    }
+    const text = parts.join(" ");
+    if (els.ollamaStatus) els.ollamaStatus.textContent = text;
+    if (els.ollamaPopupStatus) els.ollamaPopupStatus.textContent = text;
+  }
   if (els.searchResource) {
     els.searchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
   }
@@ -1127,6 +1205,14 @@ function setApiKeysDialogOpen(next) {
   els.apiKeysOverlay?.classList.toggle("is-open", open);
   if (els.apiKeysPopup) els.apiKeysPopup.hidden = !open;
   if (els.apiKeysOverlay) els.apiKeysOverlay.hidden = !open;
+}
+
+function setOllamaDialogOpen(next) {
+  const open = Boolean(next);
+  els.ollamaPopup?.classList.toggle("is-open", open);
+  els.ollamaOverlay?.classList.toggle("is-open", open);
+  if (els.ollamaPopup) els.ollamaPopup.hidden = !open;
+  if (els.ollamaOverlay) els.ollamaOverlay.hidden = !open;
 }
 
 function applyApiKeyValues(payload = {}) {
@@ -1161,9 +1247,30 @@ function applyApiKeyValues(payload = {}) {
   renderSettingsPanel();
 }
 
+function applyOllamaValues(payload = {}) {
+  runtime.ollamaBaseUrl = normalizeOllamaBaseUrl(
+    payload.ollama_base_url,
+    runtime.ollamaBaseUrl || "http://localhost:11434",
+  );
+  runtime.ollamaModel = String(payload.ollama_model || "").trim();
+  runtime.ollamaConnected = Boolean(payload.connected);
+  runtime.ollamaVersion = String(payload.version || "").trim();
+  runtime.ollamaModels = Array.isArray(payload.models) ? payload.models : [];
+  runtime.ollamaError = String(payload.error || "").trim();
+  if (runtime.ollamaModel && !runtime.ollamaModels.some((model) => model.name === runtime.ollamaModel)) {
+    runtime.ollamaModels = [...runtime.ollamaModels];
+  }
+  renderSettingsPanel();
+}
+
 async function loadApiKeys() {
   const payload = await fetchJson("/app/api-keys");
   applyApiKeyValues(payload);
+}
+
+async function loadOllamaSettings() {
+  const payload = await fetchJson("/app/ollama");
+  applyOllamaValues(payload);
 }
 
 async function saveApiKeys(overrides = {}, options = {}) {
@@ -1201,6 +1308,23 @@ async function saveApiKeys(overrides = {}, options = {}) {
   if (closeDialog) {
     setApiKeysDialogOpen(false);
   }
+}
+
+async function saveOllamaSettings(overrides = {}) {
+  const payload = await fetchJson("/app/ollama", {
+    method: "PUT",
+    body: JSON.stringify({
+      ollama_base_url: runtime.ollamaBaseUrl,
+      ollama_model: runtime.ollamaModel,
+      ...overrides,
+    }),
+  });
+  applyOllamaValues(payload);
+  trackAppEvent("info", "ollama_settings_saved_ui", "Ollama settings updated from the native UI.", {
+    ollama_base_url: payload.ollama_base_url || runtime.ollamaBaseUrl,
+    ollama_model: payload.ollama_model || runtime.ollamaModel,
+    connected: Boolean(payload.connected),
+  });
 }
 
 function applyActiveProject(project) {
@@ -4288,6 +4412,17 @@ async function loadBootstrap() {
       assistant_api_key: localStorage.getItem("researcher2_api_key") || "",
     });
   }
+  try {
+    await loadOllamaSettings();
+  } catch (_error) {
+    applyOllamaValues({
+      ollama_base_url: runtime.ollamaBaseUrl || "http://localhost:11434",
+      ollama_model: runtime.ollamaModel || "",
+      connected: false,
+      models: [],
+      error: "Ollama settings could not be loaded.",
+    });
+  }
 }
 
 function bindEvents() {
@@ -4454,6 +4589,70 @@ function bindEvents() {
       });
     } finally {
       if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = false;
+    }
+  });
+  els.sidebarOpenOllamaBtn?.addEventListener("click", async () => {
+    setOllamaDialogOpen(true);
+    await loadOllamaSettings().catch(() => {});
+  });
+  els.ollamaOverlay?.addEventListener("click", () => {
+    setOllamaDialogOpen(false);
+  });
+  els.ollamaClose?.addEventListener("click", () => {
+    setOllamaDialogOpen(false);
+  });
+  els.ollamaCancel?.addEventListener("click", () => {
+    setOllamaDialogOpen(false);
+  });
+  els.ollamaForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
+    runtime.ollamaBaseUrl = nextBaseUrl;
+    try {
+      if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = true;
+      await saveOllamaSettings({
+        ollama_base_url: nextBaseUrl,
+        ollama_model: runtime.ollamaModel,
+      });
+      trackAppEvent("info", "ollama_saved_ui", "Ollama settings updated from the native UI.", {
+        ollama_base_url: nextBaseUrl,
+        ollama_model: runtime.ollamaModel,
+        connected: Boolean(runtime.ollamaConnected),
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "ollama_save_failed", error.message || "Ollama settings could not be saved.", {
+        ollama_base_url: nextBaseUrl,
+        ollama_model: runtime.ollamaModel,
+      });
+    } finally {
+      if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = false;
+    }
+  });
+  els.ollamaBaseUrlInput?.addEventListener("input", () => {
+    runtime.ollamaBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
+  });
+  els.ollamaModelSelect?.addEventListener("change", () => {
+    runtime.ollamaModel = String(els.ollamaModelSelect?.value || "").trim();
+    renderSettingsPanel();
+  });
+  els.ollamaDetectBtn?.addEventListener("click", async () => {
+    const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
+    runtime.ollamaBaseUrl = nextBaseUrl;
+    if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = true;
+    try {
+      await saveOllamaSettings({ ollama_base_url: nextBaseUrl });
+      trackAppEvent("info", "ollama_detected_ui", "Ollama connection checked from the native UI.", {
+        ollama_base_url: nextBaseUrl,
+        connected: Boolean(runtime.ollamaConnected),
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "ollama_detect_failed", error.message || "Ollama detection failed.", {
+        ollama_base_url: nextBaseUrl,
+      });
+    } finally {
+      if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = false;
     }
   });
   const saveFallbackToggle = async (key, value, element, eventName) => {

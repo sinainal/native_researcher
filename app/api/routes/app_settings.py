@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Request
 
-from app.schemas.settings import AppAPIKeysPayload
+from app.schemas.settings import (
+    AppAPIKeysPayload,
+    OllamaModelInfo,
+    OllamaSettingsPayload,
+    OllamaStatusResponse,
+)
 from app.utils.rate_limit import AsyncRateLimiter
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
@@ -59,6 +65,13 @@ def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
             return "pdf_xml"
         return normalized
     return default
+
+
+def _normalize_ollama_base_url(value: str | None, default: str) -> str:
+    normalized = (value or "").strip() or default.strip()
+    if "://" not in normalized:
+        normalized = f"http://{normalized}"
+    return normalized.rstrip("/")
 
 
 def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> None:
@@ -132,6 +145,72 @@ def _current_payload(request: Request) -> AppAPIKeysPayload:
     )
 
 
+def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
+    settings = request.app.state.settings
+    return OllamaSettingsPayload(
+        ollama_base_url=_normalize_ollama_base_url(
+            _read_value(settings.ollama_base_url_path),
+            str(getattr(settings, "ollama_base_url", "http://localhost:11434")),
+        ),
+        ollama_model=_read_value(settings.ollama_model_path) or str(getattr(settings, "ollama_model", "") or ""),
+    )
+
+
+async def _probe_ollama(base_url: str, *, request_user_agent: str) -> tuple[bool, str | None, list[OllamaModelInfo], str | None]:
+    normalized_base_url = _normalize_ollama_base_url(base_url, "http://localhost:11434")
+    timeout = httpx.Timeout(4.0)
+    headers = {"User-Agent": request_user_agent}
+    try:
+        async with httpx.AsyncClient(
+            base_url=normalized_base_url,
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=True,
+        ) as client:
+            version: str | None = None
+            try:
+                version_response = await client.get("/api/version")
+                version_response.raise_for_status()
+                version_payload = version_response.json() or {}
+                version = str(version_payload.get("version") or version_payload.get("ollama_version") or "").strip() or None
+            except Exception as exc:
+                return False, None, [], f"{type(exc).__name__}: {exc}"
+
+            models: list[OllamaModelInfo] = []
+            tags_error: str | None = None
+            try:
+                tags_response = await client.get("/api/tags")
+                tags_response.raise_for_status()
+                tags_payload = tags_response.json() or {}
+                raw_models = tags_payload.get("models") or []
+                for item in raw_models:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or item.get("model") or "").strip()
+                    if not name:
+                        continue
+                    size_value = item.get("size")
+                    if isinstance(size_value, (int, float)):
+                        size = int(size_value)
+                    else:
+                        size = None
+                    models.append(
+                        OllamaModelInfo(
+                            name=name,
+                            size=size,
+                            modified_at=str(item.get("modified_at") or item.get("modifiedAt") or "").strip() or None,
+                            digest=str(item.get("digest") or "").strip() or None,
+                        )
+                    )
+            except Exception as exc:
+                tags_error = f"{type(exc).__name__}: {exc}"
+
+            models.sort(key=lambda item: item.name.lower())
+            return True, version, models, tags_error
+    except Exception as exc:
+        return False, None, [], f"{type(exc).__name__}: {exc}"
+
+
 @router.get("/api-keys", response_model=AppAPIKeysPayload)
 async def get_api_keys(request: Request) -> AppAPIKeysPayload:
     payload = _current_payload(request)
@@ -180,3 +259,56 @@ async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAP
         },
     )
     return next_payload
+
+
+@router.get("/ollama", response_model=OllamaStatusResponse)
+async def get_ollama_settings(request: Request) -> OllamaStatusResponse:
+    settings = request.app.state.settings
+    payload = _current_ollama_payload(request)
+    connected, version, models, error = await _probe_ollama(
+        payload.ollama_base_url,
+        request_user_agent=settings.request_user_agent,
+    )
+    return OllamaStatusResponse(
+        ollama_base_url=payload.ollama_base_url,
+        connected=connected,
+        version=version,
+        ollama_model=payload.ollama_model,
+        models=models,
+        error=error,
+    )
+
+
+@router.put("/ollama", response_model=OllamaStatusResponse)
+async def update_ollama_settings(payload: OllamaSettingsPayload, request: Request) -> OllamaStatusResponse:
+    settings = request.app.state.settings
+    normalized_base_url = _normalize_ollama_base_url(
+        payload.ollama_base_url,
+        str(getattr(settings, "ollama_base_url", "http://localhost:11434")),
+    )
+    _write_value(settings.ollama_base_url_path, normalized_base_url)
+    _write_value(settings.ollama_model_path, payload.ollama_model)
+    next_payload = _current_ollama_payload(request)
+    connected, version, models, error = await _probe_ollama(
+        next_payload.ollama_base_url,
+        request_user_agent=settings.request_user_agent,
+    )
+    request.app.state.app_event_log_service.log(
+        "info",
+        "ollama_settings_updated",
+        "Ollama connection settings were updated.",
+        context={
+            "ollama_base_url": next_payload.ollama_base_url,
+            "ollama_model": next_payload.ollama_model,
+            "connected": connected,
+            "model_count": len(models),
+        },
+    )
+    return OllamaStatusResponse(
+        ollama_base_url=next_payload.ollama_base_url,
+        connected=connected,
+        version=version,
+        ollama_model=next_payload.ollama_model,
+        models=models,
+        error=error,
+    )

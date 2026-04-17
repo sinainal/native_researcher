@@ -200,6 +200,19 @@
               <div class="native-settings-card">
                 <div class="native-settings-row">
                   <div class="native-settings-copy">
+                    <div class="native-settings-title">Connect Ollama</div>
+                    <div class="native-settings-description">
+                      Detects a local Ollama server, checks whether it is reachable, and fetches installed models.
+                    </div>
+                  </div>
+                </div>
+                <div id="ollamaStatus" class="native-settings-note">Ollama is not checked yet.</div>
+                <button id="sidebarOpenOllamaBtn" class="btn btn-ghost btn-sm native-settings-action" type="button">Open
+                  Ollama</button>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
                     <div class="native-settings-title">Download Methods</div>
                     <div class="native-settings-description">
                       Selects which downloader bridge the browser download flow uses for article fetches.
@@ -592,6 +605,43 @@
       <div class="api-keys-actions">
         <button id="apiKeysCancel" class="btn btn-ghost btn-sm" type="button">Cancel</button>
         <button id="apiKeysSave" class="btn btn-primary btn-sm" type="submit">Save</button>
+      </div>
+    </form>
+  </section>
+  <div id="ollamaOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="ollamaPopup" class="detail-popup api-keys-popup" hidden role="dialog" aria-modal="true"
+    aria-labelledby="ollamaTitle">
+    <div class="detail-popup-head api-keys-popup-head">
+      <div class="detail-popup-headcopy">
+        <div class="detail-popup-eyebrow">Local Settings</div>
+        <h3 id="ollamaTitle" class="detail-popup-title">Connect Ollama</h3>
+        <div class="detail-popup-meta">Detect a local Ollama server and load installed models.</div>
+      </div>
+      <button id="ollamaClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+    <form id="ollamaForm" class="api-keys-form">
+      <label class="api-keys-field">
+        <span class="api-keys-label">Base URL</span>
+        <input id="ollamaBaseUrlInput" class="api-keys-input" type="text" autocomplete="off" spellcheck="false"
+          placeholder="http://localhost:11434">
+      </label>
+      <label class="api-keys-field">
+        <span class="api-keys-label">Model</span>
+        <select id="ollamaModelSelect" class="api-keys-input" disabled>
+          <option value="">No models yet</option>
+        </select>
+      </label>
+      <div id="ollamaPopupStatus" class="native-settings-note">Ollama is not checked yet.</div>
+      <div class="api-keys-actions">
+        <button id="ollamaCancel" class="btn btn-ghost btn-sm" type="button">Cancel</button>
+        <button id="ollamaDetectBtn" class="btn btn-secondary btn-sm" type="button">Detect</button>
+        <button id="ollamaSaveBtn" class="btn btn-primary btn-sm" type="submit">Save</button>
       </div>
     </form>
   </section>

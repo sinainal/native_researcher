@@ -55,27 +55,49 @@ def create_app(
         and injected_batch_llm_service is not None
     )
 
+    def _install_shared_state(
+        app: FastAPI,
+        *,
+        app_event_log_service: AppEventLogService,
+        project_service: ProjectService,
+        journal_metrics_service: JournalMetricsService,
+        pubmed_service: PubMedService,
+        pdf_service: PDFService,
+        helper_service: HelperAIService,
+        batch_llm_service: BatchLLMService,
+    ) -> None:
+        app.state.settings = resolved_settings
+        app.state.pubmed_service = pubmed_service
+        app.state.pdf_service = pdf_service
+        app.state.helper_service = helper_service
+        app.state.batch_llm_service = batch_llm_service
+        app.state.app_event_log_service = app_event_log_service
+        app.state.project_service = project_service
+        app.state.journal_metrics_service = journal_metrics_service
+        app.state.native_helper_service = NativeResearcherService(
+            thread_cache=TTLCache(
+                ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
+                max_entries=resolved_settings.helper_cache_max_entries,
+            ),
+            pubmed_service=pubmed_service,
+            log_service=HelperLogService(resolved_settings.helper_log_path),
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if all_services_injected:
-            app.state.settings = resolved_settings
-            app.state.pubmed_service = injected_pubmed_service
-            app.state.pdf_service = injected_pdf_service
-            app.state.helper_service = injected_helper_service
-            app.state.batch_llm_service = injected_batch_llm_service
-            app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
-            app.state.project_service = ProjectService(resolved_settings.workspace_root)
-            app.state.journal_metrics_service = JournalMetricsService(
-                WorkspaceDatabase(resolved_settings.workspace_root / ".native_researcher.db"),
-                resolved_settings,
-            )
-            app.state.native_helper_service = NativeResearcherService(
-                thread_cache=TTLCache(
-                    ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
-                    max_entries=resolved_settings.helper_cache_max_entries,
+            _install_shared_state(
+                app,
+                app_event_log_service=AppEventLogService(resolved_settings.app_event_log_path),
+                project_service=ProjectService(resolved_settings.workspace_root),
+                journal_metrics_service=JournalMetricsService(
+                    WorkspaceDatabase(resolved_settings.workspace_root / ".native_researcher.db"),
+                    resolved_settings,
                 ),
-                pubmed_service=app.state.pubmed_service,
-                log_service=HelperLogService(resolved_settings.helper_log_path),
+                pubmed_service=injected_pubmed_service,
+                pdf_service=injected_pdf_service,
+                helper_service=injected_helper_service,
+                batch_llm_service=injected_batch_llm_service,
             )
             yield
             return
@@ -110,8 +132,7 @@ def create_app(
             http_client=search_client,
         )
         await journal_metrics_service.ensure_bootstrap()
-        app.state.settings = resolved_settings
-        app.state.pubmed_service = injected_pubmed_service or PubMedService(
+        pubmed_service = injected_pubmed_service or PubMedService(
             client=NcbiClient(ncbi_client, resolved_settings),  # type: ignore[arg-type]
             cache=TTLCache(
                 ttl_seconds=resolved_settings.search_cache_ttl_seconds,
@@ -121,7 +142,7 @@ def create_app(
             settings=resolved_settings,
             journal_metrics_service=journal_metrics_service,
         )
-        app.state.pdf_service = injected_pdf_service or PDFService(
+        pdf_service = injected_pdf_service or PDFService(
             http_client=shared_client,  # type: ignore[arg-type]
             settings=resolved_settings,
             candidate_cache=TTLCache(
@@ -130,26 +151,25 @@ def create_app(
             ),
             event_log_service=app_event_log_service,
         )
-        app.state.helper_service = injected_helper_service or HelperAIService(
+        helper_service = injected_helper_service or HelperAIService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
                 max_entries=resolved_settings.helper_cache_max_entries,
             ),
-            pubmed_service=app.state.pubmed_service,
+            pubmed_service=pubmed_service,
             log_service=HelperLogService(resolved_settings.helper_log_path),
         )
-        app.state.app_event_log_service = app_event_log_service
-        app.state.project_service = project_service
-        app.state.journal_metrics_service = journal_metrics_service
-        app.state.native_helper_service = NativeResearcherService(
-            thread_cache=TTLCache(
-                ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
-                max_entries=resolved_settings.helper_cache_max_entries,
-            ),
-            pubmed_service=app.state.pubmed_service,
-            log_service=HelperLogService(resolved_settings.helper_log_path),
+        batch_llm_service = injected_batch_llm_service or BatchLLMService()
+        _install_shared_state(
+            app,
+            app_event_log_service=app_event_log_service,
+            project_service=project_service,
+            journal_metrics_service=journal_metrics_service,
+            pubmed_service=pubmed_service,
+            pdf_service=pdf_service,
+            helper_service=helper_service,
+            batch_llm_service=batch_llm_service,
         )
-        app.state.batch_llm_service = injected_batch_llm_service or BatchLLMService()
         try:
             yield
         finally:
@@ -168,24 +188,18 @@ def create_app(
     )
 
     if all_services_injected:
-        app.state.settings = resolved_settings
-        app.state.pubmed_service = injected_pubmed_service
-        app.state.pdf_service = injected_pdf_service
-        app.state.helper_service = injected_helper_service
-        app.state.batch_llm_service = injected_batch_llm_service
-        app.state.app_event_log_service = AppEventLogService(resolved_settings.app_event_log_path)
-        app.state.project_service = ProjectService(resolved_settings.workspace_root)
-        app.state.journal_metrics_service = JournalMetricsService(
-            WorkspaceDatabase(resolved_settings.workspace_root / ".native_researcher.db"),
-            resolved_settings,
-        )
-        app.state.native_helper_service = NativeResearcherService(
-            thread_cache=TTLCache(
-                ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
-                max_entries=resolved_settings.helper_cache_max_entries,
+        _install_shared_state(
+            app,
+            app_event_log_service=AppEventLogService(resolved_settings.app_event_log_path),
+            project_service=ProjectService(resolved_settings.workspace_root),
+            journal_metrics_service=JournalMetricsService(
+                WorkspaceDatabase(resolved_settings.workspace_root / ".native_researcher.db"),
+                resolved_settings,
             ),
-            pubmed_service=app.state.pubmed_service,
-            log_service=HelperLogService(resolved_settings.helper_log_path),
+            pubmed_service=injected_pubmed_service,
+            pdf_service=injected_pdf_service,
+            helper_service=injected_helper_service,
+            batch_llm_service=injected_batch_llm_service,
         )
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
     app.include_router(app_settings_router)

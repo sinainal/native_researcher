@@ -20,5 +20,7 @@ core_api_key
 ai_primary_search_resource
 pubmed_oa_only
 pdf_downloader_mode
+ollama_base_url
+ollama_model
 
 .DS_Store

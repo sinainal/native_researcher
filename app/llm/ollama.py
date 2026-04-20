@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +16,32 @@ class OllamaToolCall:
     name: str
     args: dict[str, Any]
     raw: dict[str, Any]
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
+
+
+def _normalize_ollama_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = str(message.get("content") or "")
+    thinking = str(message.get("thinking") or "").strip()
+    if not thinking and "<think>" in content:
+        think_parts = [part.strip() for part in _THINK_BLOCK_RE.findall(content) if part.strip()]
+        if think_parts:
+            thinking = "\n\n".join(think_parts)
+            content = _THINK_BLOCK_RE.sub("", content)
+
+    content = (
+        content.replace("<|endoftext|>", "")
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .strip()
+    )
+
+    normalized = dict(message)
+    normalized["content"] = content
+    if thinking and not str(normalized.get("thinking") or "").strip():
+        normalized["thinking"] = thinking
+    return normalized
 
 
 def _ollama_think_option(thinking_level: str) -> bool | str:
@@ -57,7 +84,11 @@ async def ollama_chat(
     ) as client:
         response = await client.post("/api/chat", json=payload)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        message = data.get("message")
+        if isinstance(message, dict):
+            data["message"] = _normalize_ollama_message(message)
+        return data
 
 
 async def ollama_warmup(

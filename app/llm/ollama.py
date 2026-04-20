@@ -19,6 +19,7 @@ class OllamaToolCall:
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
+_TOOL_ARTIFACT_RE = re.compile(r"<[^>\n]*tool_(?:call|response)[^>\n]*>", re.IGNORECASE)
 
 
 def _normalize_ollama_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -30,6 +31,7 @@ def _normalize_ollama_message(message: dict[str, Any]) -> dict[str, Any]:
             thinking = "\n\n".join(think_parts)
             content = _THINK_BLOCK_RE.sub("", content)
 
+    content = _TOOL_ARTIFACT_RE.sub("", content)
     content = (
         content.replace("<|endoftext|>", "")
         .replace("<|im_start|>", "")

@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 from app.schemas.article import Article
+from app.llm.ollama import _normalize_ollama_message
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.services.agent.helper_ai_service import HelperAIService
@@ -51,6 +52,27 @@ class FakePubMedService:
                 )
             ],
         )
+
+
+def test_normalize_ollama_message_strips_gemma_tool_artifacts() -> None:
+    message = {
+        "role": "assistant",
+        "content": "<|tool_response><tool_call|><|tool_response>\nThe temperature in Paris is 15°C.",
+        "tool_calls": [
+            {
+                "function": {
+                    "id": "call_1",
+                    "name": "get_temperature",
+                    "arguments": {"city": "Paris"},
+                }
+            }
+        ],
+    }
+
+    normalized = _normalize_ollama_message(message)
+
+    assert normalized["content"] == "The temperature in Paris is 15°C."
+    assert normalized["tool_calls"] == message["tool_calls"]
 
 
 def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:

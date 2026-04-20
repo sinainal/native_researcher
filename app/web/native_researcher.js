@@ -47,6 +47,7 @@ const state = {
   currentSessionId: null,
   ollamaBaseUrl: "http://localhost:11434",
   ollamaModel: "",
+  ollamaThinkingLevel: "off",
   ollamaModels: [],
   ollamaConnected: false,
   ollamaVersion: "",
@@ -120,6 +121,9 @@ const els = {
   apiKeysClose: document.getElementById("apiKeysClose"),
   apiKeysCancel: document.getElementById("apiKeysCancel"),
   assistantApiKeyInput: document.getElementById("assistantApiKeyInput"),
+  settingsAssistantApiKeyInput: document.getElementById("settingsAssistantApiKeyInput"),
+  settingsAssistantApiKeySaveBtn: document.getElementById("settingsAssistantApiKeySaveBtn"),
+  settingsAssistantApiKeyStatus: document.getElementById("settingsAssistantApiKeyStatus"),
   ncbiApiKeyInput: document.getElementById("ncbiApiKeyInput"),
   openalexApiKeyInput: document.getElementById("openalexApiKeyInput"),
   coreApiKeyInput: document.getElementById("coreApiKeyInput"),
@@ -137,18 +141,21 @@ const els = {
   pdfCoreFallbackStatus: document.getElementById("pdfCoreFallbackStatus"),
   pdfArxivFallbackToggle: document.getElementById("pdfArxivFallbackToggle"),
   pdfArxivFallbackStatus: document.getElementById("pdfArxivFallbackStatus"),
-  sidebarOpenOllamaBtn: document.getElementById("sidebarOpenOllamaBtn"),
-  ollamaOverlay: document.getElementById("ollamaOverlay"),
-  ollamaPopup: document.getElementById("ollamaPopup"),
-  ollamaClose: document.getElementById("ollamaClose"),
-  ollamaCancel: document.getElementById("ollamaCancel"),
-  ollamaForm: document.getElementById("ollamaForm"),
+  sidebarOpenModelSettingsBtn: document.getElementById("sidebarOpenModelSettingsBtn"),
   ollamaBaseUrlInput: document.getElementById("ollamaBaseUrlInput"),
-  ollamaModelSelect: document.getElementById("ollamaModelSelect"),
   ollamaDetectBtn: document.getElementById("ollamaDetectBtn"),
   ollamaSaveBtn: document.getElementById("ollamaSaveBtn"),
+  assistantOllamaThinkingWrap: document.getElementById("assistantOllamaThinkingWrap"),
+  assistantOllamaThinkingBtn: document.getElementById("assistantOllamaThinkingBtn"),
+  assistantOllamaThinkingLabel: document.getElementById("assistantOllamaThinkingLabel"),
+  assistantOllamaThinkingMenu: document.getElementById("assistantOllamaThinkingMenu"),
   ollamaStatus: document.getElementById("ollamaStatus"),
-  ollamaPopupStatus: document.getElementById("ollamaPopupStatus"),
+  availableModelsList: document.getElementById("availableModelsList"),
+  availableModelsStatus: document.getElementById("availableModelsStatus"),
+  modelSettingsOverlay: document.getElementById("modelSettingsOverlay"),
+  modelSettingsPopup: document.getElementById("modelSettingsPopup"),
+  modelSettingsClose: document.getElementById("modelSettingsClose"),
+  modelSettingsSummary: document.getElementById("modelSettingsSummary"),
   downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
   downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
@@ -157,6 +164,11 @@ const els = {
   assistantModelLabel: document.getElementById("assistantModelLabel"),
   assistantModelMenu: document.getElementById("assistantModelMenu"),
   assistantModelWrap: document.getElementById("assistantModelWrap"),
+  assistantModelLoadingPopup: document.getElementById("assistantModelLoadingPopup"),
+  assistantModelLoadingSize: document.getElementById("assistantModelLoadingSize"),
+  assistantModelLoadingTitle: document.getElementById("assistantModelLoadingTitle"),
+  assistantModelLoadingMeta: document.getElementById("assistantModelLoadingMeta"),
+  assistantModelLoadingBarFill: document.getElementById("assistantModelLoadingBarFill"),
   assistantModelItems: document.querySelectorAll(".assistant-model-item"),
   thinkToggleBtn: document.getElementById("thinkToggleBtn"),
   thinkLabel: document.getElementById("thinkLabel"),
@@ -198,6 +210,10 @@ const assistantBaseModels = [
   "Gemini 2.5 Flash",
   "Gemini 2.5 Flash Lite",
 ];
+const assistantModelDefaultVisibility = {
+  "Gemini 3 Flash": true,
+  "Gemini 3.1 Flash Lite": true,
+};
 
 const assistantModelThinkingSupport = {
   "Gemini 3.1 Pro": true,
@@ -209,6 +225,7 @@ const assistantModelThinkingSupport = {
 };
 
 const assistantModelStorageKey = "native_researcher_model";
+const assistantModelVisibilityStorageKey = "native_researcher_model_visibility";
 const assistantSidebarStorageKey = "native_researcher_sidebar_open";
 const activeProjectStorageKey = "native_researcher_active_project";
 const sidebarPanelStorageKey = "native_researcher_sidebar_panel";
@@ -254,11 +271,18 @@ const runtime = {
   ollamaConnected: false,
   ollamaVersion: "",
   ollamaError: "",
+  ollamaWarmupError: "",
+  ollamaWarmupPending: false,
+  ollamaWarmupModel: "",
   downloadWorkers: clampDownloadWorkers(localStorage.getItem(downloadWorkersStorageKey)),
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "pubmed"),
   aiPrimarySearchResource: "pubmed",
   pdfDownloaderMode: "pdf_xml",
   assistantModel: stateModel,
+  assistantModelVisibility: loadAssistantModelVisibility(),
+  assistantModelLoading: false,
+  assistantModelLoadingTarget: "",
+  assistantModelLoadingStartedAt: 0,
 };
 
 function clampDownloadWorkers(value) {
@@ -305,6 +329,181 @@ function normalizeOllamaBaseUrl(value, fallback = "http://localhost:11434") {
   return normalized.replace(/\/+$/, "");
 }
 
+function normalizeOllamaThinkingLevel(value, fallback = "off") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["off", "on"].includes(normalized)) return normalized;
+  if (["low", "medium", "high", "max", "minimal", "true", "yes", "1"].includes(normalized)) return "on";
+  return fallback;
+}
+
+function ollamaThinkingLevelLabel(value) {
+  const normalized = normalizeOllamaThinkingLevel(value, "off");
+  const labels = {
+    off: "Off",
+    on: "On",
+  };
+  return labels[normalized] || labels.off;
+}
+
+function loadAssistantModelVisibility() {
+  const defaults = assistantBaseModels.reduce((acc, model) => {
+    acc[model] = Boolean(assistantModelDefaultVisibility[model]);
+    return acc;
+  }, {});
+  const raw = localStorage.getItem(assistantModelVisibilityStorageKey);
+  if (!raw) return defaults;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return defaults;
+    for (const [model, enabled] of Object.entries(parsed)) {
+      defaults[model] = Boolean(enabled);
+    }
+    return defaults;
+  } catch (_error) {
+    return defaults;
+  }
+}
+
+function persistAssistantModelVisibility() {
+  localStorage.setItem(assistantModelVisibilityStorageKey, JSON.stringify(runtime.assistantModelVisibility || {}));
+}
+
+function assistantModelDisplayLabel(model) {
+  const normalized = String(model || "").trim();
+  if (!normalized) return "";
+  if (isOllamaAssistantModel(normalized)) {
+    return `Ollama · ${normalized.slice("ollama:".length).trim()}`;
+  }
+  return assistantModelLabelMap[normalized] || normalized;
+}
+
+function assistantModelProviderLabel(model) {
+  return isOllamaAssistantModel(model) ? "Local" : "Gemini";
+}
+
+function assistantModelDefaultValue() {
+  return "Gemini 3 Flash";
+}
+
+function isAssistantModelVisible(model) {
+  const normalized = String(model || "").trim();
+  if (!normalized) return false;
+  return Boolean(runtime.assistantModelVisibility?.[normalized]);
+}
+
+function setAssistantModelVisibility(model, visible) {
+  const normalized = String(model || "").trim();
+  if (!normalized) return;
+  runtime.assistantModelVisibility = {
+    ...(runtime.assistantModelVisibility || {}),
+    [normalized]: Boolean(visible),
+  };
+  persistAssistantModelVisibility();
+}
+
+function ensureAssistantModelVisible(model) {
+  const normalized = String(model || "").trim();
+  if (!normalized) return;
+  if (!isAssistantModelVisible(normalized)) {
+    setAssistantModelVisibility(normalized, true);
+  }
+}
+
+function assistantGeminiModelItems() {
+  return assistantBaseModels.map((model) => ({
+    value: model,
+    label: assistantModelLabelMap[model] || model,
+    provider: "gemini",
+    providerLabel: "Gemini",
+    available: true,
+    visible: isAssistantModelVisible(model),
+    defaultVisible: Boolean(assistantModelDefaultVisibility[model]),
+  }));
+}
+
+function assistantLocalModelItems() {
+  const models = Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [];
+  const names = new Set();
+  for (const model of models) {
+    const name = String(model?.name || "").trim();
+    if (name) names.add(name);
+  }
+  const selectedLocal = String(runtime.ollamaModel || "").trim();
+  if (selectedLocal) names.add(selectedLocal);
+  return [...names]
+    .sort((left, right) => left.localeCompare(right))
+    .map((name) => {
+      const value = `ollama:${name}`;
+      return {
+        value,
+        label: `Ollama · ${name}`,
+        provider: "local",
+        providerLabel: "Local",
+        available: runtime.ollamaConnected || name === selectedLocal,
+        visible: isAssistantModelVisible(value),
+        modelName: name,
+      };
+    });
+}
+
+function assistantModelCatalog() {
+  return [...assistantGeminiModelItems(), ...assistantLocalModelItems()];
+}
+
+function renderAvailableModelsMarkup() {
+  const geminiItems = assistantGeminiModelItems();
+  const localItems = assistantLocalModelItems();
+  const renderItem = (item) => {
+    const active = normalizeAssistantModel(runtime.assistantModel) === item.value;
+    const disabled = item.available ? "" : " disabled";
+    const checked = item.visible ? " checked" : "";
+    return `
+      <label class="native-model-option${item.available ? "" : " is-disabled"}${active ? " is-active" : ""}">
+        <input type="checkbox" data-model="${escapeHtml(item.value)}"${checked}${disabled}>
+        <span class="native-model-option-copy">
+          <span class="native-model-option-title">${escapeHtml(item.label)}</span>
+          <span class="native-model-option-meta">${escapeHtml(item.providerLabel)}${item.available ? "" : " · unavailable"}${item.defaultVisible ? " · default" : ""}</span>
+        </span>
+        <span class="native-model-option-badge">${escapeHtml(item.providerLabel)}</span>
+      </label>`;
+  };
+  return `
+    <div class="native-model-group">
+      <div class="native-model-group-title">Gemini API</div>
+      <div class="native-model-list-inner">
+        ${geminiItems.map(renderItem).join("")}
+      </div>
+    </div>
+    <div class="native-model-group">
+      <div class="native-model-group-title">Ollama</div>
+      ${
+        localItems.length
+          ? `<div class="native-model-list-inner">
+              ${localItems.map(renderItem).join("")}
+            </div>`
+          : '<div class="native-model-empty">No local models detected yet. Connect Ollama to populate this list.</div>'
+      }
+    </div>`;
+}
+
+function assistantModelOptions() {
+  const activeModel = normalizeAssistantModel(runtime.assistantModel);
+  const items = assistantModelCatalog();
+  const visibleItems = items.filter((item) => item.visible || item.value === activeModel);
+  if (!visibleItems.some((item) => item.value === activeModel)) {
+    visibleItems.unshift({
+      value: activeModel,
+      label: assistantModelDisplayLabel(activeModel),
+      provider: isOllamaAssistantModel(activeModel) ? "local" : "gemini",
+      providerLabel: assistantModelProviderLabel(activeModel),
+      available: true,
+      visible: true,
+      defaultVisible: false,
+    });
+  }
+  return visibleItems;
+}
+
 function pdfDownloaderModeLabel(value) {
   const normalized = normalizePdfDownloaderMode(value, "pdf_xml");
   if (normalized === "pdf_xml") return "PDF + XML";
@@ -322,6 +521,17 @@ function ollamaModelLabel(model) {
   return `${model.name}${sizeLabel}`;
 }
 
+function ollamaModelSizeLabel(modelName) {
+  const normalized = String(modelName || "").trim();
+  if (!normalized) return "";
+  const match = Array.isArray(runtime.ollamaModels)
+    ? runtime.ollamaModels.find((item) => String(item?.name || "").trim() === normalized)
+    : null;
+  const sizeValue = Number(match?.size || 0);
+  if (!Number.isFinite(sizeValue) || sizeValue <= 0) return "";
+  return `${Math.round(sizeValue / (1024 * 1024)).toLocaleString()} MB`;
+}
+
 function currentOllamaAssistantModel() {
   return runtime.ollamaModel ? `ollama:${runtime.ollamaModel}` : "";
 }
@@ -330,32 +540,13 @@ function isOllamaAssistantModel(model) {
   return String(model || "").startsWith("ollama:");
 }
 
-function assistantModelOptions() {
-  const options = assistantBaseModels.map((model) => ({
-    value: model,
-    label: assistantModelLabelMap[model] || model,
-  }));
-  if (isOllamaAssistantModel(runtime.assistantModel)) {
-    options.push({
-      value: runtime.assistantModel,
-      label: `Ollama · ${runtime.assistantModel.slice("ollama:".length)}`,
-    });
-  }
-  if (runtime.ollamaModel && !options.some((item) => item.value === currentOllamaAssistantModel())) {
-    options.push({
-      value: currentOllamaAssistantModel(),
-      label: `Ollama · ${runtime.ollamaModel}`,
-    });
-  }
-  return options;
-}
-
 function normalizeAssistantModel(model) {
   const requested = String(model || "").trim();
   if (isOllamaAssistantModel(requested)) {
-    return currentOllamaAssistantModel() || requested;
+    const ollamaChoice = requested.slice("ollama:".length).trim();
+    return ollamaChoice ? `ollama:${ollamaChoice}` : assistantModelDefaultValue();
   }
-  return assistantBaseModels.includes(requested) ? requested : "Gemini 3 Flash";
+  return assistantBaseModels.includes(requested) ? requested : assistantModelDefaultValue();
 }
 
 state.sidebarPanel = localStorage.getItem(sidebarPanelStorageKey) || "queries";
@@ -388,6 +579,20 @@ function fetchJson(url, options = {}) {
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return payload;
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextAnimationFrame() {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => resolve());
+      return;
+    }
+    resolve();
   });
 }
 
@@ -1198,26 +1403,27 @@ function renderSettingsPanel() {
       ? "arXiv fallback is enabled for exact DOI or very high confidence title matches."
       : "arXiv fallback is disabled.";
   }
+  if (els.settingsAssistantApiKeyInput) {
+    els.settingsAssistantApiKeyInput.value = runtime.apiKey || "";
+  }
+  if (els.settingsAssistantApiKeyStatus) {
+    els.settingsAssistantApiKeyStatus.textContent = runtime.apiKey
+      ? "Gemini cloud models will use the saved API key."
+      : "Add a Gemini API key to unlock the cloud models.";
+  }
+  if (els.modelSettingsSummary) {
+    const selectedModel = normalizeAssistantModel(runtime.assistantModel);
+    const visibleGemini = assistantGeminiModelItems().filter((item) => item.visible).length;
+    const visibleLocal = assistantLocalModelItems().filter((item) => item.visible).length;
+    const localState = runtime.ollamaConnected
+      ? `${runtime.ollamaModels.length} Ollama model${runtime.ollamaModels.length === 1 ? "" : "s"} detected`
+      : "Ollama is not connected";
+    els.modelSettingsSummary.textContent = `${assistantModelDisplayLabel(selectedModel) || selectedModel} selected · ${visibleGemini} Gemini visible · ${visibleLocal} local visible · ${localState}.`;
+  }
   if (els.ollamaBaseUrlInput) {
     els.ollamaBaseUrlInput.value = runtime.ollamaBaseUrl || "http://localhost:11434";
   }
-  if (els.ollamaModelSelect) {
-    const models = Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [];
-    const currentValue = runtime.ollamaModel || "";
-    const options = models.length
-      ? models.map((model) => {
-        const label = ollamaModelLabel(model) || model.name;
-        return `<option value="${escapeHtml(model.name)}">${escapeHtml(label)}</option>`;
-      }).join("")
-      : '<option value="">No models yet</option>';
-    els.ollamaModelSelect.innerHTML = options;
-    const normalizedCurrent = models.some((model) => model.name === currentValue)
-      ? currentValue
-      : (models[0]?.name || "");
-    els.ollamaModelSelect.disabled = !runtime.ollamaConnected || !models.length;
-    els.ollamaModelSelect.value = normalizedCurrent;
-  }
-  if (els.ollamaStatus || els.ollamaPopupStatus) {
+  if (els.ollamaStatus) {
     const parts = [];
     if (runtime.ollamaConnected) {
       parts.push(`Ollama is reachable${runtime.ollamaVersion ? ` (v${runtime.ollamaVersion})` : ""}.`);
@@ -1225,15 +1431,29 @@ function renderSettingsPanel() {
       if (runtime.ollamaModel) {
         parts.push(`Selected model: ${runtime.ollamaModel}.`);
       }
+      if (runtime.ollamaWarmupPending) {
+        parts.push(`Loading ${runtime.ollamaWarmupModel || runtime.ollamaModel || "model"}...`);
+      }
     } else {
       parts.push(`Ollama is not reachable at ${runtime.ollamaBaseUrl || "http://localhost:11434"}.`);
     }
     if (runtime.ollamaError) {
       parts.push(runtime.ollamaError);
     }
-    const text = parts.join(" ");
-    if (els.ollamaStatus) els.ollamaStatus.textContent = text;
-    if (els.ollamaPopupStatus) els.ollamaPopupStatus.textContent = text;
+    if (runtime.ollamaWarmupError) {
+      parts.push(`Warmup failed: ${runtime.ollamaWarmupError}`);
+    }
+    els.ollamaStatus.textContent = parts.join(" ");
+  }
+  if (els.availableModelsStatus) {
+    if (runtime.ollamaConnected) {
+      els.availableModelsStatus.textContent = `${runtime.ollamaModels.length} local model${runtime.ollamaModels.length === 1 ? "" : "s"} detected. Toggle any Gemini preset or Ollama model to show it in the assistant selector.`;
+    } else {
+      els.availableModelsStatus.textContent = "Only the Gemini presets are currently available. Connect Ollama to discover local models.";
+    }
+  }
+  if (els.availableModelsList) {
+    els.availableModelsList.innerHTML = renderAvailableModelsMarkup();
   }
   if (els.searchResource) {
     els.searchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
@@ -1249,14 +1469,70 @@ function setApiKeysDialogOpen(next) {
   els.apiKeysOverlay?.classList.toggle("is-open", open);
   if (els.apiKeysPopup) els.apiKeysPopup.hidden = !open;
   if (els.apiKeysOverlay) els.apiKeysOverlay.hidden = !open;
+  if (els.apiKeysPopup) els.apiKeysPopup.setAttribute("aria-hidden", open ? "false" : "true");
 }
 
-function setOllamaDialogOpen(next) {
+function setModelSettingsDialogOpen(next) {
   const open = Boolean(next);
-  els.ollamaPopup?.classList.toggle("is-open", open);
-  els.ollamaOverlay?.classList.toggle("is-open", open);
-  if (els.ollamaPopup) els.ollamaPopup.hidden = !open;
-  if (els.ollamaOverlay) els.ollamaOverlay.hidden = !open;
+  els.modelSettingsPopup?.classList.toggle("is-open", open);
+  els.modelSettingsOverlay?.classList.toggle("is-open", open);
+  if (els.modelSettingsPopup) els.modelSettingsPopup.hidden = !open;
+  if (els.modelSettingsOverlay) els.modelSettingsOverlay.hidden = !open;
+  if (els.modelSettingsPopup) els.modelSettingsPopup.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) {
+    requestAnimationFrame(() => {
+      els.settingsAssistantApiKeyInput?.focus();
+    });
+  } else {
+    requestAnimationFrame(() => {
+      els.sidebarOpenModelSettingsBtn?.focus();
+    });
+  }
+}
+
+function setAssistantModelLoading(next, target = "") {
+  runtime.assistantModelLoading = Boolean(next);
+  runtime.assistantModelLoadingTarget = next ? String(target || "").trim() : "";
+  runtime.assistantModelLoadingStartedAt = next ? Date.now() : 0;
+  updateAssistantModelLoadingPopup();
+}
+
+function updateAssistantModelLoadingPopup() {
+  const popup = els.assistantModelLoadingPopup;
+  if (!popup) return;
+  const target = normalizeAssistantModel(runtime.assistantModelLoadingTarget || runtime.assistantModel);
+  const localModel = isOllamaAssistantModel(target) ? target.slice("ollama:".length).trim() : "";
+  const loading = Boolean(runtime.assistantModelLoading) && Boolean(localModel);
+  popup.hidden = !loading;
+  popup.classList.toggle("is-open", loading);
+  if (!loading) {
+    if (els.assistantModelLoadingSize) els.assistantModelLoadingSize.textContent = "";
+    if (els.assistantModelLoadingTitle) els.assistantModelLoadingTitle.textContent = "";
+    if (els.assistantModelLoadingMeta) els.assistantModelLoadingMeta.textContent = "";
+    if (els.assistantModelLoadingBarFill) els.assistantModelLoadingBarFill.style.width = "0%";
+    if (els.assistantInput) els.assistantInput.disabled = false;
+    if (els.assistantSendBtn) els.assistantSendBtn.disabled = false;
+    return;
+  }
+  const sizeLabel = ollamaModelSizeLabel(localModel) || "Loading...";
+  const displayLabel = assistantModelDisplayLabel(target) || localModel;
+  if (els.assistantModelLoadingSize) els.assistantModelLoadingSize.textContent = sizeLabel;
+  if (els.assistantModelLoadingTitle) els.assistantModelLoadingTitle.textContent = `Loading ${displayLabel}...`;
+  if (els.assistantModelLoadingMeta) {
+    const warmupTarget = String(runtime.ollamaWarmupModel || runtime.ollamaModel || "").trim();
+    const warmupMatchesTarget = !warmupTarget || warmupTarget === localModel;
+    const warmupLabel = runtime.ollamaWarmupPending && warmupMatchesTarget
+      ? "Starting Ollama and warming the model."
+      : "Preparing the model for chat.";
+    els.assistantModelLoadingMeta.textContent = runtime.ollamaWarmupError
+      ? `Warmup error: ${runtime.ollamaWarmupError}`
+      : warmupLabel;
+  }
+  if (els.assistantModelLoadingBarFill) {
+    els.assistantModelLoadingBarFill.style.width = "100%";
+  }
+  if (els.assistantInput) els.assistantInput.disabled = true;
+  if (els.assistantSendBtn) els.assistantSendBtn.disabled = true;
 }
 
 function applyApiKeyValues(payload = {}) {
@@ -1284,6 +1560,7 @@ function applyApiKeyValues(payload = {}) {
   localStorage.setItem("researcher2_api_key", runtime.apiKey);
   localStorage.setItem(pubmedOaOnlyStorageKey, runtime.pubmedOaOnly ? "true" : "false");
   if (els.assistantApiKeyInput) els.assistantApiKeyInput.value = runtime.apiKey;
+  if (els.settingsAssistantApiKeyInput) els.settingsAssistantApiKeyInput.value = runtime.apiKey;
   if (els.ncbiApiKeyInput) els.ncbiApiKeyInput.value = runtime.ncbiApiKey;
   if (els.openalexApiKeyInput) els.openalexApiKeyInput.value = runtime.openalexApiKey;
   if (els.coreApiKeyInput) els.coreApiKeyInput.value = runtime.coreApiKey;
@@ -1298,14 +1575,23 @@ function applyOllamaValues(payload = {}) {
     runtime.ollamaBaseUrl || "http://localhost:11434",
   );
   runtime.ollamaModel = String(payload.ollama_model || "").trim();
+  runtime.ollamaThinkingLevel = normalizeOllamaThinkingLevel(
+    payload.ollama_thinking_level,
+    runtime.ollamaThinkingLevel || "off",
+  );
   runtime.ollamaConnected = Boolean(payload.connected);
   runtime.ollamaVersion = String(payload.version || "").trim();
   runtime.ollamaModels = Array.isArray(payload.models) ? payload.models : [];
   runtime.ollamaError = String(payload.error || "").trim();
+  runtime.ollamaWarmupError = String(payload.warmup_error || "").trim();
+  runtime.ollamaWarmupPending = Boolean(payload.warming_up);
+  runtime.ollamaWarmupModel = String(payload.warming_model || "").trim();
   if (runtime.ollamaModel && !runtime.ollamaModels.some((model) => model.name === runtime.ollamaModel)) {
     runtime.ollamaModels = [...runtime.ollamaModels];
   }
-  if (isOllamaAssistantModel(runtime.assistantModel)) {
+  if (runtime.assistantModelLoading && isOllamaAssistantModel(runtime.assistantModelLoadingTarget)) {
+    runtime.assistantModel = normalizeAssistantModel(runtime.assistantModelLoadingTarget);
+  } else if (isOllamaAssistantModel(runtime.assistantModel)) {
     const nextOllamaModel = currentOllamaAssistantModel();
     runtime.assistantModel = nextOllamaModel || "Gemini 3 Flash";
   } else if (runtime.assistantModel === previousOllamaModel) {
@@ -1313,7 +1599,42 @@ function applyOllamaValues(payload = {}) {
   }
   updateAssistantModelUI();
   updateThinkingLabel();
+  updateAssistantModelLoadingPopup();
   renderSettingsPanel();
+}
+
+async function monitorOllamaWarmup(targetModel, timeoutMs = 600000) {
+  const normalizedTarget = normalizeAssistantModel(targetModel);
+  const startedAt = Date.now();
+  while (runtime.assistantModelLoading && normalizeAssistantModel(runtime.assistantModelLoadingTarget) === normalizedTarget) {
+    await loadOllamaSettings().catch(() => {});
+    const warmupModel = String(runtime.ollamaWarmupModel || runtime.ollamaModel || "").trim();
+    const waitingForTarget = !warmupModel || warmupModel === normalizedTarget.slice("ollama:".length).trim();
+    if (!runtime.ollamaWarmupPending && waitingForTarget) {
+      break;
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      runtime.ollamaWarmupError = `Ollama warmup timed out for ${assistantModelDisplayLabel(normalizedTarget) || normalizedTarget}.`;
+      break;
+    }
+    await delay(1500);
+  }
+  const minVisibleMs = 6000;
+  const visibleFor = Date.now() - Number(runtime.assistantModelLoadingStartedAt || startedAt);
+  if (runtime.assistantModelLoading && visibleFor < minVisibleMs) {
+    await delay(minVisibleMs - visibleFor);
+  }
+  if (runtime.assistantModelLoading && normalizeAssistantModel(runtime.assistantModelLoadingTarget) === normalizedTarget) {
+    setAssistantModelLoading(false);
+    updateAssistantModelUI();
+    updateThinkingLabel();
+    renderSettingsPanel();
+  }
+  if (runtime.ollamaWarmupError) {
+    trackAppEvent("error", "assistant_model_select_failed", runtime.ollamaWarmupError, {
+      assistant_model: normalizedTarget,
+    });
+  }
 }
 
 async function loadApiKeys() {
@@ -1369,6 +1690,8 @@ async function saveOllamaSettings(overrides = {}) {
     body: JSON.stringify({
       ollama_base_url: runtime.ollamaBaseUrl,
       ollama_model: runtime.ollamaModel,
+      ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
+      warmup: false,
       ...overrides,
     }),
   });
@@ -1378,6 +1701,70 @@ async function saveOllamaSettings(overrides = {}) {
     ollama_model: payload.ollama_model || runtime.ollamaModel,
     connected: Boolean(payload.connected),
   });
+  return payload;
+}
+
+async function selectAssistantModel(requestedModel) {
+  const normalized = normalizeAssistantModel(requestedModel);
+  if (!normalized) return;
+  if (runtime.assistantModelLoading) return;
+  if (isOllamaAssistantModel(normalized)) {
+    const localModel = normalized.slice("ollama:".length).trim();
+    if (!localModel) {
+      return;
+    }
+    runtime.ollamaWarmupError = "";
+    runtime.ollamaWarmupPending = true;
+    runtime.ollamaWarmupModel = localModel;
+    setAssistantModelLoading(true, normalized);
+    runtime.assistantModel = normalized;
+    ensureAssistantModelVisible(runtime.assistantModel);
+    localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
+    updateAssistantModelUI();
+    updateThinkingLabel();
+    renderSettingsPanel();
+    await nextAnimationFrame();
+    try {
+      const payload = await saveOllamaSettings({
+        ollama_model: localModel,
+        warmup: true,
+      });
+      if (!payload.connected) {
+        throw new Error(payload.error || "Ollama is not reachable.");
+      }
+      if (payload.warmup_error && !payload.warming_up) {
+        throw new Error(payload.warmup_error);
+      }
+      runtime.assistantModel = `ollama:${localModel}`;
+      ensureAssistantModelVisible(runtime.assistantModel);
+      localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
+      trackAppEvent("info", "assistant_model_selected_ui", "Local model selected from the assistant panel.", {
+        assistant_model: runtime.assistantModel,
+        provider: "ollama",
+      });
+      void monitorOllamaWarmup(normalized);
+    } catch (error) {
+      runtime.ollamaWarmupPending = false;
+      setAssistantModelLoading(false);
+      trackAppEvent("error", "assistant_model_select_failed", error.message || "Local model could not be loaded.", {
+        assistant_model: normalized,
+      });
+    }
+    updateAssistantModelUI();
+    updateThinkingLabel();
+    renderSettingsPanel();
+    return;
+  }
+  runtime.assistantModel = normalized;
+  ensureAssistantModelVisible(runtime.assistantModel);
+  localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
+  trackAppEvent("info", "assistant_model_selected_ui", "Assistant model selected from the panel.", {
+    assistant_model: runtime.assistantModel,
+    provider: "gemini",
+  });
+  updateAssistantModelUI();
+  updateThinkingLabel();
+  renderSettingsPanel();
 }
 
 function applyActiveProject(project) {
@@ -1720,13 +2107,15 @@ function resetAssistantProjectState() {
   state.chatHistoryOpen = false;
 }
 
-function persistAssistantSessions({ scheduleSave = true } = {}) {
+function persistAssistantSessions({ scheduleSave = true, preserveCurrentSelection = true } = {}) {
   const nextSessions = state.assistantSessions
     .filter(sessionHasContent)
     .slice(0, 24)
     .map((item) => createAssistantSession(item));
   state.assistantSessions = nextSessions;
-  if (!state.currentSessionId || !nextSessions.some((item) => item.id === state.currentSessionId)) {
+  if (state.currentSessionId && !nextSessions.some((item) => item.id === state.currentSessionId)) {
+    state.currentSessionId = nextSessions[0]?.id || null;
+  } else if (!state.currentSessionId && preserveCurrentSelection) {
     state.currentSessionId = nextSessions[0]?.id || null;
   }
   if (scheduleSave) scheduleProjectStateSave();
@@ -1793,7 +2182,7 @@ function createNewAssistantChat() {
   setChatHistoryOpen(false);
   renderAssistantMessages();
   renderChatHistory();
-  persistAssistantSessions();
+  persistAssistantSessions({ preserveCurrentSelection: false });
   requestAnimationFrame(() => {
     els.assistantInput?.focus();
   });
@@ -4034,19 +4423,27 @@ function updateAssistantModelUI() {
   const options = assistantModelOptions();
   const activeModel = normalizeAssistantModel(runtime.assistantModel);
   runtime.assistantModel = activeModel;
+  ensureAssistantModelVisible(activeModel);
   localStorage.setItem(assistantModelStorageKey, activeModel);
   if (els.assistantModelMenu) {
     els.assistantModelMenu.innerHTML = options.map((item) => `
       <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="${escapeHtml(item.value)}">${escapeHtml(item.label)}</button>
     `).join("");
   }
-  els.assistantModelLabel.textContent = assistantModelLabelMap[activeModel]
-    || options.find((item) => item.value === activeModel)?.label
-    || activeModel;
+  if (els.assistantModelBtn) {
+    els.assistantModelBtn.disabled = Boolean(runtime.assistantModelLoading);
+    els.assistantModelBtn.setAttribute("aria-busy", runtime.assistantModelLoading ? "true" : "false");
+  }
+  els.assistantModelLabel.textContent = runtime.assistantModelLoading
+    ? `Loading ${assistantModelDisplayLabel(runtime.assistantModelLoadingTarget) || "model"}...`
+    : (assistantModelDisplayLabel(activeModel)
+      || options.find((item) => item.value === activeModel)?.label
+      || activeModel);
   document.querySelectorAll(".assistant-model-item").forEach((item) => {
     item.classList.toggle("is-selected", item.dataset.model === runtime.assistantModel);
   });
   updateThinkingControlsUI();
+  updateOllamaThinkingControlUI();
 }
 
 function currentModelSupportsThinking() {
@@ -4055,6 +4452,13 @@ function currentModelSupportsThinking() {
 
 function effectiveThinkingLevel() {
   return currentModelSupportsThinking() ? state.thinkingLevel : "off";
+}
+
+function assistantThinkingLevelForRequest() {
+  if (isOllamaAssistantModel(runtime.assistantModel)) {
+    return normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off");
+  }
+  return effectiveThinkingLevel();
 }
 
 function updateThinkingControlsUI() {
@@ -4079,9 +4483,24 @@ function updateThinkingLabel() {
     max: "Think: Max",
   };
   els.thinkLabel.textContent = labels[effectiveThinkingLevel()] || labels.off;
-  document.querySelectorAll(".think-menu-item").forEach((item) => {
+  document.querySelectorAll(".think-menu-item[data-level]").forEach((item) => {
     item.classList.toggle("is-selected", item.dataset.level === state.thinkingLevel);
   });
+}
+
+function updateOllamaThinkingControlUI() {
+  const isOllamaModel = isOllamaAssistantModel(runtime.assistantModel);
+  if (els.assistantOllamaThinkingWrap) {
+    els.assistantOllamaThinkingWrap.hidden = !isOllamaModel;
+  }
+  if (els.assistantOllamaThinkingLabel) {
+    els.assistantOllamaThinkingLabel.textContent = `Thinking: ${ollamaThinkingLevelLabel(runtime.ollamaThinkingLevel)}`;
+  }
+  document.querySelectorAll(".think-menu-item[data-ollama-think]").forEach((item) => {
+    item.classList.toggle("is-selected", item.dataset.ollamaThink === normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"));
+  });
+  if (!isOllamaModel && els.assistantOllamaThinkingMenu) els.assistantOllamaThinkingMenu.hidden = true;
+  if (els.assistantOllamaThinkingBtn) els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
 }
 
 function assistantActionLabel(action) {
@@ -4315,6 +4734,17 @@ function applyAssistantActions(actions) {
 async function sendAssistantMessage() {
   const message = els.assistantInput.value.trim();
   if (!message) return;
+  if (runtime.assistantModelLoading) {
+    trackAppEvent("error", "assistant_model_loading_blocked", "Assistant model is still loading.", {
+      project_id: state.projectId || "",
+      model: runtime.assistantModelLoadingTarget || runtime.assistantModel,
+    });
+    pushAssistantMessage({
+      role: "assistant",
+      text: "Assistant error: model is still loading.",
+    });
+    return;
+  }
   if (!isOllamaAssistantModel(runtime.assistantModel) && !runtime.apiKey) {
     trackAppEvent("error", "assistant_missing_api_key", "Assistant API key not found.", {
       project_id: state.projectId || "",
@@ -4347,7 +4777,7 @@ async function sendAssistantMessage() {
     pending: true,
     actions: [],
     liveThinking: "",
-    thinkingEnabled: effectiveThinkingLevel() !== "off",
+    thinkingEnabled: assistantThinkingLevelForRequest() !== "off",
   });
   let searchAppliedDuringStream = false;
   els.assistantInput.value = "";
@@ -4367,7 +4797,7 @@ async function sendAssistantMessage() {
           model: runtime.assistantModel,
           mode: "fast",
           thread_id: state.assistantThreadId,
-          thinking_level: effectiveThinkingLevel(),
+          thinking_level: assistantThinkingLevelForRequest(),
           articles: helperArticlePayload(),
           selected_ids: [...state.selectedIds],
         }),
@@ -4592,6 +5022,28 @@ function bindEvents() {
   els.apiKeysCancel?.addEventListener("click", () => {
     setApiKeysDialogOpen(false);
   });
+  els.sidebarOpenModelSettingsBtn?.addEventListener("click", async () => {
+    setModelSettingsDialogOpen(true);
+    await loadApiKeys().catch(() => {});
+    await loadOllamaSettings().catch(() => {});
+    renderSettingsPanel();
+  });
+  els.modelSettingsOverlay?.addEventListener("click", () => {
+    setModelSettingsDialogOpen(false);
+  });
+  els.modelSettingsClose?.addEventListener("click", () => {
+    setModelSettingsDialogOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (els.modelSettingsPopup && !els.modelSettingsPopup.hidden) {
+      setModelSettingsDialogOpen(false);
+      return;
+    }
+    if (els.apiKeysPopup && !els.apiKeysPopup.hidden) {
+      setApiKeysDialogOpen(false);
+    }
+  });
   els.apiKeysForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await saveApiKeys({
@@ -4655,32 +5107,78 @@ function bindEvents() {
       if (els.pdfDownloaderModeInput) els.pdfDownloaderModeInput.disabled = false;
     }
   });
-  els.sidebarOpenOllamaBtn?.addEventListener("click", async () => {
-    setOllamaDialogOpen(true);
-    await loadOllamaSettings().catch(() => {});
+  els.ollamaBaseUrlInput?.addEventListener("input", () => {
+    runtime.ollamaBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
   });
-  els.ollamaOverlay?.addEventListener("click", () => {
-    setOllamaDialogOpen(false);
+  els.assistantOllamaThinkingBtn?.addEventListener("click", () => {
+    const next = els.assistantOllamaThinkingMenu.hidden;
+    els.assistantOllamaThinkingMenu.hidden = !next;
+    els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", next ? "true" : "false");
+    els.thinkMenu.hidden = true;
+    els.thinkToggleBtn.setAttribute("aria-expanded", "false");
   });
-  els.ollamaClose?.addEventListener("click", () => {
-    setOllamaDialogOpen(false);
+  els.assistantOllamaThinkingMenu?.addEventListener("click", async (event) => {
+    const item = event.target.closest(".think-menu-item[data-ollama-think]");
+    if (!item) return;
+    const nextValue = normalizeOllamaThinkingLevel(item.dataset.ollamaThink, "off");
+    const previousValue = runtime.ollamaThinkingLevel || "off";
+    runtime.ollamaThinkingLevel = nextValue;
+    if (els.assistantOllamaThinkingMenu) els.assistantOllamaThinkingMenu.hidden = true;
+    if (els.assistantOllamaThinkingBtn) els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
+    try {
+      await saveOllamaSettings({ ollama_thinking_level: nextValue });
+      trackAppEvent("info", "ollama_thinking_level_updated", "Ollama thinking level updated from the native UI.", {
+        ollama_thinking_level: nextValue,
+      });
+    } catch (error) {
+      runtime.ollamaThinkingLevel = previousValue;
+      renderSettingsPanel();
+      trackAppEvent("error", "ollama_thinking_level_failed", error.message || "Ollama thinking level could not be saved.", {
+        ollama_thinking_level: nextValue,
+      });
+    } finally {
+      updateOllamaThinkingControlUI();
+    }
   });
-  els.ollamaCancel?.addEventListener("click", () => {
-    setOllamaDialogOpen(false);
+  els.settingsAssistantApiKeyInput?.addEventListener("input", () => {
+    runtime.apiKey = String(els.settingsAssistantApiKeyInput?.value || "").trim();
+    if (els.settingsAssistantApiKeyStatus) {
+      els.settingsAssistantApiKeyStatus.textContent = runtime.apiKey
+        ? "Gemini cloud models will use the saved API key."
+        : "Add a Gemini API key to unlock the cloud models.";
+    }
   });
-  els.ollamaForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  els.settingsAssistantApiKeySaveBtn?.addEventListener("click", async () => {
+    runtime.apiKey = String(els.settingsAssistantApiKeyInput?.value || "").trim();
+    if (els.settingsAssistantApiKeySaveBtn) els.settingsAssistantApiKeySaveBtn.disabled = true;
+    try {
+      await saveApiKeys({ assistant_api_key: runtime.apiKey }, { closeDialog: false });
+      trackAppEvent("info", "assistant_api_key_saved_ui", "Gemini API key updated from the native UI.", {
+        has_assistant_api_key: Boolean(runtime.apiKey),
+      });
+    } catch (error) {
+      renderSettingsPanel();
+      trackAppEvent("error", "assistant_api_key_save_failed", error.message || "Gemini API key could not be saved.", {
+        has_assistant_api_key: Boolean(runtime.apiKey),
+      });
+    } finally {
+      if (els.settingsAssistantApiKeySaveBtn) els.settingsAssistantApiKeySaveBtn.disabled = false;
+    }
+  });
+  els.ollamaSaveBtn?.addEventListener("click", async () => {
     const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
     runtime.ollamaBaseUrl = nextBaseUrl;
+    if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = true;
     try {
-      if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = true;
       await saveOllamaSettings({
         ollama_base_url: nextBaseUrl,
         ollama_model: runtime.ollamaModel,
+        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
       });
       trackAppEvent("info", "ollama_saved_ui", "Ollama settings updated from the native UI.", {
         ollama_base_url: nextBaseUrl,
         ollama_model: runtime.ollamaModel,
+        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
         connected: Boolean(runtime.ollamaConnected),
       });
     } catch (error) {
@@ -4693,21 +5191,18 @@ function bindEvents() {
       if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = false;
     }
   });
-  els.ollamaBaseUrlInput?.addEventListener("input", () => {
-    runtime.ollamaBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
-  });
-  els.ollamaModelSelect?.addEventListener("change", () => {
-    runtime.ollamaModel = String(els.ollamaModelSelect?.value || "").trim();
-    renderSettingsPanel();
-  });
   els.ollamaDetectBtn?.addEventListener("click", async () => {
     const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
     runtime.ollamaBaseUrl = nextBaseUrl;
     if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = true;
     try {
-      await saveOllamaSettings({ ollama_base_url: nextBaseUrl });
+      await saveOllamaSettings({
+        ollama_base_url: nextBaseUrl,
+        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
+      });
       trackAppEvent("info", "ollama_detected_ui", "Ollama connection checked from the native UI.", {
         ollama_base_url: nextBaseUrl,
+        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
         connected: Boolean(runtime.ollamaConnected),
       });
     } catch (error) {
@@ -4718,6 +5213,29 @@ function bindEvents() {
     } finally {
       if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = false;
     }
+  });
+  els.availableModelsList?.addEventListener("change", (event) => {
+    const input = event.target.closest('input[type="checkbox"][data-model]');
+    if (!input) return;
+    const model = String(input.dataset.model || "").trim();
+    if (!model) return;
+    const visible = Boolean(input.checked);
+    setAssistantModelVisibility(model, visible);
+    if (!visible && normalizeAssistantModel(runtime.assistantModel) === model) {
+      runtime.assistantModel = assistantModelDefaultValue();
+      localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
+    }
+    if (visible) {
+      ensureAssistantModelVisible(model);
+    }
+    updateAssistantModelUI();
+    updateThinkingLabel();
+    renderSettingsPanel();
+    trackAppEvent("info", "assistant_model_visibility_updated", "Assistant model visibility updated.", {
+      assistant_model: model,
+      visible,
+      provider: isOllamaAssistantModel(model) ? "ollama" : "gemini",
+    });
   });
   const saveFallbackToggle = async (key, value, element, eventName) => {
     if (element) element.disabled = true;
@@ -4814,12 +5332,10 @@ function bindEvents() {
   els.assistantModelMenu?.addEventListener("click", (event) => {
     const item = event.target.closest(".assistant-model-item");
     if (!item) return;
-    runtime.assistantModel = normalizeAssistantModel(item.dataset.model);
-    localStorage.setItem(assistantModelStorageKey, runtime.assistantModel);
-    updateAssistantModelUI();
-    updateThinkingLabel();
+    const nextModel = normalizeAssistantModel(item.dataset.model);
     els.assistantModelMenu.hidden = true;
     els.assistantModelBtn.setAttribute("aria-expanded", "false");
+    void selectAssistantModel(nextModel);
   });
 
   els.thinkToggleBtn.addEventListener("click", () => {
@@ -4829,7 +5345,7 @@ function bindEvents() {
     els.assistantModelMenu.hidden = true;
     els.assistantModelBtn.setAttribute("aria-expanded", "false");
   });
-  document.querySelectorAll(".think-menu-item").forEach((item) => {
+  document.querySelectorAll(".think-menu-item[data-level]").forEach((item) => {
     item.addEventListener("click", () => {
       state.thinkingLevel = item.dataset.level;
       localStorage.setItem("native_researcher_thinking_level", state.thinkingLevel);
@@ -4843,6 +5359,10 @@ function bindEvents() {
     if (!event.target.closest("#assistantModelWrap")) {
       els.assistantModelMenu.hidden = true;
       els.assistantModelBtn.setAttribute("aria-expanded", "false");
+    }
+    if (!event.target.closest("#assistantOllamaThinkingWrap")) {
+      els.assistantOllamaThinkingMenu.hidden = true;
+      els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
     }
     if (!event.target.closest("#thinkToggleWrap")) {
       els.thinkMenu.hidden = true;

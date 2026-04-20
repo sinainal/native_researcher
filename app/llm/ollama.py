@@ -21,10 +21,8 @@ def _ollama_think_option(thinking_level: str) -> bool | str:
     level = str(thinking_level or "off").strip().lower()
     if level == "off":
         return False
-    if level == "low":
-        return "low"
-    if level == "max":
-        return "high"
+    if level == "on":
+        return True
     return True
 
 
@@ -35,6 +33,8 @@ async def ollama_chat(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     thinking_level: str = "off",
+    keep_alive: str | int | float | None = None,
+    timeout_seconds: float = 120.0,
     request_user_agent: str = "NativeResearcher/0.1",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -45,8 +45,10 @@ async def ollama_chat(
     }
     if tools:
         payload["tools"] = tools
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
     headers = {"User-Agent": request_user_agent}
-    timeout = httpx.Timeout(120.0, connect=5.0)
+    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     async with httpx.AsyncClient(
         base_url=base_url.rstrip("/"),
         timeout=timeout,
@@ -56,6 +58,29 @@ async def ollama_chat(
         response = await client.post("/api/chat", json=payload)
         response.raise_for_status()
         return response.json()
+
+
+async def ollama_warmup(
+    *,
+    base_url: str,
+    model: str,
+    keep_alive: str | int | float = "10m",
+    timeout_seconds: float = 600.0,
+    request_user_agent: str = "NativeResearcher/0.1",
+) -> dict[str, Any]:
+    return await ollama_chat(
+        base_url=base_url,
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Warm up the model and reply with a single word.",
+            }
+        ],
+        keep_alive=keep_alive,
+        timeout_seconds=timeout_seconds,
+        request_user_agent=request_user_agent,
+    )
 
 
 def extract_ollama_tool_calls(message: dict[str, Any]) -> list[OllamaToolCall]:

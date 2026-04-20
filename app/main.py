@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -173,12 +174,29 @@ def create_app(
         try:
             yield
         finally:
+            warmup_task = getattr(app.state, "ollama_warmup_task", None)
+            if warmup_task is not None and not warmup_task.done():
+                warmup_task.cancel()
             if ncbi_client is not None:
                 await ncbi_client.aclose()
             if search_client is not None:
                 await search_client.aclose()
             if shared_client is not None:
                 await shared_client.aclose()
+            ollama_process = getattr(app.state, "ollama_process", None)
+            if ollama_process is not None:
+                poll = getattr(ollama_process, "poll", None)
+                running = callable(poll) and poll() is None
+                if running:
+                    try:
+                        ollama_process.terminate()
+                        await asyncio.to_thread(ollama_process.wait, 10)
+                    except Exception:
+                        try:
+                            ollama_process.kill()
+                        except Exception:
+                            pass
+                app.state.ollama_process = None
 
     app = FastAPI(
         title=resolved_settings.app_name,

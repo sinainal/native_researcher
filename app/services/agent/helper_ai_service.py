@@ -127,6 +127,27 @@ class HelperAIService:
             message["tool_calls"] = tool_calls
         return message
 
+    async def _ollama_chat_with_heartbeat(
+        self,
+        *,
+        status_text: str,
+        heartbeat_text: str,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        task = asyncio.create_task(ollama_chat(**kwargs))
+        try:
+            yield {"type": "status", "text": status_text}
+            while True:
+                try:
+                    response = await asyncio.wait_for(asyncio.shield(task), timeout=8.0)
+                    yield {"type": "response", "payload": response}
+                    return
+                except asyncio.TimeoutError:
+                    yield {"type": "status", "text": heartbeat_text}
+        finally:
+            if not task.done():
+                task.cancel()
+
     async def chat(self, payload: HelperChatRequest) -> HelperChatResponse:
         model_target = self._resolve_model_target(payload.model)
         model_name = model_target.model_name
@@ -794,21 +815,31 @@ class HelperAIService:
         ]
 
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "fast"}
-        yield {"type": "status", "text": "İstek analiz ediliyor."}
 
         remaining_tool_calls = MAX_FAST_TOOL_CALLS
         answer = "Yanit uretilemedi."
         finalizer_needed = False
 
         while True:
-            response = await ollama_chat(
+            response = None
+            async for event in self._ollama_chat_with_heartbeat(
+                status_text="İstek analiz ediliyor.",
+                heartbeat_text=f"{model_name} yanıt hazırlıyor.",
                 base_url=self._ollama_base_url(),
                 model=model_name,
                 messages=messages,
                 tools=self._build_ollama_fast_toolset() if remaining_tool_calls > 0 else None,
                 thinking_level=payload.thinking_level,
+                keep_alive="10m",
+                timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
-            )
+            ):
+                if event["type"] == "status":
+                    yield event
+                    continue
+                response = event["payload"]
+            if response is None:
+                raise RuntimeError("Ollama response was empty.")
             message = response.get("message") or {}
             answer_text = str(message.get("content") or "")
             thinking_text = str(message.get("thinking") or "").strip()
@@ -911,15 +942,25 @@ class HelperAIService:
             break
 
         if finalizer_needed:
-            yield {"type": "status", "text": "Araç çıktıları birleştiriliyor."}
-            final_response = await ollama_chat(
+            final_response = None
+            async for event in self._ollama_chat_with_heartbeat(
+                status_text="Araç çıktıları birleştiriliyor.",
+                heartbeat_text=f"{model_name} son yanıtı toparlıyor.",
                 base_url=self._ollama_base_url(),
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": HELPER_FINALIZER_PROMPT}],
                 tools=None,
                 thinking_level=payload.thinking_level,
+                keep_alive="10m",
+                timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
-            )
+            ):
+                if event["type"] == "status":
+                    yield event
+                    continue
+                final_response = event["payload"]
+            if final_response is None:
+                raise RuntimeError("Ollama final response was empty.")
             final_message = final_response.get("message") or {}
             final_thinking = str(final_message.get("thinking") or "").strip()
             if final_thinking:

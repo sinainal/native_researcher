@@ -27,6 +27,8 @@ class AppAPIKeysPayload(BaseModel):
 class OllamaSettingsPayload(BaseModel):
     ollama_base_url: str = Field(default="http://localhost:11434", max_length=1024)
     ollama_model: str = Field(default="", max_length=256)
+    ollama_thinking_level: str = Field(default="off", max_length=16)
+    warmup: bool = False
 
 
 class OllamaModelInfo(BaseModel):
@@ -41,5 +43,9 @@ class OllamaStatusResponse(BaseModel):
     connected: bool
     version: str | None = None
     ollama_model: str = ""
+    ollama_thinking_level: str = "off"
     models: list[OllamaModelInfo] = Field(default_factory=list)
     error: str | None = None
+    warmup_error: str | None = None
+    warming_up: bool = False
+    warming_model: str | None = None

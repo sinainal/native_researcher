@@ -200,15 +200,15 @@
               <div class="native-settings-card">
                 <div class="native-settings-row">
                   <div class="native-settings-copy">
-                    <div class="native-settings-title">Connect Ollama</div>
+                    <div class="native-settings-title">Model Selection</div>
                     <div class="native-settings-description">
-                      Detects a local Ollama server, checks whether it is reachable, and fetches installed models.
+                      Open a dedicated panel to connect Gemini API and Ollama, then choose which models appear in the assistant panel.
                     </div>
                   </div>
                 </div>
-                <div id="ollamaStatus" class="native-settings-note">Ollama is not checked yet.</div>
-                <button id="sidebarOpenOllamaBtn" class="btn btn-ghost btn-sm native-settings-action" type="button">Open
-                  Ollama</button>
+                <div id="modelSettingsSummary" class="native-settings-note">Gemini 3 Flash and Gemini 3.1 Flash Lite are enabled by default.</div>
+                <button id="sidebarOpenModelSettingsBtn" class="btn btn-ghost btn-sm native-settings-action" type="button">Open
+                  Model Settings</button>
               </div>
               <div class="native-settings-card">
                 <div class="native-settings-row">
@@ -438,6 +438,17 @@
         </button>
         <div id="assistantHeaderTitle" class="native-assistant-heading">New chat</div>
       </div>
+      <div id="assistantModelLoadingPopup" class="native-model-loading-popup" hidden aria-live="polite" aria-busy="true">
+        <div class="native-model-loading-head">
+          <div class="native-model-loading-chip">Loading model</div>
+          <div id="assistantModelLoadingSize" class="native-model-loading-size">0 MB</div>
+        </div>
+        <div id="assistantModelLoadingTitle" class="native-model-loading-title">Loading model...</div>
+        <div class="native-model-loading-bar" aria-hidden="true">
+          <span id="assistantModelLoadingBarFill" class="native-model-loading-bar-fill"></span>
+        </div>
+        <div id="assistantModelLoadingMeta" class="native-model-loading-meta">Preparing the local model...</div>
+      </div>
 
       <div id="assistantHistoryPanel" class="native-assistant-history-shell" hidden>
         <div class="native-chat-section-label native-chat-section-label-assistant">Chats</div>
@@ -476,18 +487,26 @@
                       </svg>
                     </button>
                     <div id="assistantModelMenu" class="assistant-toolbar-menu assistant-model-menu" hidden>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 3.1 Pro">Gemini 3.1 Pro</button>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 3 Flash">Gemini 3 Flash</button>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 3.1 Flash Lite">Gemini 3.1 Flash Lite</button>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 2.5 Pro">Gemini 2.5 Pro</button>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 2.5 Flash">Gemini 2.5 Flash</button>
-                      <button class="assistant-toolbar-menu-item assistant-model-item" type="button"
-                        data-model="Gemini 2.5 Flash Lite">Gemini 2.5 Flash Lite</button>
+                      <div class="assistant-toolbar-menu-empty">Loading models…</div>
+                    </div>
+                  </div>
+                  <span class="assistant-toolbar-divider" aria-hidden="true"></span>
+                  <div class="think-toggle assistant-ollama-thinking-toggle" id="assistantOllamaThinkingWrap" hidden>
+                    <button id="assistantOllamaThinkingBtn" class="think-toggle-btn assistant-toolbar-btn" type="button"
+                      aria-expanded="false">
+                      <span id="assistantOllamaThinkingLabel">Thinking: Off</span>
+                      <svg class="think-chevron assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2.5">
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </button>
+                    <div id="assistantOllamaThinkingMenu" class="think-menu assistant-toolbar-menu" hidden>
+                      <button class="think-menu-item assistant-toolbar-menu-item" data-ollama-think="off">
+                        <span class="tmi-dot off"></span>Off <span class="tmi-desc">- No local thinking</span>
+                      </button>
+                      <button class="think-menu-item assistant-toolbar-menu-item" data-ollama-think="on">
+                        <span class="tmi-dot max"></span>On <span class="tmi-desc">- Enable local thinking</span>
+                      </button>
                     </div>
                   </div>
                   <span class="assistant-toolbar-divider" aria-hidden="true"></span>
@@ -608,16 +627,16 @@
       </div>
     </form>
   </section>
-  <div id="ollamaOverlay" class="detail-popup-overlay" hidden></div>
-  <section id="ollamaPopup" class="detail-popup api-keys-popup" hidden role="dialog" aria-modal="true"
-    aria-labelledby="ollamaTitle">
+  <div id="modelSettingsOverlay" class="detail-popup-overlay" hidden></div>
+  <section id="modelSettingsPopup" class="detail-popup api-keys-popup native-model-popup" hidden role="dialog" aria-modal="true"
+    aria-labelledby="modelSettingsTitle">
     <div class="detail-popup-head api-keys-popup-head">
       <div class="detail-popup-headcopy">
-        <div class="detail-popup-eyebrow">Local Settings</div>
-        <h3 id="ollamaTitle" class="detail-popup-title">Connect Ollama</h3>
-        <div class="detail-popup-meta">Detect a local Ollama server and load installed models.</div>
+        <div class="detail-popup-eyebrow">Model Settings</div>
+        <h3 id="modelSettingsTitle" class="detail-popup-title">Connect Gemini API and Ollama</h3>
+        <div class="detail-popup-meta">Choose which cloud and local models appear in the assistant selector.</div>
       </div>
-      <button id="ollamaClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
+      <button id="modelSettingsClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
           stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18" />
@@ -625,25 +644,59 @@
         </svg>
       </button>
     </div>
-    <form id="ollamaForm" class="api-keys-form">
-      <label class="api-keys-field">
-        <span class="api-keys-label">Base URL</span>
-        <input id="ollamaBaseUrlInput" class="api-keys-input" type="text" autocomplete="off" spellcheck="false"
-          placeholder="http://localhost:11434">
-      </label>
-      <label class="api-keys-field">
-        <span class="api-keys-label">Model</span>
-        <select id="ollamaModelSelect" class="api-keys-input" disabled>
-          <option value="">No models yet</option>
-        </select>
-      </label>
-      <div id="ollamaPopupStatus" class="native-settings-note">Ollama is not checked yet.</div>
-      <div class="api-keys-actions">
-        <button id="ollamaCancel" class="btn btn-ghost btn-sm" type="button">Cancel</button>
-        <button id="ollamaDetectBtn" class="btn btn-secondary btn-sm" type="button">Detect</button>
-        <button id="ollamaSaveBtn" class="btn btn-primary btn-sm" type="submit">Save</button>
+    <div class="native-model-popup-body">
+      <div class="native-settings-card native-model-settings-section">
+        <div class="native-settings-row">
+          <div class="native-settings-copy">
+            <div class="native-settings-title">Connect Gemini API</div>
+            <div class="native-settings-description">
+              Stores your Gemini API key locally so the cloud models can be used in the assistant panel.
+            </div>
+          </div>
+          <label class="native-settings-field native-settings-field-wide" for="settingsAssistantApiKeyInput">
+            <span>API Key</span>
+            <input id="settingsAssistantApiKeyInput" class="api-keys-input" type="password"
+              autocomplete="off" spellcheck="false" placeholder="AIza...">
+          </label>
+        </div>
+        <div class="api-keys-actions">
+          <button id="settingsAssistantApiKeySaveBtn" class="btn btn-primary btn-sm" type="button">Save</button>
+        </div>
+        <div id="settingsAssistantApiKeyStatus" class="native-settings-note">Gemini cloud models use the saved API key.</div>
       </div>
-    </form>
+      <div class="native-settings-card native-model-settings-section">
+        <div class="native-settings-row">
+          <div class="native-settings-copy">
+            <div class="native-settings-title">Connect Ollama</div>
+            <div class="native-settings-description">
+              Detects a local Ollama server, checks whether it is reachable, and fetches installed models.
+            </div>
+          </div>
+          <label class="native-settings-field native-settings-field-wide" for="ollamaBaseUrlInput">
+            <span>Base URL</span>
+            <input id="ollamaBaseUrlInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="http://localhost:11434">
+          </label>
+        </div>
+        <div class="api-keys-actions">
+          <button id="ollamaDetectBtn" class="btn btn-secondary btn-sm" type="button">Detect</button>
+          <button id="ollamaSaveBtn" class="btn btn-primary btn-sm" type="button">Save</button>
+        </div>
+        <div id="ollamaStatus" class="native-settings-note">Ollama is not checked yet.</div>
+      </div>
+      <div class="native-settings-card native-model-settings-section native-model-settings-wide">
+        <div class="native-settings-row">
+          <div class="native-settings-copy">
+            <div class="native-settings-title">Available Models</div>
+            <div class="native-settings-description">
+              Toggle which Gemini presets and local Ollama models appear in the assistant model selector.
+            </div>
+          </div>
+        </div>
+        <div id="availableModelsStatus" class="native-settings-note">Only Gemini 3 Flash and Gemini 3.1 Flash Lite are enabled by default.</div>
+        <div id="availableModelsList" class="native-models-list"></div>
+      </div>
+    </div>
   </section>
   <div id="tableFilterOverlay" class="detail-popup-overlay" hidden></div>
   <section id="tableFilterPopup" class="detail-popup native-filter-popup" hidden role="dialog" aria-modal="true"

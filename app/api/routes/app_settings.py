@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import shutil
+import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request
@@ -14,6 +19,7 @@ from app.schemas.settings import (
     OllamaStatusResponse,
 )
 from app.utils.rate_limit import AsyncRateLimiter
+from app.llm.ollama import ollama_warmup
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
 
@@ -72,6 +78,228 @@ def _normalize_ollama_base_url(value: str | None, default: str) -> str:
     if "://" not in normalized:
         normalized = f"http://{normalized}"
     return normalized.rstrip("/")
+
+
+def _normalize_ollama_thinking_level(value: str | None, default: str = "off") -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"off", "on"}:
+        return normalized
+    if normalized in {"low", "medium", "high", "max", "minimal", "true", "yes", "1"}:
+        return "on"
+    return default
+
+
+def _ollama_host_for_env(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    if parsed.netloc:
+        return parsed.netloc
+    if parsed.path:
+        return parsed.path
+    return "localhost:11434"
+
+
+def _ollama_base_url_is_local(base_url: str) -> bool:
+    parsed = urlparse(_normalize_ollama_base_url(base_url, "http://localhost:11434"))
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _ollama_process_is_running(request: Request) -> bool:
+    process = getattr(request.app.state, "ollama_process", None)
+    if process is None:
+        return False
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return False
+    return poll() is None
+
+
+def _ensure_ollama_warmup_state(request: Request) -> None:
+    state = request.app.state
+    if not hasattr(state, "ollama_warmup_pending"):
+        state.ollama_warmup_pending = False
+    if not hasattr(state, "ollama_warmup_model"):
+        state.ollama_warmup_model = ""
+    if not hasattr(state, "ollama_warmup_error"):
+        state.ollama_warmup_error = None
+    if not hasattr(state, "ollama_warmup_token"):
+        state.ollama_warmup_token = 0
+    if not hasattr(state, "ollama_warmup_task"):
+        state.ollama_warmup_task = None
+
+
+def _ollama_warmup_snapshot(request: Request) -> tuple[bool, str, str | None]:
+    _ensure_ollama_warmup_state(request)
+    state = request.app.state
+    return (
+        bool(getattr(state, "ollama_warmup_pending", False)),
+        str(getattr(state, "ollama_warmup_model", "") or ""),
+        getattr(state, "ollama_warmup_error", None),
+    )
+
+
+def _spawn_ollama_process(request: Request, base_url: str) -> tuple[bool, str | None]:
+    if not _ollama_base_url_is_local(base_url):
+        return False, "Ollama auto-start is only supported for local hosts."
+    executable = shutil.which("ollama")
+    if not executable:
+        return False, "Ollama executable was not found on PATH."
+    if _ollama_process_is_running(request):
+        return True, None
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = _ollama_host_for_env(base_url)
+    try:
+        process = subprocess.Popen(  # noqa: S603,S607
+            [executable, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    request.app.state.ollama_process = process
+    return True, None
+
+
+def _stop_ollama_model(base_url: str, model: str) -> tuple[bool, str | None]:
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return True, None
+    if not _ollama_base_url_is_local(base_url):
+        return False, "Ollama model stop is only supported for local hosts."
+    executable = shutil.which("ollama")
+    if not executable:
+        return False, "Ollama executable was not found on PATH."
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = _ollama_host_for_env(base_url)
+    try:
+        completed = subprocess.run(  # noqa: S603,S607
+            [executable, "stop", normalized_model],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if completed.returncode not in {0, 1}:
+        return False, f"ollama stop exited with code {completed.returncode}."
+    return True, None
+
+
+async def _finalize_ollama_warmup(
+    request: Request,
+    *,
+    token: int,
+    base_url: str,
+    model: str,
+    request_user_agent: str,
+) -> None:
+    error: str | None = None
+    try:
+        await ollama_warmup(
+            base_url=base_url,
+            model=model,
+            request_user_agent=request_user_agent,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    _ensure_ollama_warmup_state(request)
+    state = request.app.state
+    if getattr(state, "ollama_warmup_token", 0) != token:
+        return
+    state.ollama_warmup_pending = False
+    state.ollama_warmup_model = model
+    state.ollama_warmup_error = error
+
+
+def _schedule_ollama_warmup(
+    request: Request,
+    *,
+    base_url: str,
+    model: str,
+    request_user_agent: str,
+) -> None:
+    _ensure_ollama_warmup_state(request)
+    state = request.app.state
+    state.ollama_warmup_token = int(getattr(state, "ollama_warmup_token", 0) or 0) + 1
+    token = state.ollama_warmup_token
+    state.ollama_warmup_pending = True
+    state.ollama_warmup_model = model
+    state.ollama_warmup_error = None
+
+    task = asyncio.create_task(
+        _finalize_ollama_warmup(
+            request,
+            token=token,
+            base_url=base_url,
+            model=model,
+            request_user_agent=request_user_agent,
+        )
+    )
+    state.ollama_warmup_task = task
+
+    def _swallow_task_exception(done_task: asyncio.Task[None]) -> None:
+        try:
+            done_task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    task.add_done_callback(_swallow_task_exception)
+
+
+async def _probe_ollama_with_start(
+    request: Request,
+    base_url: str,
+    *,
+    request_user_agent: str,
+) -> tuple[bool, str | None, list[OllamaModelInfo], str | None]:
+    connected, version, models, error = await _probe_ollama(
+        base_url,
+        request_user_agent=request_user_agent,
+    )
+    if connected:
+        return connected, version, models, error
+
+    lock = getattr(request.app.state, "ollama_start_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.ollama_start_lock = lock
+
+    async with lock:
+        connected, version, models, error = await _probe_ollama(
+            base_url,
+            request_user_agent=request_user_agent,
+        )
+        if connected:
+            return connected, version, models, error
+
+        started, start_error = _spawn_ollama_process(request, base_url)
+        if not started:
+            return False, None, [], start_error or error
+
+        deadline = asyncio.get_running_loop().time() + 20.0
+        last_error = error or start_error
+        while True:
+            connected, version, models, error = await _probe_ollama(
+                base_url,
+                request_user_agent=request_user_agent,
+            )
+            if connected:
+                return connected, version, models, error
+            if error:
+                last_error = error
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.5)
+        return False, None, [], last_error or "Ollama could not be started."
 
 
 def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> None:
@@ -153,6 +381,10 @@ def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
             str(getattr(settings, "ollama_base_url", "http://localhost:11434")),
         ),
         ollama_model=_read_value(settings.ollama_model_path) or str(getattr(settings, "ollama_model", "") or ""),
+        ollama_thinking_level=_normalize_ollama_thinking_level(
+            _read_value(settings.ollama_thinking_level_path),
+            _normalize_ollama_thinking_level(getattr(settings, "ollama_thinking_level", "off"), "off"),
+        ),
     )
 
 
@@ -269,30 +501,69 @@ async def get_ollama_settings(request: Request) -> OllamaStatusResponse:
         payload.ollama_base_url,
         request_user_agent=settings.request_user_agent,
     )
+    warming_up, warming_model, warmup_error = _ollama_warmup_snapshot(request)
     return OllamaStatusResponse(
         ollama_base_url=payload.ollama_base_url,
         connected=connected,
         version=version,
         ollama_model=payload.ollama_model,
+        ollama_thinking_level=payload.ollama_thinking_level,
         models=models,
         error=error,
+        warmup_error=warmup_error,
+        warming_up=warming_up,
+        warming_model=warming_model or None,
     )
 
 
 @router.put("/ollama", response_model=OllamaStatusResponse)
 async def update_ollama_settings(payload: OllamaSettingsPayload, request: Request) -> OllamaStatusResponse:
     settings = request.app.state.settings
+    current_payload = _current_ollama_payload(request)
     normalized_base_url = _normalize_ollama_base_url(
         payload.ollama_base_url,
         str(getattr(settings, "ollama_base_url", "http://localhost:11434")),
     )
     _write_value(settings.ollama_base_url_path, normalized_base_url)
     _write_value(settings.ollama_model_path, payload.ollama_model)
-    next_payload = _current_ollama_payload(request)
-    connected, version, models, error = await _probe_ollama(
-        next_payload.ollama_base_url,
-        request_user_agent=settings.request_user_agent,
+    _write_value(
+        settings.ollama_thinking_level_path,
+        _normalize_ollama_thinking_level(payload.ollama_thinking_level, "off"),
     )
+    next_payload = _current_ollama_payload(request)
+    stop_error: str | None = None
+    if (
+        payload.warmup
+        and next_payload.ollama_model
+        and current_payload.ollama_model
+        and current_payload.ollama_model != next_payload.ollama_model
+    ):
+        _, stop_error = await asyncio.to_thread(
+            _stop_ollama_model,
+            next_payload.ollama_base_url,
+            current_payload.ollama_model,
+        )
+    if payload.warmup:
+        connected, version, models, error = await _probe_ollama_with_start(
+            request,
+            next_payload.ollama_base_url,
+            request_user_agent=settings.request_user_agent,
+        )
+    else:
+        connected, version, models, error = await _probe_ollama(
+            next_payload.ollama_base_url,
+            request_user_agent=settings.request_user_agent,
+        )
+    if payload.warmup and connected and next_payload.ollama_model:
+        _schedule_ollama_warmup(
+            request,
+            base_url=next_payload.ollama_base_url,
+            model=next_payload.ollama_model,
+            request_user_agent=settings.request_user_agent,
+        )
+    warming_up, warming_model, warmup_error = _ollama_warmup_snapshot(request)
+    if stop_error and not warmup_error:
+        warmup_error = stop_error
     request.app.state.app_event_log_service.log(
         "info",
         "ollama_settings_updated",
@@ -302,6 +573,7 @@ async def update_ollama_settings(payload: OllamaSettingsPayload, request: Reques
             "ollama_model": next_payload.ollama_model,
             "connected": connected,
             "model_count": len(models),
+            "stopped_previous_model": bool(current_payload.ollama_model and current_payload.ollama_model != next_payload.ollama_model and not stop_error),
         },
     )
     return OllamaStatusResponse(
@@ -309,6 +581,10 @@ async def update_ollama_settings(payload: OllamaSettingsPayload, request: Reques
         connected=connected,
         version=version,
         ollama_model=next_payload.ollama_model,
+        ollama_thinking_level=next_payload.ollama_thinking_level,
         models=models,
         error=error,
+        warmup_error=warmup_error,
+        warming_up=warming_up,
+        warming_model=warming_model or None,
     )

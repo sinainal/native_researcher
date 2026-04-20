@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.genai import create_genai_client, load_genai_sdk
-from app.llm import extract_ollama_tool_calls, ollama_chat, resolve_chat_model_target
+from app.llm import extract_ollama_tool_calls, ollama_chat, ollama_chat_stream, resolve_chat_model_target
 from app.schemas.helper import (
     HelperChatRequest,
     HelperChatResponse,
@@ -367,10 +367,10 @@ class NativeResearcherService:
         finalizer_needed = False
 
         while True:
-            response = None
-            async for event in self._ollama_chat_with_heartbeat(
-                status_text="İstek analiz ediliyor.",
-                heartbeat_text=f"{model_name} yanıt hazırlıyor.",
+            answer_chunks: list[str] = []
+            tool_calls: list[Any] = []
+            seen_tool_call_keys: set[tuple[str, str]] = set()
+            async for chunk in ollama_chat_stream(
                 base_url=self._ollama_base_url(),
                 model=model_name,
                 messages=messages,
@@ -380,19 +380,22 @@ class NativeResearcherService:
                 timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
             ):
-                if event["type"] == "status":
-                    yield event
-                    continue
-                response = event["payload"]
-            if response is None:
-                raise RuntimeError("Ollama response was empty.")
-            message = response.get("message") or {}
-            answer_text = str(message.get("content") or "")
-            thinking_text = str(message.get("thinking") or "").strip()
-            if thinking_text:
-                streamed_thoughts.append(thinking_text)
-                yield {"type": "thinking_delta", "text": thinking_text}
-            tool_calls = extract_ollama_tool_calls(message)
+                message = chunk.get("message") or {}
+                thinking_text = str(message.get("thinking") or "").strip()
+                if thinking_text:
+                    streamed_thoughts.append(thinking_text)
+                    yield {"type": "thinking_delta", "text": thinking_text}
+                text_value = str(message.get("content") or "")
+                if text_value:
+                    answer_chunks.append(text_value)
+                    yield {"type": "answer_delta", "text": text_value}
+                for call in extract_ollama_tool_calls(message):
+                    call_key = (call.name, json.dumps(call.args, sort_keys=True))
+                    if call_key in seen_tool_call_keys:
+                        continue
+                    seen_tool_call_keys.add(call_key)
+                    tool_calls.append(call)
+            answer_text = "".join(answer_chunks).strip()
             if tool_calls and remaining_tool_calls > 0:
                 messages.append(
                     self._ollama_assistant_message(
@@ -445,20 +448,17 @@ class NativeResearcherService:
                     remaining_tool_calls -= 1
                 continue
 
-            answer = answer_text.strip()
-            if answer:
-                messages.append(self._ollama_assistant_message(content=answer))
-                yield {"type": "answer_delta", "text": answer}
-            if not answer and executed_actions:
+            answer = answer_text or "Yanit uretilemedi."
+            if answer_text:
+                messages.append(self._ollama_assistant_message(content=answer_text))
+            if not answer_text and executed_actions:
                 finalizer_needed = True
-            answer = answer or "Yanit uretilemedi."
             break
 
         if finalizer_needed:
-            final_response = None
-            async for event in self._ollama_chat_with_heartbeat(
-                status_text="Son yanıt hazırlanıyor.",
-                heartbeat_text=f"{model_name} son yanıtı toparlıyor.",
+            yield {"type": "status", "text": "Son yanıt hazırlanıyor."}
+            answer_chunks: list[str] = []
+            async for chunk in ollama_chat_stream(
                 base_url=self._ollama_base_url(),
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": NATIVE_FINALIZER_PROMPT}],
@@ -468,21 +468,18 @@ class NativeResearcherService:
                 timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
             ):
-                if event["type"] == "status":
-                    yield event
-                    continue
-                final_response = event["payload"]
-            if final_response is None:
-                raise RuntimeError("Ollama final response was empty.")
-            final_message = final_response.get("message") or {}
-            final_thinking = str(final_message.get("thinking") or "").strip()
-            if final_thinking:
-                streamed_thoughts.append(final_thinking)
-                yield {"type": "thinking_delta", "text": final_thinking}
-            final_answer = str(final_message.get("content") or "").strip()
+                final_message = chunk.get("message") or {}
+                final_thinking = str(final_message.get("thinking") or "").strip()
+                if final_thinking:
+                    streamed_thoughts.append(final_thinking)
+                    yield {"type": "thinking_delta", "text": final_thinking}
+                final_text = str(final_message.get("content") or "")
+                if final_text:
+                    answer_chunks.append(final_text)
+                    yield {"type": "answer_delta", "text": final_text}
+            final_answer = "".join(answer_chunks).strip()
             if final_answer:
                 answer = final_answer
-                yield {"type": "answer_delta", "text": final_answer}
 
         self._append_history(thread_state, payload.message, answer)
         self.thread_cache.set(thread_id, thread_state)

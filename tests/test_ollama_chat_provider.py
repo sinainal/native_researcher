@@ -76,11 +76,12 @@ def test_normalize_ollama_message_strips_gemma_tool_artifacts() -> None:
 
 
 def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:
-    async def fake_ollama_chat(**kwargs):
-        fake_ollama_chat.calls += 1
-        if fake_ollama_chat.calls == 1:
-            return {
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            yield {
                 "message": {
+                    "content": "Araçları kontrol ediyorum.",
                     "tool_calls": [
                         {
                             "function": {
@@ -89,13 +90,14 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
                                 "arguments": {"query": "ndm inhibitor", "max_results": 1},
                             }
                         }
-                    ]
+                    ],
                 }
             }
-        return {"message": {"content": "Bir ilgili derleme buldum."}}
+            return
+        yield {"message": {"content": "Bir ilgili derleme buldum."}}
 
-    fake_ollama_chat.calls = 0
-    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat", fake_ollama_chat)
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
 
     async def runner() -> None:
         service = HelperAIService(
@@ -112,6 +114,7 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         events = [event async for event in service.chat_stream(payload)]
         assert any(event["type"] == "tool_call" for event in events)
         assert any(event["type"] == "tool_result" for event in events)
+        assert any(event["type"] == "answer_delta" for event in events)
         final_event = next(event for event in events if event["type"] == "final")
         assert final_event["response"]["model"] == "gemma4:e2b"
         assert final_event["response"]["answer"] == "Bir ilgili derleme buldum."
@@ -122,11 +125,12 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
 
 
 def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:
-    async def fake_ollama_chat(**kwargs):
-        fake_ollama_chat.calls += 1
-        if fake_ollama_chat.calls == 1:
-            return {
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            yield {
                 "message": {
+                    "content": "İlk sonucu alıyorum.",
                     "tool_calls": [
                         {
                             "function": {
@@ -135,13 +139,14 @@ def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
                                 "arguments": {"query": "ndm inhibitor", "max_results": 1},
                             }
                         }
-                    ]
+                    ],
                 }
             }
-        return {"message": {"content": "Arama tamamlandi."}}
+            return
+        yield {"message": {"content": "Arama tamamlandi."}}
 
-    fake_ollama_chat.calls = 0
-    monkeypatch.setattr("app.services.agent.native_researcher_service.ollama_chat", fake_ollama_chat)
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.native_researcher_service.ollama_chat_stream", fake_ollama_chat_stream)
 
     async def runner() -> None:
         service = NativeResearcherService(
@@ -157,6 +162,7 @@ def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         events = [event async for event in service.chat_stream(payload)]
         assert any(event["type"] == "tool_call" for event in events)
         assert any(event["type"] == "tool_result" for event in events)
+        assert any(event["type"] == "answer_delta" for event in events)
         final_event = next(event for event in events if event["type"] == "final")
         assert final_event["response"]["model"] == "gemma4:e2b"
         assert final_event["response"]["answer"] == "Arama tamamlandi."

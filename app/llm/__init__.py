@@ -7,7 +7,7 @@ from app.llm.model_selection import (
     is_ollama_model_choice,
     resolve_chat_model_target,
 )
-from app.llm.ollama import OllamaToolCall, extract_ollama_tool_calls, ollama_chat
+from app.llm.ollama import OllamaToolCall, extract_ollama_tool_calls, ollama_chat, ollama_chat_stream
 
 __all__ = [
     "LLMTarget",
@@ -17,5 +17,6 @@ __all__ = [
     "format_ollama_model_choice",
     "is_ollama_model_choice",
     "ollama_chat",
+    "ollama_chat_stream",
     "resolve_chat_model_target",
 ]

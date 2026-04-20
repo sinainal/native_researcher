@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -91,6 +92,47 @@ async def ollama_chat(
         if isinstance(message, dict):
             data["message"] = _normalize_ollama_message(message)
         return data
+
+
+async def ollama_chat_stream(
+    *,
+    base_url: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    thinking_level: str = "off",
+    keep_alive: str | int | float | None = None,
+    timeout_seconds: float = 120.0,
+    request_user_agent: str = "NativeResearcher/0.1",
+) -> AsyncIterator[dict[str, Any]]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "think": _ollama_think_option(thinking_level),
+    }
+    if tools:
+        payload["tools"] = tools
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    headers = {"User-Agent": request_user_agent}
+    timeout = httpx.Timeout(timeout_seconds, connect=5.0)
+    async with httpx.AsyncClient(
+        base_url=base_url.rstrip("/"),
+        timeout=timeout,
+        headers=headers,
+        follow_redirects=True,
+    ) as client:
+        async with client.stream("POST", "/api/chat", json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                message = data.get("message")
+                if isinstance(message, dict):
+                    data["message"] = _normalize_ollama_message(message)
+                yield data
 
 
 async def ollama_warmup(

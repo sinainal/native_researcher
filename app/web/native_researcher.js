@@ -143,6 +143,7 @@ const els = {
   pdfArxivFallbackStatus: document.getElementById("pdfArxivFallbackStatus"),
   sidebarOpenModelSettingsBtn: document.getElementById("sidebarOpenModelSettingsBtn"),
   ollamaBaseUrlInput: document.getElementById("ollamaBaseUrlInput"),
+  ollamaConnectBtn: document.getElementById("ollamaConnectBtn"),
   ollamaDetectBtn: document.getElementById("ollamaDetectBtn"),
   ollamaSaveBtn: document.getElementById("ollamaSaveBtn"),
   assistantOllamaThinkingWrap: document.getElementById("assistantOllamaThinkingWrap"),
@@ -1702,6 +1703,41 @@ async function saveOllamaSettings(overrides = {}) {
     connected: Boolean(payload.connected),
   });
   return payload;
+}
+
+async function connectOllamaSettings() {
+  const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
+  runtime.ollamaBaseUrl = nextBaseUrl;
+  if (els.ollamaConnectBtn) els.ollamaConnectBtn.disabled = true;
+  try {
+    const payload = await saveOllamaSettings({
+      ollama_base_url: nextBaseUrl,
+      ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
+      warmup: true,
+    });
+    if (!payload.connected) {
+      throw new Error(payload.error || "Ollama is not reachable.");
+    }
+    if (payload.warmup_error && !payload.warming_up) {
+      throw new Error(payload.warmup_error);
+    }
+    trackAppEvent("info", "ollama_connected_ui", "Ollama connection requested from the native UI.", {
+      ollama_base_url: nextBaseUrl,
+      ollama_model: runtime.ollamaModel,
+      connected: Boolean(payload.connected),
+      warming_up: Boolean(payload.warming_up),
+    });
+    return payload;
+  } catch (error) {
+    renderSettingsPanel();
+    trackAppEvent("error", "ollama_connect_failed", error.message || "Ollama connection failed.", {
+      ollama_base_url: nextBaseUrl,
+      ollama_model: runtime.ollamaModel,
+    });
+    throw error;
+  } finally {
+    if (els.ollamaConnectBtn) els.ollamaConnectBtn.disabled = false;
+  }
 }
 
 async function selectAssistantModel(requestedModel) {
@@ -5189,6 +5225,13 @@ function bindEvents() {
       });
     } finally {
       if (els.ollamaSaveBtn) els.ollamaSaveBtn.disabled = false;
+    }
+  });
+  els.ollamaConnectBtn?.addEventListener("click", async () => {
+    try {
+      await connectOllamaSettings();
+    } catch (_error) {
+      // The error is already reported via the app event log and settings panel.
     }
   });
   els.ollamaDetectBtn?.addEventListener("click", async () => {

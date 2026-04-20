@@ -669,7 +669,7 @@
           <div class="native-settings-copy">
             <div class="native-settings-title">Connect Ollama</div>
             <div class="native-settings-description">
-              Connects to a local Ollama server, starts it if needed, and fetches installed models.
+              Connects to a local Ollama server, starts it if needed, and fetches installed models automatically.
             </div>
           </div>
           <label class="native-settings-field native-settings-field-wide" for="ollamaBaseUrlInput">
@@ -678,9 +678,8 @@
               spellcheck="false" placeholder="http://localhost:11434">
           </label>
         </div>
-        <div class="api-keys-actions">
-          <button id="ollamaConnectBtn" class="btn btn-primary btn-sm" type="button">Connect</button>
-          <button id="ollamaDetectBtn" class="btn btn-secondary btn-sm" type="button">Detect</button>
+        <div class="api-keys-actions native-ollama-actions">
+          <button id="ollamaConnectBtn" class="btn btn-secondary btn-sm native-ollama-connect-btn" type="button">Connect</button>
           <button id="ollamaSaveBtn" class="btn btn-primary btn-sm" type="button">Save</button>
         </div>
         <div id="ollamaStatus" class="native-settings-note">Ollama is not checked yet.</div>

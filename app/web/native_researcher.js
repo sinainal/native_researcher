@@ -144,7 +144,6 @@ const els = {
   sidebarOpenModelSettingsBtn: document.getElementById("sidebarOpenModelSettingsBtn"),
   ollamaBaseUrlInput: document.getElementById("ollamaBaseUrlInput"),
   ollamaConnectBtn: document.getElementById("ollamaConnectBtn"),
-  ollamaDetectBtn: document.getElementById("ollamaDetectBtn"),
   ollamaSaveBtn: document.getElementById("ollamaSaveBtn"),
   assistantOllamaThinkingWrap: document.getElementById("assistantOllamaThinkingWrap"),
   assistantOllamaThinkingBtn: document.getElementById("assistantOllamaThinkingBtn"),
@@ -335,6 +334,30 @@ function normalizeOllamaThinkingLevel(value, fallback = "off") {
   if (["off", "on"].includes(normalized)) return normalized;
   if (["low", "medium", "high", "max", "minimal", "true", "yes", "1"].includes(normalized)) return "on";
   return fallback;
+}
+
+function collectOllamaConnectCandidates() {
+  const candidates = [];
+  const seen = new Set();
+  const rawCandidates = [
+    els.ollamaBaseUrlInput?.value,
+    runtime.ollamaBaseUrl,
+    "http://localhost:11434",
+    "http://127.0.0.1:11434",
+    "http://[::1]:11434",
+    "http://host.docker.internal:11434",
+  ];
+
+  for (const candidate of rawCandidates) {
+    const raw = String(candidate ?? "").trim();
+    if (!raw) continue;
+    const normalized = normalizeOllamaBaseUrl(raw, raw);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    candidates.push(normalized);
+  }
+
+  return candidates;
 }
 
 function ollamaThinkingLevelLabel(value) {
@@ -1685,16 +1708,23 @@ async function saveApiKeys(overrides = {}, options = {}) {
   }
 }
 
-async function saveOllamaSettings(overrides = {}) {
+async function submitOllamaSettings(overrides = {}) {
   const payload = await fetchJson("/app/ollama", {
     method: "PUT",
     body: JSON.stringify({
       ollama_base_url: runtime.ollamaBaseUrl,
       ollama_model: runtime.ollamaModel,
       ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
-      warmup: false,
       ...overrides,
     }),
+  });
+  return payload;
+}
+
+async function saveOllamaSettings(overrides = {}) {
+  const payload = await submitOllamaSettings({
+    warmup: false,
+    ...overrides,
   });
   applyOllamaValues(payload);
   trackAppEvent("info", "ollama_settings_saved_ui", "Ollama settings updated from the native UI.", {
@@ -1706,33 +1736,47 @@ async function saveOllamaSettings(overrides = {}) {
 }
 
 async function connectOllamaSettings() {
-  const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
-  runtime.ollamaBaseUrl = nextBaseUrl;
+  const candidates = collectOllamaConnectCandidates();
+  const originalBaseUrl = String(els.ollamaBaseUrlInput?.value || runtime.ollamaBaseUrl || "").trim();
+  let lastError = "";
   if (els.ollamaConnectBtn) els.ollamaConnectBtn.disabled = true;
   try {
-    const payload = await saveOllamaSettings({
-      ollama_base_url: nextBaseUrl,
-      ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
-      warmup: true,
-    });
-    if (!payload.connected) {
-      throw new Error(payload.error || "Ollama is not reachable.");
+    for (const baseUrl of candidates) {
+      runtime.ollamaBaseUrl = baseUrl;
+      try {
+        const payload = await submitOllamaSettings({
+          ollama_base_url: baseUrl,
+          ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
+          warmup: true,
+        });
+        applyOllamaValues(payload);
+        if (!payload.connected) {
+          lastError = payload.error || `Ollama is not reachable at ${baseUrl}.`;
+          continue;
+        }
+        runtime.ollamaBaseUrl = payload.ollama_base_url || baseUrl;
+        if (els.ollamaBaseUrlInput) els.ollamaBaseUrlInput.value = runtime.ollamaBaseUrl;
+        trackAppEvent("info", "ollama_connected_ui", "Ollama connection requested from the native UI.", {
+          ollama_base_url: payload.ollama_base_url || baseUrl,
+          ollama_model: runtime.ollamaModel,
+          connected: Boolean(payload.connected),
+          warming_up: Boolean(payload.warming_up),
+          candidates_tried: candidates,
+        });
+        return payload;
+      } catch (error) {
+        lastError = error.message || `Ollama connection failed at ${baseUrl}.`;
+      }
     }
-    if (payload.warmup_error && !payload.warming_up) {
-      throw new Error(payload.warmup_error);
-    }
-    trackAppEvent("info", "ollama_connected_ui", "Ollama connection requested from the native UI.", {
-      ollama_base_url: nextBaseUrl,
-      ollama_model: runtime.ollamaModel,
-      connected: Boolean(payload.connected),
-      warming_up: Boolean(payload.warming_up),
-    });
-    return payload;
+    runtime.ollamaBaseUrl = normalizeOllamaBaseUrl(originalBaseUrl || runtime.ollamaBaseUrl || "http://localhost:11434");
+    if (els.ollamaBaseUrlInput) els.ollamaBaseUrlInput.value = runtime.ollamaBaseUrl;
+    throw new Error(lastError || "Ollama could not be connected.");
   } catch (error) {
     renderSettingsPanel();
     trackAppEvent("error", "ollama_connect_failed", error.message || "Ollama connection failed.", {
-      ollama_base_url: nextBaseUrl,
+      ollama_base_url: runtime.ollamaBaseUrl,
       ollama_model: runtime.ollamaModel,
+      candidates_tried: candidates,
     });
     throw error;
   } finally {
@@ -5232,29 +5276,6 @@ function bindEvents() {
       await connectOllamaSettings();
     } catch (_error) {
       // The error is already reported via the app event log and settings panel.
-    }
-  });
-  els.ollamaDetectBtn?.addEventListener("click", async () => {
-    const nextBaseUrl = String(els.ollamaBaseUrlInput?.value || "").trim() || "http://localhost:11434";
-    runtime.ollamaBaseUrl = nextBaseUrl;
-    if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = true;
-    try {
-      await saveOllamaSettings({
-        ollama_base_url: nextBaseUrl,
-        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
-      });
-      trackAppEvent("info", "ollama_detected_ui", "Ollama connection checked from the native UI.", {
-        ollama_base_url: nextBaseUrl,
-        ollama_thinking_level: normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
-        connected: Boolean(runtime.ollamaConnected),
-      });
-    } catch (error) {
-      renderSettingsPanel();
-      trackAppEvent("error", "ollama_detect_failed", error.message || "Ollama detection failed.", {
-        ollama_base_url: nextBaseUrl,
-      });
-    } finally {
-      if (els.ollamaDetectBtn) els.ollamaDetectBtn.disabled = false;
     }
   });
   els.availableModelsList?.addEventListener("change", (event) => {

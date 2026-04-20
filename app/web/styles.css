@@ -6619,6 +6619,26 @@ body.is-document-viewer-open .native-document-viewer {
   padding-top: 4px;
 }
 
+.native-ollama-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.native-ollama-connect-btn {
+  min-width: 128px;
+}
+
+@media (max-width: 640px) {
+  .native-ollama-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .native-ollama-actions .btn {
+    width: 100%;
+  }
+}
+
 .native-model-popup-body {
   display: grid;
   gap: 14px;

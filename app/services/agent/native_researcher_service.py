@@ -102,6 +102,15 @@ class NativeResearcherService:
             message["tool_calls"] = tool_calls
         return message
 
+    @staticmethod
+    def _ollama_tool_message_content(result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        try:
+            return json.dumps(result, ensure_ascii=False)
+        except TypeError:
+            return str(result)
+
     async def _ollama_chat_with_heartbeat(
         self,
         *,
@@ -370,6 +379,7 @@ class NativeResearcherService:
             answer_chunks: list[str] = []
             tool_calls: list[Any] = []
             seen_tool_call_keys: set[tuple[str, str]] = set()
+            tool_turn_active = False
             async for chunk in ollama_chat_stream(
                 base_url=self._ollama_base_url(),
                 model=model_name,
@@ -381,20 +391,23 @@ class NativeResearcherService:
                 request_user_agent=self._ollama_request_user_agent(),
             ):
                 message = chunk.get("message") or {}
-                thinking_text = str(message.get("thinking") or "").strip()
+                thinking_text = str(message.get("thinking") or "")
                 if thinking_text:
                     streamed_thoughts.append(thinking_text)
                     yield {"type": "thinking_delta", "text": thinking_text}
-                text_value = str(message.get("content") or "")
-                if text_value:
-                    answer_chunks.append(text_value)
-                    yield {"type": "answer_delta", "text": text_value}
-                for call in extract_ollama_tool_calls(message):
+                chunk_tool_calls = extract_ollama_tool_calls(message)
+                if chunk_tool_calls:
+                    tool_turn_active = True
+                for call in chunk_tool_calls:
                     call_key = (call.name, json.dumps(call.args, sort_keys=True))
                     if call_key in seen_tool_call_keys:
                         continue
                     seen_tool_call_keys.add(call_key)
                     tool_calls.append(call)
+                text_value = str(message.get("content") or "")
+                if text_value and not tool_turn_active:
+                    answer_chunks.append(text_value)
+                    yield {"type": "answer_delta", "text": text_value}
             answer_text = "".join(answer_chunks).strip()
             if tool_calls and remaining_tool_calls > 0:
                 messages.append(
@@ -425,6 +438,7 @@ class NativeResearcherService:
                             "details": call.args,
                         },
                     }
+                    yield {"type": "status", "text": f"Araç çalıştırılıyor: {call.name}"}
                     result, action, last_search_ids = await self._execute_tool_call(
                         call.name,
                         call.args,
@@ -442,7 +456,7 @@ class NativeResearcherService:
                         {
                             "role": "tool",
                             "tool_name": call.name,
-                            "content": json.dumps({"result": result}, ensure_ascii=False),
+                            "content": self._ollama_tool_message_content(result),
                         }
                     )
                     remaining_tool_calls -= 1
@@ -469,7 +483,7 @@ class NativeResearcherService:
                 request_user_agent=self._ollama_request_user_agent(),
             ):
                 final_message = chunk.get("message") or {}
-                final_thinking = str(final_message.get("thinking") or "").strip()
+                final_thinking = str(final_message.get("thinking") or "")
                 if final_thinking:
                     streamed_thoughts.append(final_thinking)
                     yield {"type": "thinking_delta", "text": final_thinking}

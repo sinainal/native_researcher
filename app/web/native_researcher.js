@@ -4659,18 +4659,48 @@ function assistantMessageMarkup(item) {
 }
 
 function assistantThinkingMarkup(item) {
-  if (item.role === "user" || !item.pending) return "";
-  const label = item.thinkingEnabled ? "Thinking" : "";
-  return `
-    <div class="ai-thinking-live-panel is-pending">
-      <div class="ai-thinking-live-head">
-        <span class="ai-thinking-wave" aria-hidden="true">
-          <span></span><span></span><span></span>
-        </span>
-        ${label ? `<span class="ai-thinking-live-label">${label}</span>` : ""}
+  if (item.role === "user") return "";
+  const liveThinking = item.pending ? item.liveThinking || "" : "";
+  const thinkingText = item.pending ? liveThinking : item.thinking || "";
+  const pendingLabel = item.thinkingEnabled ? "Thinking" : "İstek analiz ediliyor";
+
+  if (item.role !== "user" && thinkingText) {
+    if (item.pending) {
+      return `
+        <div class="ai-thinking-live-panel">
+          <div class="ai-thinking-live-head">
+            <span class="ai-thinking-live-label">Live trace</span>
+            <span class="ai-thinking-live-pill">Thinking</span>
+          </div>
+          <pre class="ai-thinking-live-text">${escapeHtml(thinkingText)}</pre>
+        </div>
+      `;
+    }
+    return `
+      <div class="ai-thinking-block" data-think-idx="${item.id || ""}">
+        <button class="ai-thinking-toggle" type="button" onclick="this.closest('.ai-thinking-block').classList.toggle('is-open')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/></svg>
+          <span>Düşünme süreci</span>
+          <svg class="ai-thinking-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="ai-thinking-body">
+          <pre class="ai-thinking-text">${escapeHtml(thinkingText)}</pre>
+        </div>
       </div>
-    </div>
-  `;
+    `;
+  }
+
+  if (item.pending && !item.text) {
+    return `
+      <div class="ai-thinking-live">
+        <svg class="ai-thinking-live-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/></svg>
+        <span>${pendingLabel}</span>
+        <span class="ai-thinking-dots"><span></span><span></span><span></span></span>
+      </div>
+    `;
+  }
+
+  return "";
 }
 
 function assistantActionsMarkup(item) {

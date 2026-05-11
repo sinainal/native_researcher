@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -1378,31 +1379,197 @@ class HelperAIService:
         thread_state: HelperThreadState,
         model_name: str,
     ) -> AsyncIterator[dict[str, Any]]:
-        response = await self._chat_research_agent_ollama(
-            payload,
-            thread_id=thread_id,
-            thread_state=thread_state,
-            model_name=model_name,
-        )
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
-        for action in response.executed_actions:
-            call_id = f"call_{uuid4().hex[:8]}"
+        yield {"type": "status", "text": "Research Agent is building the first planning tool call."}
+
+        async def stream_ollama_with_heartbeat(
+            *,
+            heartbeat_text: str,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None,
+        ) -> AsyncIterator[dict[str, Any]]:
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def produce_chunks() -> None:
+                try:
+                    async for chunk in ollama_chat_stream(
+                        base_url=self._ollama_base_url(),
+                        model=model_name,
+                        messages=messages,
+                        tools=tools,
+                        thinking_level=payload.thinking_level,
+                        keep_alive="10m",
+                        timeout_seconds=900.0,
+                        request_user_agent=self._ollama_request_user_agent(),
+                    ):
+                        queue.put_nowait({"type": "chunk", "chunk": chunk})
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    queue.put_nowait({"type": "error", "error": error})
+                finally:
+                    queue.put_nowait({"type": "done"})
+
+            producer_task = asyncio.create_task(produce_chunks())
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=8.0)
+                    except asyncio.TimeoutError:
+                        yield {"type": "status", "text": heartbeat_text}
+                        continue
+                    if event["type"] == "done":
+                        break
+                    if event["type"] == "error":
+                        raise event["error"]
+                    yield event
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await producer_task
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": build_research_agent_system_instruction()},
+            *self._history_to_ollama_messages(thread_state.history),
+            {"role": "user", "content": build_research_agent_prompt(payload, today_stamp=date.today().isoformat())},
+        ]
+        executed_actions: list[HelperExecutedAction] = []
+        streamed_thoughts: list[str] = []
+        answer = "Research plan could not be created because the model did not call the planning tool."
+        answer_chunks: list[str] = []
+        thinking_chunks: list[str] = []
+        tool_calls: list[Any] = []
+        seen_tool_call_keys: set[tuple[str, str]] = set()
+        tool_turn_active = False
+
+        async for stream_event in stream_ollama_with_heartbeat(
+            heartbeat_text="Research Agent is still waiting for the local model to emit the planning call.",
+            messages=messages,
+            tools=self._build_ollama_research_toolset(),
+        ):
+            if stream_event["type"] == "status":
+                yield stream_event
+                continue
+            message = (stream_event["chunk"].get("message") or {})
+            thinking_text = str(message.get("thinking") or "")
+            if thinking_text:
+                thinking_chunks.append(thinking_text)
+                streamed_thoughts.append(thinking_text)
+                yield {"type": "thinking_delta", "text": thinking_text}
+            chunk_tool_calls = extract_ollama_tool_calls(message)
+            if chunk_tool_calls:
+                tool_turn_active = True
+            for call in chunk_tool_calls:
+                call_key = (call.name, json.dumps(call.args, sort_keys=True))
+                if call_key in seen_tool_call_keys:
+                    continue
+                seen_tool_call_keys.add(call_key)
+                tool_calls.append(call)
+            answer_text = str(message.get("content") or "")
+            if answer_text:
+                answer_chunks.append(answer_text)
+            if answer_text and not tool_turn_active:
+                yield {"type": "answer_delta", "text": answer_text}
+
+        raw_answer = "".join(answer_chunks).strip()
+        raw_thinking = "".join(thinking_chunks).strip()
+        if tool_calls:
+            call = tool_calls[0]
+            self._log(
+                "assistant_tool_call",
+                thread_id=thread_id,
+                mode=RESEARCH_AGENT_MODE,
+                model=model_name,
+                call_id=call.call_id,
+                name=call.name,
+                args=call.args,
+            )
             yield {
                 "type": "tool_call",
-                "call_id": call_id,
+                "call_id": call.call_id,
                 "action": {
                     "type": "tool_call",
-                    "name": action.name,
-                    "title": self._tool_pending_title(action.name),
+                    "name": call.name,
+                    "title": self._tool_pending_title(call.name),
                     "status": "running",
-                    "details": action.details,
+                    "details": call.args,
                 },
             }
-            yield {"type": "tool_result", "call_id": call_id, "action": action.model_dump()}
-        if response.thinking:
-            yield {"type": "thinking_delta", "text": response.thinking}
-        if response.answer:
-            yield {"type": "answer_delta", "text": response.answer}
+            yield {"type": "status", "text": "Research Agent is normalizing the plan."}
+            result, action = await self._execute_research_tool_call(call.name, call.args)
+            executed_actions.append(action)
+            self._log(
+                "assistant_tool_result",
+                thread_id=thread_id,
+                mode=RESEARCH_AGENT_MODE,
+                model=model_name,
+                call_id=call.call_id,
+                action=action.model_dump(),
+            )
+            yield {"type": "tool_result", "call_id": call.call_id, "action": action.model_dump()}
+            messages.append(
+                self._ollama_assistant_message(
+                    content=raw_answer,
+                    thinking=raw_thinking,
+                    tool_calls=[call.raw],
+                )
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": call.name,
+                    "content": self._ollama_tool_message_content(result),
+                }
+            )
+            yield {"type": "status", "text": "Research Agent is writing the plan preview."}
+            final_chunks: list[str] = []
+            async for stream_event in stream_ollama_with_heartbeat(
+                heartbeat_text="Research Agent is still writing the plan preview.",
+                messages=[*messages, {"role": "user", "content": RESEARCH_PLAN_FINALIZER_PROMPT}],
+                tools=None,
+            ):
+                if stream_event["type"] == "status":
+                    yield stream_event
+                    continue
+                final_message = stream_event["chunk"].get("message") or {}
+                final_thinking = str(final_message.get("thinking") or "")
+                if final_thinking:
+                    streamed_thoughts.append(final_thinking)
+                    yield {"type": "thinking_delta", "text": final_thinking}
+                final_text = str(final_message.get("content") or "")
+                if final_text:
+                    final_chunks.append(final_text)
+                    yield {"type": "answer_delta", "text": final_text}
+            answer = "".join(final_chunks).strip()
+            if not answer and executed_actions:
+                answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
+                yield {"type": "answer_delta", "text": answer}
+        else:
+            if raw_answer:
+                answer = raw_answer
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_stream_final",
+            thread_id=thread_id,
+            mode=RESEARCH_AGENT_MODE,
+            model=model_name,
+            answer=answer,
+            used_article_ids=[],
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode=RESEARCH_AGENT_MODE,
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(streamed_thoughts).strip() or None,
+            executed_actions=executed_actions,
+        )
         yield {"type": "final", "response": response.model_dump()}
 
     def reset(self, thread_id: str) -> None:

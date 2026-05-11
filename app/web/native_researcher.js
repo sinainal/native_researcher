@@ -5020,13 +5020,14 @@ async function sendAssistantMessage(options = {}) {
   }
 
   try {
+    const isResearchAgentRequest = state.assistantMode === "research_agent";
     await streamJsonEvents(
       "/assistant/chat/stream",
       {
         method: "POST",
         signal: controller.signal,
-        idleTimeoutMs: 45000,
-        responseTimeoutMs: 20000,
+        idleTimeoutMs: isResearchAgentRequest ? 180000 : 45000,
+        responseTimeoutMs: isResearchAgentRequest ? 30000 : 20000,
         body: JSON.stringify({
           api_key: isOllamaAssistantModel(runtime.assistantModel) ? "" : runtime.apiKey,
           message,

@@ -138,6 +138,91 @@ def test_research_plan_tool_normalizes_defaults() -> None:
     asyncio.run(runner())
 
 
+def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            assert kwargs["tools"][0]["function"]["name"] == "create_research_plan"
+            assert "Researcher Agent" in kwargs["messages"][0]["content"]
+            yield {"message": {"thinking": "Building a research plan. "}}
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "plan_call",
+                                "name": "create_research_plan",
+                                "arguments": {
+                                    "topic": "dopamine D1-D5 docking papers",
+                                    "objective": "Find docking papers that identify strong interaction regions.",
+                                    "target_count": 20,
+                                    "databases": ["PubMed", "OpenAlex"],
+                                    "screening_criteria": [
+                                        {
+                                            "id": "docking_performed",
+                                            "label": "Docking performed",
+                                            "description": "The article explicitly reports molecular docking.",
+                                            "required": True,
+                                        },
+                                        {
+                                            "id": "interaction_region",
+                                            "label": "Interaction region evidence",
+                                            "description": "The article identifies receptor-ligand interaction regions.",
+                                            "required": True,
+                                        },
+                                    ],
+                                    "database_queries": [
+                                        {
+                                            "database": "PubMed",
+                                            "query": "(dopamine receptor) AND molecular docking",
+                                            "candidate_limit": 40,
+                                        }
+                                    ],
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        yield {"message": {"content": "Researcher plan preview is ready. Ask for edits or execute later."}}
+
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        service = HelperAIService(
+            thread_cache=TTLCache(ttl_seconds=60, max_entries=4),
+            pubmed_service=FakePubMedService(),
+        )
+        payload = HelperChatRequest(
+            api_key="",
+            message="Find dopamine D1-D5 docking papers with strongest interaction regions",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        assert any(
+            event["type"] == "thinking_delta" and "Building a research plan" in str(event.get("text") or "")
+            for event in events
+        )
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        plan = tool_result["action"]["details"]["plan"]
+        assert plan["topic"] == "dopamine D1-D5 docking papers"
+        assert plan["candidate_budget"]["per_database"] == 40
+        assert [item["id"] for item in plan["screening_criteria"]] == [
+            "docking_performed",
+            "interaction_region",
+        ]
+        final_event = next(event for event in events if event["type"] == "final")
+        assert final_event["response"]["mode"] == "research_agent"
+        assert final_event["response"]["executed_actions"][0]["name"] == "create_research_plan"
+        assert "Building a research plan" in final_event["response"]["thinking"]
+        assert "Researcher plan preview is ready" in final_event["response"]["answer"]
+
+    asyncio.run(runner())
+
+
 def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 

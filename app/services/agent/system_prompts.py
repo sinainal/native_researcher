@@ -22,6 +22,41 @@ HELPER_FINALIZER_PROMPT = (
     "Cevabi Turkce yaz ve en sonda sadece article id degerleriyle Kaynak ID satiri ekle."
 )
 
+RESEARCH_PLAN_FINALIZER_PROMPT = (
+    "The research plan tool has returned a structured plan. "
+    "Write a concise English preview for the chat panel. "
+    "Do not claim that any database search, screening pass, PDF scan, or execution has happened. "
+    "Tell the user they can ask follow-up questions or request edits before execution."
+)
+
+
+def build_research_agent_system_instruction() -> str:
+    return (
+        "You are the Researcher Agent inside Native Researcher. "
+        "Your only job in this mode is to create or revise a structured Deep Research plan. "
+        "You must call the `create_research_plan` function before producing the final answer. "
+        "Do not search databases, do not screen abstracts, do not download PDFs, and do not invent article results. "
+        "The plan must be practical enough for a later execution step. "
+        "Default target selected papers is 20. "
+        "Default first-pass candidate budget is target_count * 2 per enabled database. "
+        "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
+        "Include a screening schema with 0.0 to 1.0 criterion scores and the squared-score relevance rule. "
+        "Always write English prompts, plans, labels, and output text in this mode."
+    )
+
+
+def build_research_agent_prompt(payload: HelperChatRequest, *, today_stamp: str) -> str:
+    return (
+        "Research Agent mode is active.\n"
+        f"Today: {today_stamp}\n"
+        f"Loaded article count: {len(payload.articles)}\n"
+        f"Selected article IDs: {', '.join(str(item) for item in payload.selected_ids) or 'none'}\n\n"
+        "User request or plan revision:\n"
+        f"{payload.message.strip()}\n\n"
+        "Create or revise the structured research plan using the `create_research_plan` function. "
+        "If the user is asking to revise an existing plan, infer the current plan from chat history and return the updated plan."
+    )
+
 
 def build_helper_fast_mode_system_instruction(source: str) -> str:
     label = source_label(source)
@@ -114,4 +149,3 @@ def build_native_prompt(message: str, *, today_stamp: str, source: str) -> str:
         f"{message.strip()}\n\n"
         "Gerekirse yeni bir literatür araması yapmak için tool kullan."
     )
-

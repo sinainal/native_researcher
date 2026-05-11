@@ -40,6 +40,7 @@ const state = {
   documentViewerRenderToken: 0,
   assistantThreadId: null,
   assistantMessages: [],
+  assistantMode: localStorage.getItem("native_researcher_assistant_mode") || "fast",
   assistantOpen: true,
   thinkingLevel: localStorage.getItem("native_researcher_thinking_level") || "off",
   assistantStreamAbort: null,
@@ -115,15 +116,9 @@ const els = {
   assistantMessages: document.getElementById("assistantMessages"),
   assistantInput: document.getElementById("assistantInput"),
   assistantDraftBtn: document.getElementById("assistantDraftBtn"),
-  assistantModesOverlay: document.getElementById("assistantModesOverlay"),
-  assistantModesPopup: document.getElementById("assistantModesPopup"),
-  assistantModesClose: document.getElementById("assistantModesClose"),
-  assistantModesNewChatBtn: document.getElementById("assistantModesNewChatBtn"),
-  deepResearchTopicInput: document.getElementById("deepResearchTopicInput"),
-  deepResearchTargetInput: document.getElementById("deepResearchTargetInput"),
-  deepResearchCriteriaInput: document.getElementById("deepResearchCriteriaInput"),
-  deepResearchPlanNotesInput: document.getElementById("deepResearchPlanNotesInput"),
-  deepResearchGenerateBtn: document.getElementById("deepResearchGenerateBtn"),
+  assistantModeMenu: document.getElementById("assistantModeMenu"),
+  assistantNormalModeBtn: document.getElementById("assistantNormalModeBtn"),
+  assistantResearchModeBtn: document.getElementById("assistantResearchModeBtn"),
   apiKeysBtn: document.getElementById("apiKeysBtn"),
   apiKeysOverlay: document.getElementById("apiKeysOverlay"),
   apiKeysPopup: document.getElementById("apiKeysPopup"),
@@ -2278,88 +2273,40 @@ function createNewAssistantChat() {
   });
 }
 
-function setAssistantModesDialogOpen(next) {
+function setAssistantModeMenuOpen(next) {
+  if (!els.assistantModeMenu || !els.assistantDraftBtn) return;
   const isOpen = Boolean(next);
-  if (!els.assistantModesOverlay || !els.assistantModesPopup) return;
-  els.assistantModesOverlay.hidden = false;
-  els.assistantModesPopup.hidden = false;
-  requestAnimationFrame(() => {
-    els.assistantModesOverlay.classList.toggle("is-open", isOpen);
-    els.assistantModesPopup.classList.toggle("is-open", isOpen);
-  });
-  if (!isOpen) {
-    window.setTimeout(() => {
-      if (!els.assistantModesPopup.classList.contains("is-open")) {
-        els.assistantModesOverlay.hidden = true;
-        els.assistantModesPopup.hidden = true;
-      }
-    }, 180);
-    return;
+  els.assistantModeMenu.hidden = !isOpen;
+  els.assistantDraftBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+}
+
+function setAssistantMode(mode) {
+  const normalized = mode === "research_agent" ? "research_agent" : "fast";
+  state.assistantMode = normalized;
+  localStorage.setItem("native_researcher_assistant_mode", normalized);
+  if (els.assistantInput) {
+    els.assistantInput.placeholder = normalized === "research_agent"
+      ? "Describe the research topic for the Researcher Agent..."
+      : "Ask Searcher AI...";
   }
-  requestAnimationFrame(() => {
-    els.deepResearchTopicInput?.focus();
+  renderAssistantHeader();
+}
+
+function startResearchAgentMode() {
+  setAssistantModeMenuOpen(false);
+  setAssistantMode("research_agent");
+  createNewAssistantChat();
+  pushAssistantMessage({
+    role: "assistant",
+    text: "Research Agent Mode is ready. Send a research topic and I will create the first structured plan with the planning tool.",
+    meta: "Planning only. No search or screening will run yet.",
   });
 }
 
-function buildDeepResearchPlanPrompt({ topic, targetCount, criteria, notes }) {
-  const safeTargetCount = Number.isFinite(targetCount) && targetCount > 0 ? targetCount : 20;
-  const criteriaText = criteria?.trim()
-    ? criteria.trim()
-    : "Infer clear inclusion and exclusion criteria from the topic.";
-  const notesText = notes?.trim()
-    ? notes.trim()
-    : "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant. Start with target_count * 2 candidates per database. Do not run a live search yet.";
-  return [
-    "You are the Native Researcher Researcher Agent.",
-    "",
-    "Create the first Deep Research plan only. Do not search databases yet, do not claim results, and do not download papers.",
-    "",
-    `Topic: ${topic.trim()}`,
-    `Target selected papers: ${safeTargetCount}`,
-    "",
-    "User criteria:",
-    criteriaText,
-    "",
-    "Manual plan notes:",
-    notesText,
-    "",
-    "Return a practical plan the user can edit. Use these sections:",
-    "1. Research objective",
-    "2. Inclusion criteria",
-    "3. Exclusion criteria",
-    "4. Database-specific search strategy",
-    "5. First-pass candidate budget",
-    "6. Screening agent JSON schema with 0.0-1.0 criterion scores",
-    "7. Relevance scoring rule",
-    "8. Query expansion policy if fewer than the target count survive screening",
-    "9. Open questions for the user",
-    "",
-    "Keep the plan concrete and ready for the next agent step.",
-  ].join("\n");
-}
-
-async function generateDeepResearchPlan() {
-  const topic = String(els.deepResearchTopicInput?.value || "").trim();
-  if (!topic) {
-    els.deepResearchTopicInput?.focus();
-    return;
-  }
-  const targetCount = Number.parseInt(String(els.deepResearchTargetInput?.value || "20"), 10);
-  const criteria = String(els.deepResearchCriteriaInput?.value || "").trim();
-  const notes = String(els.deepResearchPlanNotesInput?.value || "").trim();
-  const prompt = buildDeepResearchPlanPrompt({
-    topic,
-    targetCount,
-    criteria,
-    notes,
-  });
-  const displayMessage = `Deep Research plan: ${topic}`;
-  setAssistantModesDialogOpen(false);
-  await sendAssistantMessage({
-    message: prompt,
-    displayMessage,
-    source: "deep_research_plan",
-  });
+function startNormalMode() {
+  setAssistantModeMenuOpen(false);
+  setAssistantMode("fast");
+  els.assistantInput?.focus();
 }
 
 function formatSessionTime(isoStamp) {
@@ -2398,9 +2345,10 @@ function currentAssistantSession() {
 
 function renderAssistantHeader() {
   if (els.assistantHeaderTitle) {
+    const fallbackTitle = state.assistantMode === "research_agent" ? "Research Agent" : "New chat";
     els.assistantHeaderTitle.textContent = state.chatHistoryOpen
       ? "Chats"
-      : (currentAssistantSession()?.title || "New chat");
+      : (currentAssistantSession()?.title || fallbackTitle);
   }
   if (els.assistantHistoryToggleBtn) {
     const label = state.chatHistoryOpen ? "Back to chat" : "Open chat history";
@@ -4684,16 +4632,19 @@ function assistantActionLabel(action) {
     search_pubmed: `Searching ${sourceLabel}`,
     get_article_details: "Reading article details",
     list_catalog_articles: "Scanning catalog",
+    create_research_plan: "Creating research plan",
   };
   const success = {
     search_pubmed: `Searched ${sourceLabel}`,
     get_article_details: "Read article details",
     list_catalog_articles: "Scanned catalog",
+    create_research_plan: "Created research plan",
   };
   const error = {
     search_pubmed: `${sourceLabel} search failed`,
     get_article_details: "Article detail read failed",
     list_catalog_articles: "Catalog scan failed",
+    create_research_plan: "Research plan failed",
   };
   if (action.status === "running") return running[action.name] || "Running tool";
   if (action.status === "error") return error[action.name] || "Tool failed";
@@ -4712,6 +4663,9 @@ function assistantActionDetail(action) {
   if (action.name === "list_catalog_articles") {
     return details.query || "Scanning loaded catalog";
   }
+  if (action.name === "create_research_plan") {
+    return details.plan?.topic || "Structured plan";
+  }
   return action.name || "Tool";
 }
 
@@ -4720,6 +4674,7 @@ function assistantActionKindLabel(action) {
     search_pubmed: "Search",
     get_article_details: "Evidence",
     list_catalog_articles: "Catalog",
+    create_research_plan: "Plan",
   };
   return map[action.name] || "Tool";
 }
@@ -4736,6 +4691,44 @@ function upsertAssistantAction(actions, action, callId) {
   if (index >= 0) next[index] = merged;
   else next.push(merged);
   return next;
+}
+
+function researchPlanActionMarkup(action) {
+  const plan = action?.details?.plan || {};
+  const databases = Array.isArray(plan.databases) ? plan.databases : [];
+  const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
+  const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
+  const inclusion = Array.isArray(plan.inclusion_criteria) ? plan.inclusion_criteria : [];
+  return `
+    <div class="research-plan-preview">
+      <div class="research-plan-preview-head">
+        <div>
+          <div class="research-plan-preview-kicker">Research Agent Plan</div>
+          <div class="research-plan-preview-title">${escapeHtml(plan.topic || "Research topic")}</div>
+        </div>
+        <span class="research-plan-preview-state">${escapeHtml(action.details?.execution_state || "planned")}</span>
+      </div>
+      <div class="research-plan-preview-objective">${escapeHtml(plan.objective || "No objective provided.")}</div>
+      <div class="research-plan-preview-grid">
+        <div><span>Target</span><strong>${escapeHtml(plan.target_count || 20)}</strong></div>
+        <div><span>Databases</span><strong>${escapeHtml(databases.length || 0)}</strong></div>
+        <div><span>Criteria</span><strong>${escapeHtml(criteria.length || 0)}</strong></div>
+        <div><span>Queries</span><strong>${escapeHtml(queries.length || 0)}</strong></div>
+      </div>
+      <div class="research-plan-preview-section">
+        <span>Sources</span>
+        <p>${escapeHtml(databases.join(", ") || "Not specified")}</p>
+      </div>
+      <div class="research-plan-preview-section">
+        <span>First inclusion rules</span>
+        <ul>${(inclusion.slice(0, 4).length ? inclusion.slice(0, 4) : ["No inclusion criteria provided."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </div>
+      <div class="research-plan-preview-actions">
+        <button class="btn btn-primary btn-sm research-plan-execute-btn" type="button" data-research-plan-action="execute" disabled>Execute</button>
+        <span>Execution will be enabled after the screening agent is implemented.</span>
+      </div>
+    </div>
+  `;
 }
 
 function assistantMessageMarkup(item) {
@@ -4799,7 +4792,9 @@ function assistantThinkingMarkup(item) {
 
 function assistantActionsMarkup(item) {
   return item.role !== "user" && item.actions?.length
-    ? `<div class="ai-action-list">${item.actions.map((act) => `
+    ? `<div class="ai-action-list">${item.actions.map((act) => act.name === "create_research_plan" && act.status === "success"
+        ? researchPlanActionMarkup(act)
+        : `
         <div class="ai-action-row ${act.status || "success"}">
           <span class="ai-action-row-status ${act.status || "success"}">${act.status === "error" ? "!" : act.status === "success" ? "✓" : ""}</span>
           <span class="ai-action-row-kind">${escapeHtml(assistantActionKindLabel(act))}</span>
@@ -4878,6 +4873,10 @@ function scheduleAssistantMessageUpdate(message) {
 }
 
 function assistantEmptyStateMarkup() {
+  const emptyTitle = state.assistantMode === "research_agent" ? "Research Agent Mode" : "Ready";
+  const emptyCopy = state.assistantMode === "research_agent"
+    ? "Send a research topic to create the first structured plan."
+    : "Start a new chat or open a recent one from history.";
   return `
     <div class="native-assistant-empty">
       <div class="native-assistant-empty-icon" aria-hidden="true">
@@ -4887,8 +4886,8 @@ function assistantEmptyStateMarkup() {
           <path d="M12 9v4" />
         </svg>
       </div>
-      <div class="native-assistant-empty-title">Ready</div>
-      <div class="native-assistant-empty-copy">Start a new chat or open a recent one from history.</div>
+      <div class="native-assistant-empty-title">${escapeHtml(emptyTitle)}</div>
+      <div class="native-assistant-empty-copy">${escapeHtml(emptyCopy)}</div>
     </div>
   `;
 }
@@ -5032,7 +5031,7 @@ async function sendAssistantMessage(options = {}) {
           api_key: isOllamaAssistantModel(runtime.assistantModel) ? "" : runtime.apiKey,
           message,
           model: runtime.assistantModel,
-          mode: "fast",
+          mode: state.assistantMode === "research_agent" ? "research_agent" : "fast",
           thread_id: state.assistantThreadId,
           thinking_level: assistantThinkingLevelForRequest(),
           articles: helperArticlePayload(),
@@ -5272,28 +5271,14 @@ function bindEvents() {
     setModelSettingsDialogOpen(false);
   });
   els.assistantDraftBtn?.addEventListener("click", () => {
-    setAssistantModesDialogOpen(true);
+    setAssistantModeMenuOpen(els.assistantModeMenu?.hidden);
   });
-  els.assistantModesOverlay?.addEventListener("click", () => {
-    setAssistantModesDialogOpen(false);
-  });
-  els.assistantModesClose?.addEventListener("click", () => {
-    setAssistantModesDialogOpen(false);
-  });
-  els.assistantModesNewChatBtn?.addEventListener("click", () => {
-    setAssistantModesDialogOpen(false);
-    createNewAssistantChat();
-  });
-  els.deepResearchTopicInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchTopicInput));
-  els.deepResearchCriteriaInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchCriteriaInput));
-  els.deepResearchPlanNotesInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchPlanNotesInput));
-  els.deepResearchGenerateBtn?.addEventListener("click", () => {
-    void generateDeepResearchPlan();
-  });
+  els.assistantNormalModeBtn?.addEventListener("click", startNormalMode);
+  els.assistantResearchModeBtn?.addEventListener("click", startResearchAgentMode);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (els.assistantModesPopup && !els.assistantModesPopup.hidden) {
-      setAssistantModesDialogOpen(false);
+    if (els.assistantModeMenu && !els.assistantModeMenu.hidden) {
+      setAssistantModeMenuOpen(false);
       return;
     }
     if (els.modelSettingsPopup && !els.modelSettingsPopup.hidden) {
@@ -5604,6 +5589,9 @@ function bindEvents() {
       els.assistantModelMenu.hidden = true;
       els.assistantModelBtn.setAttribute("aria-expanded", "false");
     }
+    if (!event.target.closest("#assistantDraftBtn") && !event.target.closest("#assistantModeMenu")) {
+      setAssistantModeMenuOpen(false);
+    }
     if (!event.target.closest("#assistantOllamaThinkingWrap")) {
       els.assistantOllamaThinkingMenu.hidden = true;
       els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
@@ -5663,6 +5651,7 @@ async function init() {
   renderQueryHistory();
   updateAssistantModelUI();
   updateThinkingLabel();
+  setAssistantMode(state.assistantMode);
   setApiKeysDialogOpen(false);
   autoResizeTextarea(els.query);
   autoResizeTextarea(els.sidebarQuickQuery);

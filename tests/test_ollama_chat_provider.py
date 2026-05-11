@@ -107,6 +107,37 @@ def test_ollama_runtime_defaults_set_context_and_thinking_budget() -> None:
     assert OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS == 8_192
 
 
+def test_research_plan_tool_normalizes_defaults() -> None:
+    async def runner() -> None:
+        service = HelperAIService(thread_cache=TTLCache(ttl_seconds=60, max_entries=4))
+        result, action = await service._execute_research_tool_call(
+            "create_research_plan",
+            {
+                "topic": "dopamine D1-D5 docking papers with interaction maps",
+                "objective": "Find docking papers with receptor interaction evidence.",
+                "target_count": 20,
+                "screening_criteria": [
+                    {
+                        "label": "Docking performed",
+                        "description": "The paper explicitly reports molecular docking.",
+                        "required": True,
+                    }
+                ],
+            },
+        )
+
+        plan = result["plan"]
+        assert action.name == "create_research_plan"
+        assert action.details["execution_state"] == "planned"
+        assert plan["target_count"] == 20
+        assert plan["candidate_budget"]["per_database"] == 40
+        assert plan["databases"] == ["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"]
+        assert plan["screening_criteria"][0]["id"] == "docking_performed"
+        assert "sum(score_i ** 2" in plan["scoring_rule"]
+
+    asyncio.run(runner())
+
+
 def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 

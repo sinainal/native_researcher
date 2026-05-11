@@ -29,14 +29,18 @@ from app.services.agent.source_prompts import (
 )
 from app.services.agent.system_prompts import (
     HELPER_FINALIZER_PROMPT,
+    RESEARCH_PLAN_FINALIZER_PROMPT,
     build_helper_fast_mode_system_instruction,
     build_helper_fast_prompt,
+    build_research_agent_prompt,
+    build_research_agent_system_instruction,
 )
 from app.services.helper_log_service import HelperLogService
 from app.services.pubmed_service import PubMedService
 from app.utils.cache import TTLCache
 MAX_FAST_TOOL_CALLS = 3
 MAX_DETAIL_TOOL_TOKENS = 50_000
+RESEARCH_AGENT_MODE = "research_agent"
 
 
 @dataclass
@@ -178,8 +182,16 @@ class HelperAIService:
         if model_target.provider == "ollama":
             return await self._chat_with_ollama(payload, thread_id=thread_id, thread_state=thread_state, model_name=model_name)
 
+        if payload.mode == RESEARCH_AGENT_MODE:
+            return await self._chat_research_agent(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            )
+
         if payload.mode != "fast":
-            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            answer = "This assistant mode is not available yet. Use Normal Mode or Research Agent Mode."
             self._append_history(thread_state, payload.message, answer)
             self.thread_cache.set(thread_id, thread_state)
             self._log(
@@ -349,8 +361,18 @@ class HelperAIService:
                 yield event
             return
 
+        if payload.mode == RESEARCH_AGENT_MODE:
+            async for event in self._chat_stream_research_agent(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            ):
+                yield event
+            return
+
         if payload.mode != "fast":
-            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            answer = "This assistant mode is not available yet. Use Normal Mode or Research Agent Mode."
             self._append_history(thread_state, payload.message, answer)
             self.thread_cache.set(thread_id, thread_state)
             self._log(
@@ -624,8 +646,16 @@ class HelperAIService:
         thread_state: HelperThreadState,
         model_name: str,
     ) -> HelperChatResponse:
+        if payload.mode == RESEARCH_AGENT_MODE:
+            return await self._chat_research_agent_ollama(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            )
+
         if payload.mode != "fast":
-            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            answer = "This assistant mode is not available yet. Use Normal Mode or Research Agent Mode."
             self._append_history(thread_state, payload.message, answer)
             self.thread_cache.set(thread_id, thread_state)
             self._log(
@@ -799,8 +829,18 @@ class HelperAIService:
         thread_state: HelperThreadState,
         model_name: str,
     ) -> AsyncIterator[dict[str, Any]]:
+        if payload.mode == RESEARCH_AGENT_MODE:
+            async for event in self._chat_stream_research_agent_ollama(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+            ):
+                yield event
+            return
+
         if payload.mode != "fast":
-            answer = "Agent mode MVP surumunde henuz aktif degil. Fast mode u kullan."
+            answer = "This assistant mode is not available yet. Use Normal Mode or Research Agent Mode."
             self._append_history(thread_state, payload.message, answer)
             self.thread_cache.set(thread_id, thread_state)
             response = HelperChatResponse(
@@ -1021,6 +1061,350 @@ class HelperAIService:
         )
         yield {"type": "final", "response": response.model_dump()}
 
+    async def _chat_research_agent(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> HelperChatResponse:
+        self._require_gemini_api_key(payload.api_key)
+        _genai, types = load_genai_sdk()
+        contents = self._research_agent_contents(types, thread_state, payload)
+        response = await asyncio.to_thread(
+            self._generate_research_response,
+            payload.api_key,
+            model_name,
+            contents,
+            True,
+        )
+        model_content = response.candidates[0].content
+        function_calls = [
+            part.function_call for part in model_content.parts if getattr(part, "function_call", None)
+        ]
+        executed_actions: list[HelperExecutedAction] = []
+        if function_calls:
+            contents.append(model_content)
+            response_parts: list[Any] = []
+            for function_call in function_calls[:1]:
+                result, action = await self._execute_research_tool_call(
+                    function_call.name,
+                    dict(function_call.args or {}),
+                )
+                executed_actions.append(action)
+                response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id=getattr(function_call, "id", None),
+                            name=function_call.name,
+                            response={"result": result},
+                        )
+                    )
+                )
+            if response_parts:
+                contents.append(types.Content(role="user", parts=response_parts))
+                answer = await self._run_research_finalizer(
+                    api_key=payload.api_key,
+                    model_name=model_name,
+                    contents=contents,
+                    fallback_answer=self._research_plan_preview_text(executed_actions[0].details["plan"]),
+                )
+            else:
+                answer = self._extract_text_response(response).strip() or "Research plan could not be created."
+        else:
+            answer = self._extract_text_response(response).strip() or "Research plan could not be created."
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_chat_final",
+            thread_id=thread_id,
+            mode=RESEARCH_AGENT_MODE,
+            model=model_name,
+            answer=answer,
+            used_article_ids=[],
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        return HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode=RESEARCH_AGENT_MODE,
+            history_size=len(thread_state.history),
+            executed_actions=executed_actions,
+        )
+
+    async def _chat_stream_research_agent(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self._require_gemini_api_key(payload.api_key)
+        client = create_genai_client(payload.api_key)
+        _genai, types = load_genai_sdk()
+        contents = self._research_agent_contents(types, thread_state, payload)
+        executed_actions: list[HelperExecutedAction] = []
+        streamed_thoughts: list[str] = []
+
+        yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
+        yield {"type": "status", "text": "Creating the Researcher Agent plan."}
+
+        stream = await client.aio.models.generate_content_stream(
+            model=model_name,
+            contents=contents,
+            config=self._build_research_generate_config(
+                types,
+                allow_tools=True,
+                thinking_level=payload.thinking_level,
+                include_thoughts=payload.thinking_level != "off",
+                force_tool=True,
+            ),
+        )
+        collected_parts: list[Any] = []
+        function_calls: list[Any] = []
+        seen_function_calls: set[str] = set()
+        async for chunk in stream:
+            for candidate in getattr(chunk, "candidates", []) or []:
+                content = getattr(candidate, "content", None)
+                if content is None:
+                    continue
+                for part in getattr(content, "parts", None) or []:
+                    if self._should_store_stream_part(part):
+                        collected_parts.append(part)
+                    function_call = getattr(part, "function_call", None)
+                    if function_call is not None:
+                        call_key = self._function_call_key(function_call)
+                        if call_key not in seen_function_calls:
+                            seen_function_calls.add(call_key)
+                            function_calls.append(function_call)
+                        continue
+                    if getattr(part, "thought", None):
+                        thought_text = (getattr(part, "text", None) or "").strip()
+                        if thought_text:
+                            streamed_thoughts.append(thought_text)
+                            yield {"type": "thinking_delta", "text": thought_text}
+
+        if function_calls:
+            contents.append(types.Content(role="model", parts=collected_parts))
+            response_parts: list[Any] = []
+            for function_call in function_calls[:1]:
+                call_id = getattr(function_call, "id", None) or f"call_{uuid4().hex[:8]}"
+                args = dict(function_call.args or {})
+                self._log(
+                    "assistant_tool_call",
+                    thread_id=thread_id,
+                    mode=RESEARCH_AGENT_MODE,
+                    model=model_name,
+                    call_id=call_id,
+                    name=function_call.name,
+                    args=args,
+                )
+                yield {
+                    "type": "tool_call",
+                    "call_id": call_id,
+                    "action": {
+                        "type": "tool_call",
+                        "name": function_call.name,
+                        "title": self._tool_pending_title(function_call.name),
+                        "status": "running",
+                        "details": args,
+                    },
+                }
+                result, action = await self._execute_research_tool_call(function_call.name, args)
+                executed_actions.append(action)
+                self._log(
+                    "assistant_tool_result",
+                    thread_id=thread_id,
+                    mode=RESEARCH_AGENT_MODE,
+                    model=model_name,
+                    call_id=call_id,
+                    action=action.model_dump(),
+                )
+                yield {"type": "tool_result", "call_id": call_id, "action": action.model_dump()}
+                response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id=getattr(function_call, "id", None),
+                            name=function_call.name,
+                            response={"result": result},
+                        )
+                    )
+                )
+            contents.append(types.Content(role="user", parts=response_parts))
+            yield {"type": "status", "text": "Preparing the plan preview."}
+            answer_chunks: list[str] = []
+            final_stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=[
+                    *contents,
+                    types.Content(role="user", parts=[types.Part(text=RESEARCH_PLAN_FINALIZER_PROMPT)]),
+                ],
+                config=self._build_research_generate_config(
+                    types,
+                    allow_tools=False,
+                    thinking_level=payload.thinking_level,
+                    include_thoughts=payload.thinking_level != "off",
+                    force_tool=False,
+                ),
+            )
+            async for chunk in final_stream:
+                for candidate in getattr(chunk, "candidates", []) or []:
+                    content = getattr(candidate, "content", None)
+                    if content is None:
+                        continue
+                    for part in getattr(content, "parts", None) or []:
+                        if getattr(part, "thought", None):
+                            thought_text = (getattr(part, "text", None) or "").strip()
+                            if thought_text:
+                                streamed_thoughts.append(thought_text)
+                                yield {"type": "thinking_delta", "text": thought_text}
+                            continue
+                        text_value = getattr(part, "text", None) or ""
+                        if text_value:
+                            answer_chunks.append(text_value)
+                            yield {"type": "answer_delta", "text": text_value}
+            answer = "".join(answer_chunks).strip()
+            if not answer and executed_actions:
+                answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
+        else:
+            answer = "Research plan could not be created because the model did not call the planning tool."
+            yield {"type": "answer_delta", "text": answer}
+
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_stream_final",
+            thread_id=thread_id,
+            mode=RESEARCH_AGENT_MODE,
+            model=model_name,
+            answer=answer,
+            used_article_ids=[],
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode=RESEARCH_AGENT_MODE,
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(streamed_thoughts).strip() or None,
+            executed_actions=executed_actions,
+        )
+        yield {"type": "final", "response": response.model_dump()}
+
+    async def _chat_research_agent_ollama(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> HelperChatResponse:
+        messages = [
+            {"role": "system", "content": build_research_agent_system_instruction()},
+            *self._history_to_ollama_messages(thread_state.history),
+            {"role": "user", "content": build_research_agent_prompt(payload, today_stamp=date.today().isoformat())},
+        ]
+        response = await ollama_chat(
+            base_url=self._ollama_base_url(),
+            model=model_name,
+            messages=messages,
+            tools=self._build_ollama_research_toolset(),
+            thinking_level=payload.thinking_level,
+            request_user_agent=self._ollama_request_user_agent(),
+        )
+        message = response.get("message") or {}
+        tool_calls = extract_ollama_tool_calls(message)
+        executed_actions: list[HelperExecutedAction] = []
+        thinking_text = str(message.get("thinking") or "").strip()
+        if tool_calls:
+            for call in tool_calls[:1]:
+                result, action = await self._execute_research_tool_call(call.name, call.args)
+                executed_actions.append(action)
+                messages.append(
+                    self._ollama_assistant_message(
+                        content=str(message.get("content") or "").strip(),
+                        thinking=thinking_text,
+                        tool_calls=[call.raw],
+                    )
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": call.name,
+                        "content": self._ollama_tool_message_content(result),
+                    }
+                )
+            final_response = await ollama_chat(
+                base_url=self._ollama_base_url(),
+                model=model_name,
+                messages=[*messages, {"role": "user", "content": RESEARCH_PLAN_FINALIZER_PROMPT}],
+                tools=None,
+                thinking_level=payload.thinking_level,
+                request_user_agent=self._ollama_request_user_agent(),
+            )
+            final_message = final_response.get("message") or {}
+            answer = str(final_message.get("content") or "").strip()
+            final_thinking = str(final_message.get("thinking") or "").strip()
+            thinking = "\n\n".join(item for item in [thinking_text, final_thinking] if item).strip() or None
+        else:
+            answer = "Research plan could not be created because the model did not call the planning tool."
+            thinking = thinking_text or None
+        if not answer and executed_actions:
+            answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        return HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode=RESEARCH_AGENT_MODE,
+            history_size=len(thread_state.history),
+            thinking=thinking,
+            executed_actions=executed_actions,
+        )
+
+    async def _chat_stream_research_agent_ollama(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        response = await self._chat_research_agent_ollama(
+            payload,
+            thread_id=thread_id,
+            thread_state=thread_state,
+            model_name=model_name,
+        )
+        yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
+        for action in response.executed_actions:
+            call_id = f"call_{uuid4().hex[:8]}"
+            yield {
+                "type": "tool_call",
+                "call_id": call_id,
+                "action": {
+                    "type": "tool_call",
+                    "name": action.name,
+                    "title": self._tool_pending_title(action.name),
+                    "status": "running",
+                    "details": action.details,
+                },
+            }
+            yield {"type": "tool_result", "call_id": call_id, "action": action.model_dump()}
+        if response.thinking:
+            yield {"type": "thinking_delta", "text": response.thinking}
+        if response.answer:
+            yield {"type": "answer_delta", "text": response.answer}
+        yield {"type": "final", "response": response.model_dump()}
+
     def reset(self, thread_id: str) -> None:
         self.thread_cache.delete(thread_id)
 
@@ -1075,6 +1459,216 @@ class HelperAIService:
             contents=final_contents,
             config=self._build_generate_config(types, allow_tools=False),
         )
+
+    def _generate_research_response(
+        self,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+        allow_tools: bool,
+    ):
+        client = create_genai_client(api_key)
+        _genai, types = load_genai_sdk()
+        return client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=self._build_research_generate_config(
+                types,
+                allow_tools=allow_tools,
+                force_tool=allow_tools,
+            ),
+        )
+
+    def _generate_research_final_response(
+        self,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+    ):
+        client = create_genai_client(api_key)
+        _genai, types = load_genai_sdk()
+        return client.models.generate_content(
+            model=model_name,
+            contents=[
+                *contents,
+                types.Content(role="user", parts=[types.Part(text=RESEARCH_PLAN_FINALIZER_PROMPT)]),
+            ],
+            config=self._build_research_generate_config(types, allow_tools=False),
+        )
+
+    async def _run_research_finalizer(
+        self,
+        *,
+        api_key: str,
+        model_name: str,
+        contents: list[Any],
+        fallback_answer: str,
+    ) -> str:
+        response = await asyncio.to_thread(
+            self._generate_research_final_response,
+            api_key,
+            model_name,
+            contents,
+        )
+        return self._extract_text_response(response).strip() or fallback_answer
+
+    @staticmethod
+    def _research_agent_contents(types: Any, thread_state: HelperThreadState, payload: HelperChatRequest) -> list[Any]:
+        contents = [
+            types.Content(role=item["role"], parts=[types.Part(text=item["text"])])
+            for item in thread_state.history
+        ]
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part(text=build_research_agent_prompt(payload, today_stamp=date.today().isoformat()))
+                ],
+            )
+        )
+        return contents
+
+    def _build_research_generate_config(
+        self,
+        types: Any,
+        *,
+        allow_tools: bool,
+        thinking_level: str = "off",
+        include_thoughts: bool = False,
+        force_tool: bool = False,
+    ):
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": build_research_agent_system_instruction(),
+        }
+        thinking_config = HelperAIService._build_thinking_config(
+            types,
+            thinking_level=thinking_level,
+            include_thoughts=include_thoughts,
+        )
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
+        if allow_tools:
+            config_kwargs["tools"] = [self._build_research_toolset(types)]
+            config_kwargs["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.ANY if force_tool else types.FunctionCallingConfigMode.AUTO,
+                    allowed_function_names=["create_research_plan"],
+                )
+            )
+        return types.GenerateContentConfig(**config_kwargs)
+
+    @staticmethod
+    def _build_research_toolset(types: Any):
+        return types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="create_research_plan",
+                    description=(
+                        "Create or revise a structured Deep Research plan. "
+                        "This only plans the research workflow; it does not execute searches or screening."
+                    ),
+                    parameters_json_schema=HelperAIService._research_plan_parameters_schema(),
+                )
+            ]
+        )
+
+    @staticmethod
+    def _build_ollama_research_toolset() -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_research_plan",
+                    "description": (
+                        "Create or revise a structured Deep Research plan. "
+                        "This only plans the research workflow; it does not execute searches or screening."
+                    ),
+                    "parameters": HelperAIService._research_plan_parameters_schema(),
+                },
+            }
+        ]
+
+    @staticmethod
+    def _research_plan_parameters_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "The user's research topic."},
+                "objective": {"type": "string", "description": "Concrete research objective."},
+                "target_count": {
+                    "type": "integer",
+                    "description": "Desired number of final selected papers. Defaults to 20.",
+                },
+                "databases": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Databases to search, such as PubMed, Europe PMC, OpenAlex, CORE, arXiv.",
+                },
+                "inclusion_criteria": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Criteria papers should satisfy.",
+                },
+                "exclusion_criteria": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Criteria that should remove papers.",
+                },
+                "screening_criteria": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "description": {"type": "string"},
+                            "required": {"type": "boolean"},
+                            "weight": {"type": "number"},
+                            "scoring_guidance": {"type": "string"},
+                        },
+                        "required": ["id", "label", "description"],
+                    },
+                    "description": "Criteria for the Screening Agent to score from 0.0 to 1.0.",
+                },
+                "database_queries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "database": {"type": "string"},
+                            "query": {"type": "string"},
+                            "rationale": {"type": "string"},
+                            "candidate_limit": {"type": "integer"},
+                        },
+                        "required": ["database", "query"],
+                    },
+                    "description": "First-pass database-specific query plan.",
+                },
+                "candidate_budget": {
+                    "type": "object",
+                    "properties": {
+                        "target_count": {"type": "integer"},
+                        "per_database": {"type": "integer"},
+                        "rule": {"type": "string"},
+                    },
+                },
+                "screening_json_schema": {
+                    "type": "object",
+                    "description": "Strict JSON shape expected from the later Screening Agent.",
+                },
+                "scoring_rule": {"type": "string"},
+                "query_expansion_policy": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "open_questions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "notes": {"type": "string"},
+            },
+            "required": ["topic", "objective"],
+        }
 
     def _build_generate_config(
         self,
@@ -1143,6 +1737,7 @@ class HelperAIService:
             "list_catalog_articles": "Katalog taramasi yapiliyor",
             "search_pubmed": "Literatur aramasi yapiliyor",
             "get_article_details": "Makale detaylari okunuyor",
+            "create_research_plan": "Creating research plan",
         }
         return titles.get(name, name)
 
@@ -1336,6 +1931,198 @@ class HelperAIService:
                 },
             },
         ]
+
+    async def _execute_research_tool_call(
+        self,
+        name: str,
+        args: dict[str, Any],
+    ) -> tuple[dict[str, Any], HelperExecutedAction]:
+        if name != "create_research_plan":
+            raise ValueError(f"Unknown research tool call: {name}")
+        plan = self._normalize_research_plan(args)
+        result = {
+            "plan": plan,
+            "execution_state": "planned",
+            "message": "Plan created. No search, screening, or download has been executed.",
+        }
+        action = HelperExecutedAction(
+            type="tool_call",
+            name="create_research_plan",
+            title="Research plan created",
+            status="success",
+            details={
+                "plan": plan,
+                "execution_state": "planned",
+            },
+        )
+        return result, action
+
+    @staticmethod
+    def _as_string_list(value: Any, *, fallback: list[str] | None = None) -> list[str]:
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item or "").strip()]
+            return items or list(fallback or [])
+        if isinstance(value, str) and value.strip():
+            return [line.strip("-• \t") for line in value.splitlines() if line.strip("-• \t")]
+        return list(fallback or [])
+
+    @staticmethod
+    def _as_dict_list(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @staticmethod
+    def _slug_id(value: str, fallback: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+        return normalized[:64] or fallback
+
+    def _normalize_research_plan(self, args: dict[str, Any]) -> dict[str, Any]:
+        topic = str(args.get("topic") or "").strip() or "Untitled research topic"
+        objective = str(args.get("objective") or "").strip() or f"Find and rank the most relevant papers for: {topic}"
+        target_count = parse_bounded_int(args.get("target_count"), default=20, minimum=1, maximum=100)
+        per_database = target_count * 2
+        databases = self._as_string_list(
+            args.get("databases"),
+            fallback=["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"],
+        )
+        inclusion = self._as_string_list(
+            args.get("inclusion_criteria"),
+            fallback=[
+                "The paper directly addresses the requested topic.",
+                "The abstract or full text contains enough evidence for screening.",
+            ],
+        )
+        exclusion = self._as_string_list(
+            args.get("exclusion_criteria"),
+            fallback=[
+                "Exclude papers that are unrelated to the target topic.",
+                "Exclude papers with no abstract or evidence-bearing metadata during abstract screening.",
+            ],
+        )
+        raw_screening = self._as_dict_list(args.get("screening_criteria"))
+        screening_criteria: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_screening, start=1):
+            label = str(item.get("label") or item.get("id") or f"Criterion {index}").strip()
+            criterion_id = self._slug_id(str(item.get("id") or label), f"criterion_{index}")
+            screening_criteria.append(
+                {
+                    "id": criterion_id,
+                    "label": label,
+                    "description": str(item.get("description") or label).strip(),
+                    "required": bool(item.get("required", False)),
+                    "weight": float(item.get("weight") or 1.0),
+                    "scoring_guidance": str(
+                        item.get("scoring_guidance")
+                        or "Score 1.0 for explicit evidence, 0.5 for partial evidence, and 0.0 when absent."
+                    ).strip(),
+                }
+            )
+        if not screening_criteria:
+            screening_criteria = [
+                {
+                    "id": "topic_match",
+                    "label": "Topic match",
+                    "description": "The paper directly matches the user's research topic.",
+                    "required": True,
+                    "weight": 1.0,
+                    "scoring_guidance": "Score 1.0 for explicit match, 0.5 for partial match, 0.0 for unrelated papers.",
+                },
+                {
+                    "id": "method_match",
+                    "label": "Method or evidence match",
+                    "description": "The paper contains the method, evidence, or artifact requested by the user.",
+                    "required": False,
+                    "weight": 1.0,
+                    "scoring_guidance": "Score 1.0 for explicit evidence, 0.5 for likely evidence, 0.0 if absent.",
+                },
+            ]
+        raw_queries = self._as_dict_list(args.get("database_queries"))
+        database_queries: list[dict[str, Any]] = []
+        for item in raw_queries:
+            database = str(item.get("database") or "").strip()
+            query = str(item.get("query") or "").strip()
+            if not database or not query:
+                continue
+            database_queries.append(
+                {
+                    "database": database,
+                    "query": query,
+                    "rationale": str(item.get("rationale") or "").strip(),
+                    "candidate_limit": parse_bounded_int(
+                        item.get("candidate_limit"),
+                        default=per_database,
+                        minimum=1,
+                        maximum=500,
+                    ),
+                }
+            )
+        if not database_queries:
+            database_queries = [
+                {
+                    "database": database,
+                    "query": topic,
+                    "rationale": "Initial broad query derived from the user topic.",
+                    "candidate_limit": per_database,
+                }
+                for database in databases
+            ]
+        candidate_budget = args.get("candidate_budget") if isinstance(args.get("candidate_budget"), dict) else {}
+        screening_json_schema = args.get("screening_json_schema")
+        if not isinstance(screening_json_schema, dict):
+            screening_json_schema = {
+                "candidate_id": "string",
+                "criterion_scores": {item["id"]: "number 0.0-1.0" for item in screening_criteria},
+                "confidence": "number 0.0-1.0",
+                "evidence": ["short evidence strings"],
+                "rationale": "short explanation",
+            }
+        return {
+            "topic": topic,
+            "objective": objective,
+            "target_count": target_count,
+            "databases": databases,
+            "candidate_budget": {
+                "target_count": parse_bounded_int(candidate_budget.get("target_count"), default=target_count, minimum=1, maximum=100),
+                "per_database": parse_bounded_int(candidate_budget.get("per_database"), default=per_database, minimum=1, maximum=500),
+                "rule": str(candidate_budget.get("rule") or "Fetch target_count * 2 candidates per enabled database in the first pass.").strip(),
+            },
+            "inclusion_criteria": inclusion,
+            "exclusion_criteria": exclusion,
+            "screening_criteria": screening_criteria,
+            "database_queries": database_queries,
+            "screening_json_schema": screening_json_schema,
+            "scoring_rule": str(
+                args.get("scoring_rule")
+                or "final_relevance = sum(score_i ** 2 for score_i in criterion_scores) / number_of_criteria"
+            ).strip(),
+            "query_expansion_policy": self._as_string_list(
+                args.get("query_expansion_policy"),
+                fallback=[
+                    "If fewer than the target count survive screening, relax phrase strictness.",
+                    "Add synonyms, abbreviations, and alternate target names.",
+                    "Broaden database-specific syntax while preserving mandatory scientific concepts.",
+                ],
+            ),
+            "open_questions": self._as_string_list(args.get("open_questions")),
+            "notes": str(args.get("notes") or "").strip(),
+        }
+
+    @staticmethod
+    def _research_plan_preview_text(plan: dict[str, Any]) -> str:
+        topic = plan.get("topic") or "Research topic"
+        target_count = plan.get("target_count") or 20
+        databases = ", ".join(plan.get("databases") or [])
+        criteria = plan.get("screening_criteria") or []
+        query_count = len(plan.get("database_queries") or [])
+        return (
+            f"Researcher plan created for **{topic}**.\n\n"
+            f"- Target papers: {target_count}\n"
+            f"- Databases: {databases or 'not specified'}\n"
+            f"- Screening criteria: {len(criteria)}\n"
+            f"- First-pass database queries: {query_count}\n\n"
+            "Review the plan preview, ask for changes in the chat, or execute it when the screening pipeline is ready."
+        )
 
     async def _execute_tool_call(
         self,

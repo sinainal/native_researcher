@@ -93,9 +93,12 @@ class NativeResearcherService:
     def _ollama_assistant_message(
         *,
         content: str,
+        thinking: str = "",
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant"}
+        if thinking:
+            message["thinking"] = thinking
         if content:
             message["content"] = content
         if tool_calls:
@@ -377,6 +380,7 @@ class NativeResearcherService:
 
         while True:
             answer_chunks: list[str] = []
+            thinking_chunks: list[str] = []
             tool_calls: list[Any] = []
             seen_tool_call_keys: set[tuple[str, str]] = set()
             tool_turn_active = False
@@ -393,6 +397,7 @@ class NativeResearcherService:
                 message = chunk.get("message") or {}
                 thinking_text = str(message.get("thinking") or "")
                 if thinking_text:
+                    thinking_chunks.append(thinking_text)
                     streamed_thoughts.append(thinking_text)
                     yield {"type": "thinking_delta", "text": thinking_text}
                 chunk_tool_calls = extract_ollama_tool_calls(message)
@@ -405,14 +410,16 @@ class NativeResearcherService:
                     seen_tool_call_keys.add(call_key)
                     tool_calls.append(call)
                 text_value = str(message.get("content") or "")
-                if text_value and not tool_turn_active:
+                if text_value:
                     answer_chunks.append(text_value)
+                if text_value and not tool_turn_active:
                     yield {"type": "answer_delta", "text": text_value}
             answer_text = "".join(answer_chunks).strip()
             if tool_calls and remaining_tool_calls > 0:
                 messages.append(
                     self._ollama_assistant_message(
                         content=answer_text.strip(),
+                        thinking="".join(thinking_chunks).strip(),
                         tool_calls=[call.raw for call in tool_calls],
                     )
                 )

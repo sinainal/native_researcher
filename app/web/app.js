@@ -843,8 +843,18 @@ function patchAssistantMessageNow(item) {
       currentSlot.innerHTML = nextSlot.innerHTML;
     }
   });
+  if (item.pending) {
+    scrollAssistantThinkingToBottom(node);
+  }
   els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
   assistantLastMarkup = null;
+}
+
+function scrollAssistantThinkingToBottom(root = els.assistantMessages) {
+  if (!root) return;
+  root.querySelectorAll(".ai-thinking-live-text").forEach((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
 }
 
 function patchAssistantMessage(item) {
@@ -898,6 +908,7 @@ function renderAssistantMessagesNow() {
     assistantLastMarkup = markup;
     assistantDirtyMessages.clear();
   }
+  scrollAssistantThinkingToBottom();
   els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
 }
 

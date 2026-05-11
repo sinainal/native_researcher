@@ -10,6 +10,9 @@ from typing import Any
 
 import httpx
 
+OLLAMA_DEFAULT_NUM_CTX = 16_384
+OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS = 8_192
+
 
 @dataclass(frozen=True)
 class OllamaToolCall:
@@ -136,6 +139,16 @@ def _ollama_think_option(thinking_level: str) -> bool | str:
     return True
 
 
+def _ollama_runtime_options(*, num_ctx: int = OLLAMA_DEFAULT_NUM_CTX) -> dict[str, int]:
+    return {"num_ctx": num_ctx}
+
+
+def _ollama_thinking_budget(thinking_level: str) -> dict[str, int] | None:
+    if str(thinking_level or "off").strip().lower() == "off":
+        return None
+    return {"budget_tokens": OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS}
+
+
 async def ollama_chat(
     *,
     base_url: str,
@@ -152,7 +165,11 @@ async def ollama_chat(
         "messages": messages,
         "stream": False,
         "think": _ollama_think_option(thinking_level),
+        "options": _ollama_runtime_options(),
     }
+    thinking_budget = _ollama_thinking_budget(thinking_level)
+    if thinking_budget is not None:
+        payload["thinking"] = thinking_budget
     if tools:
         payload["tools"] = tools
     if keep_alive is not None:
@@ -191,7 +208,11 @@ async def ollama_chat_stream(
         "messages": messages,
         "stream": True,
         "think": _ollama_think_option(thinking_level),
+        "options": _ollama_runtime_options(),
     }
+    thinking_budget = _ollama_thinking_budget(thinking_level)
+    if thinking_budget is not None:
+        payload["thinking"] = thinking_budget
     if tools:
         payload["tools"] = tools
     if keep_alive is not None:

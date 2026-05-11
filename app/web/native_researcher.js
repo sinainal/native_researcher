@@ -4732,6 +4732,25 @@ function assistantShouldStickToBottom() {
   return els.assistantMessages.scrollHeight - els.assistantMessages.scrollTop - els.assistantMessages.clientHeight <= threshold;
 }
 
+function scrollAssistantThinkingToBottom(root = els.assistantMessages) {
+  if (!root) return;
+  root.querySelectorAll(".ai-thinking-live-text").forEach((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+}
+
+function scrollAssistantMessagesToBottom() {
+  if (!els.assistantMessages) return;
+  scrollAssistantThinkingToBottom();
+  els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
+  requestAnimationFrame(() => {
+    if (els.assistantMessages) {
+      scrollAssistantThinkingToBottom();
+      els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
+    }
+  });
+}
+
 function updateAssistantMessageNode(message) {
   if (!message?.id || !els.assistantMessages) return;
   const node = els.assistantMessages.querySelector(`[data-message-id="${message.id}"]`);
@@ -4743,6 +4762,9 @@ function updateAssistantMessageNode(message) {
   node.querySelector(".assistant-message-actions-slot").innerHTML = assistantActionsMarkup(message);
   node.querySelector(".assistant-message-content-slot").innerHTML = assistantContentMarkup(message);
   node.querySelector(".assistant-message-meta-slot").innerHTML = assistantMetaMarkup(message);
+  if (message.pending) {
+    scrollAssistantThinkingToBottom(node);
+  }
 }
 
 function scheduleAssistantMessageUpdate(message) {
@@ -4752,11 +4774,11 @@ function scheduleAssistantMessageUpdate(message) {
   if (assistantMessageUpdateFrame !== null) return;
   assistantMessageUpdateFrame = requestAnimationFrame(() => {
     assistantMessageUpdateFrame = null;
-    const shouldStick = assistantShouldStickToBottom();
+    const shouldStick = message.pending || assistantShouldStickToBottom();
     assistantMessageUpdateQueue.forEach((item) => updateAssistantMessageNode(item));
     assistantMessageUpdateQueue.clear();
-    if (shouldStick && els.assistantMessages) {
-      els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
+    if (shouldStick) {
+      scrollAssistantMessagesToBottom();
     }
   });
 }
@@ -4787,7 +4809,11 @@ function renderAssistantMessages() {
   els.assistantMessages.innerHTML = hasMessages
     ? state.assistantMessages.map(assistantMessageMarkup).join("")
     : assistantEmptyStateMarkup();
-  els.assistantMessages.scrollTop = hasMessages ? els.assistantMessages.scrollHeight : 0;
+  if (hasMessages) {
+    scrollAssistantMessagesToBottom();
+  } else {
+    els.assistantMessages.scrollTop = 0;
+  }
   els.assistantPanel.classList.toggle("is-pristine", !hasMessages);
   renderAssistantHeader();
 }

@@ -7,7 +7,14 @@ import json
 from types import SimpleNamespace
 
 from app.schemas.article import Article
-from app.llm.ollama import _OllamaStreamParser, _normalize_ollama_message
+from app.llm.ollama import (
+    OLLAMA_DEFAULT_NUM_CTX,
+    OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS,
+    _OllamaStreamParser,
+    _normalize_ollama_message,
+    _ollama_runtime_options,
+    _ollama_thinking_budget,
+)
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.services.agent.helper_ai_service import HelperAIService
@@ -91,6 +98,15 @@ def test_ollama_stream_parser_splits_think_and_preserves_spacing() -> None:
     ]
 
 
+def test_ollama_runtime_defaults_set_context_and_thinking_budget() -> None:
+    assert _ollama_runtime_options()["num_ctx"] == OLLAMA_DEFAULT_NUM_CTX == 16_384
+    assert _ollama_thinking_budget("off") is None
+    assert _ollama_thinking_budget("on") == {
+        "budget_tokens": OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS,
+    }
+    assert OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS == 8_192
+
+
 def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 
@@ -98,6 +114,7 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         seen_messages.append(list(kwargs.get("messages") or []))
         fake_ollama_chat_stream.calls += 1
         if fake_ollama_chat_stream.calls == 1:
+            yield {"message": {"thinking": "Query planning. "}}
             yield {
                 "message": {
                     "content": " Araçları kontrol ediyorum.",
@@ -134,8 +151,12 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         assert any(event["type"] == "tool_call" for event in events)
         assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Araç çalıştırılıyor") for event in events)
         assert any(event["type"] == "tool_result" for event in events)
-        assert any(event["type"] == "answer_delta" and str(event.get("text") or "").startswith(" ") for event in events)
+        assert any(event["type"] == "answer_delta" and str(event.get("text") or "") == "Bir ilgili derleme buldum." for event in events)
         second_turn_messages = seen_messages[1]
+        assistant_message = next(item for item in second_turn_messages if item.get("role") == "assistant")
+        assert assistant_message["thinking"] == "Query planning."
+        assert assistant_message["content"] == "Araçları kontrol ediyorum."
+        assert assistant_message["tool_calls"]
         tool_message = next(item for item in second_turn_messages if item.get("role") == "tool")
         tool_content = json.loads(str(tool_message.get("content") or ""))
         assert "result" not in tool_content
@@ -158,6 +179,7 @@ def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         seen_messages.append(list(kwargs.get("messages") or []))
         fake_ollama_chat_stream.calls += 1
         if fake_ollama_chat_stream.calls == 1:
+            yield {"message": {"thinking": "Search planning. "}}
             yield {
                 "message": {
                     "content": " İlk sonucu alıyorum.",
@@ -193,8 +215,12 @@ def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         assert any(event["type"] == "tool_call" for event in events)
         assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Araç çalıştırılıyor") for event in events)
         assert any(event["type"] == "tool_result" for event in events)
-        assert any(event["type"] == "answer_delta" and str(event.get("text") or "").startswith(" ") for event in events)
+        assert any(event["type"] == "answer_delta" and str(event.get("text") or "") == "Arama tamamlandi." for event in events)
         second_turn_messages = seen_messages[1]
+        assistant_message = next(item for item in second_turn_messages if item.get("role") == "assistant")
+        assert assistant_message["thinking"] == "Search planning."
+        assert assistant_message["content"] == "İlk sonucu alıyorum."
+        assert assistant_message["tool_calls"]
         tool_message = next(item for item in second_turn_messages if item.get("role") == "tool")
         tool_content = json.loads(str(tool_message.get("content") or ""))
         assert "result" not in tool_content

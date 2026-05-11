@@ -23,5 +23,8 @@ pdf_downloader_mode
 ollama_base_url
 ollama_model
 ollama_thinking_level
+pdf_unpaywall_fallback_enabled
+pdf_core_fallback_enabled
+pdf_arxiv_fallback_enabled
 
 .DS_Store

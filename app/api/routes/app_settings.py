@@ -335,10 +335,13 @@ def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> Non
 def _current_payload(request: Request) -> AppAPIKeysPayload:
     settings = request.app.state.settings
     return AppAPIKeysPayload(
-        assistant_api_key=_read_value(settings.assistant_api_key_path),
-        ncbi_api_key=_read_value(settings.ncbi_api_key_path),
-        unpaywall_email=_read_value(settings.unpaywall_email_path),
-        openalex_api_key=_read_value(settings.openalex_api_key_path),
+        assistant_api_key=_read_value(settings.assistant_api_key_path)
+        or str(getattr(settings, "assistant_api_key", "") or ""),
+        ncbi_api_key=_read_value(settings.ncbi_api_key_path) or str(getattr(settings, "ncbi_api_key", "") or ""),
+        unpaywall_email=_read_value(settings.unpaywall_email_path)
+        or str(getattr(settings, "unpaywall_email", "") or ""),
+        openalex_api_key=_read_value(settings.openalex_api_key_path)
+        or str(getattr(settings, "openalex_api_key", "") or ""),
         core_api_key=_read_value(settings.core_api_key_path) or str(getattr(settings, "core_api_key", "") or ""),
         pubmed_oa_only=_read_bool_value(
             settings.pubmed_oa_only_path,

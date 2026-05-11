@@ -8,6 +8,19 @@ from functools import lru_cache
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_SETTINGS_DIR = APP_ROOT / "runtime" / "settings"
+
+
+def _runtime_settings_file(name: str) -> Path:
+    return RUNTIME_SETTINGS_DIR / name
+
+
+def _legacy_settings_file(name: str) -> Path:
+    return APP_ROOT / name
+
+
+def _settings_path(env_name: str, file_name: str) -> Path:
+    return Path(os.getenv(env_name, str(_runtime_settings_file(file_name))))
 
 
 def _read_secret_file(path: Path) -> str | None:
@@ -16,6 +29,14 @@ def _read_secret_file(path: Path) -> str | None:
     except OSError:
         return None
     return value or None
+
+
+def _read_first_secret_file(*paths: Path) -> str | None:
+    for path in paths:
+        value = _read_secret_file(path)
+        if value is not None:
+            return value
+    return None
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -74,20 +95,20 @@ class Settings:
     core_base_url: str = "https://api.core.ac.uk/v3"
     arxiv_base_url: str = "https://export.arxiv.org/api/query"
     assistant_api_key: str | None = None
-    assistant_api_key_path: Path = APP_ROOT / "api_key.txt"
-    ncbi_api_key_path: Path = APP_ROOT / "ncbi_api"
-    unpaywall_email_path: Path = APP_ROOT / "unpaywall_email"
-    openalex_api_key_path: Path = APP_ROOT / "openalex_api_key"
-    core_api_key_path: Path = APP_ROOT / "core_api_key"
-    pubmed_oa_only_path: Path = APP_ROOT / "pubmed_oa_only"
-    ai_primary_search_resource_path: Path = APP_ROOT / "ai_primary_search_resource"
-    pdf_downloader_mode_path: Path = APP_ROOT / "pdf_downloader_mode"
-    ollama_base_url_path: Path = APP_ROOT / "ollama_base_url"
-    ollama_model_path: Path = APP_ROOT / "ollama_model"
-    ollama_thinking_level_path: Path = APP_ROOT / "ollama_thinking_level"
-    pdf_unpaywall_fallback_enabled_path: Path = APP_ROOT / "pdf_unpaywall_fallback_enabled"
-    pdf_core_fallback_enabled_path: Path = APP_ROOT / "pdf_core_fallback_enabled"
-    pdf_arxiv_fallback_enabled_path: Path = APP_ROOT / "pdf_arxiv_fallback_enabled"
+    assistant_api_key_path: Path = _runtime_settings_file("api_key.txt")
+    ncbi_api_key_path: Path = _runtime_settings_file("ncbi_api")
+    unpaywall_email_path: Path = _runtime_settings_file("unpaywall_email")
+    openalex_api_key_path: Path = _runtime_settings_file("openalex_api_key")
+    core_api_key_path: Path = _runtime_settings_file("core_api_key")
+    pubmed_oa_only_path: Path = _runtime_settings_file("pubmed_oa_only")
+    ai_primary_search_resource_path: Path = _runtime_settings_file("ai_primary_search_resource")
+    pdf_downloader_mode_path: Path = _runtime_settings_file("pdf_downloader_mode")
+    ollama_base_url_path: Path = _runtime_settings_file("ollama_base_url")
+    ollama_model_path: Path = _runtime_settings_file("ollama_model")
+    ollama_thinking_level_path: Path = _runtime_settings_file("ollama_thinking_level")
+    pdf_unpaywall_fallback_enabled_path: Path = _runtime_settings_file("pdf_unpaywall_fallback_enabled")
+    pdf_core_fallback_enabled_path: Path = _runtime_settings_file("pdf_core_fallback_enabled")
+    pdf_arxiv_fallback_enabled_path: Path = _runtime_settings_file("pdf_arxiv_fallback_enabled")
     unpaywall_email: str | None = None
     ncbi_api_key: str | None = None
     openalex_api_key: str | None = None
@@ -126,69 +147,106 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        assistant_api_key_path = Path(os.getenv("ASSISTANT_API_KEY_FILE", str(APP_ROOT / "api_key.txt")))
-        ncbi_api_key_path = Path(os.getenv("NCBI_API_KEY_FILE", str(APP_ROOT / "ncbi_api")))
-        unpaywall_email_path = Path(os.getenv("UNPAYWALL_EMAIL_FILE", str(APP_ROOT / "unpaywall_email")))
-        openalex_api_key_path = Path(os.getenv("OPENALEX_API_KEY_FILE", str(APP_ROOT / "openalex_api_key")))
-        core_api_key_path = Path(os.getenv("CORE_API_KEY_FILE", str(APP_ROOT / "core_api_key")))
-        pubmed_oa_only_path = Path(os.getenv("PUBMED_OA_ONLY_FILE", str(APP_ROOT / "pubmed_oa_only")))
-        ai_primary_search_resource_path = Path(
-            os.getenv("AI_PRIMARY_SEARCH_RESOURCE_FILE", str(APP_ROOT / "ai_primary_search_resource"))
+        assistant_api_key_path = _settings_path("ASSISTANT_API_KEY_FILE", "api_key.txt")
+        ncbi_api_key_path = _settings_path("NCBI_API_KEY_FILE", "ncbi_api")
+        unpaywall_email_path = _settings_path("UNPAYWALL_EMAIL_FILE", "unpaywall_email")
+        openalex_api_key_path = _settings_path("OPENALEX_API_KEY_FILE", "openalex_api_key")
+        core_api_key_path = _settings_path("CORE_API_KEY_FILE", "core_api_key")
+        pubmed_oa_only_path = _settings_path("PUBMED_OA_ONLY_FILE", "pubmed_oa_only")
+        ai_primary_search_resource_path = _settings_path(
+            "AI_PRIMARY_SEARCH_RESOURCE_FILE",
+            "ai_primary_search_resource",
         )
-        pdf_downloader_mode_path = Path(
-            os.getenv("PDF_DOWNLOADER_MODE_FILE", str(APP_ROOT / "pdf_downloader_mode"))
-        )
-        ollama_base_url_path = Path(os.getenv("OLLAMA_BASE_URL_FILE", str(APP_ROOT / "ollama_base_url")))
-        ollama_model_path = Path(os.getenv("OLLAMA_MODEL_FILE", str(APP_ROOT / "ollama_model")))
-        ollama_thinking_level_path = Path(os.getenv("OLLAMA_THINKING_LEVEL_FILE", str(APP_ROOT / "ollama_thinking_level")))
+        pdf_downloader_mode_path = _settings_path("PDF_DOWNLOADER_MODE_FILE", "pdf_downloader_mode")
+        ollama_base_url_path = _settings_path("OLLAMA_BASE_URL_FILE", "ollama_base_url")
+        ollama_model_path = _settings_path("OLLAMA_MODEL_FILE", "ollama_model")
+        ollama_thinking_level_path = _settings_path("OLLAMA_THINKING_LEVEL_FILE", "ollama_thinking_level")
         pdf_unpaywall_fallback_enabled_path = Path(
-            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_unpaywall_fallback_enabled"))
+            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(_runtime_settings_file("pdf_unpaywall_fallback_enabled")))
         )
         pdf_core_fallback_enabled_path = Path(
-            os.getenv("PDF_CORE_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_core_fallback_enabled"))
+            os.getenv("PDF_CORE_FALLBACK_ENABLED_FILE", str(_runtime_settings_file("pdf_core_fallback_enabled")))
         )
         pdf_arxiv_fallback_enabled_path = Path(
-            os.getenv("PDF_ARXIV_FALLBACK_ENABLED_FILE", str(APP_ROOT / "pdf_arxiv_fallback_enabled"))
+            os.getenv("PDF_ARXIV_FALLBACK_ENABLED_FILE", str(_runtime_settings_file("pdf_arxiv_fallback_enabled")))
         )
-        assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_secret_file(assistant_api_key_path)
-        api_key = os.getenv("NCBI_API_KEY") or _read_secret_file(ncbi_api_key_path)
-        unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_secret_file(unpaywall_email_path)
-        openalex_api_key = os.getenv("OPENALEX_API_KEY") or _read_secret_file(openalex_api_key_path)
+        assistant_api_key = os.getenv("ASSISTANT_API_KEY") or _read_first_secret_file(
+            assistant_api_key_path,
+            _legacy_settings_file("api_key.txt"),
+        )
+        api_key = os.getenv("NCBI_API_KEY") or _read_first_secret_file(
+            ncbi_api_key_path,
+            _legacy_settings_file("ncbi_api"),
+        )
+        unpaywall_email = os.getenv("UNPAYWALL_EMAIL") or _read_first_secret_file(
+            unpaywall_email_path,
+            _legacy_settings_file("unpaywall_email"),
+        )
+        openalex_api_key = os.getenv("OPENALEX_API_KEY") or _read_first_secret_file(
+            openalex_api_key_path,
+            _legacy_settings_file("openalex_api_key"),
+        )
         core_api_key = (
             os.getenv("CORE_API_KEY")
-            or _read_secret_file(core_api_key_path)
+            or _read_first_secret_file(core_api_key_path, _legacy_settings_file("core_api_key"))
             or _read_secret_file(APP_ROOT.parent / "core_api_key")
         )
         pubmed_oa_only = _parse_bool(
-            os.getenv("PUBMED_OA_ONLY") or _read_secret_file(pubmed_oa_only_path),
+            os.getenv("PUBMED_OA_ONLY")
+            or _read_first_secret_file(pubmed_oa_only_path, _legacy_settings_file("pubmed_oa_only")),
             True,
         )
         ai_primary_search_resource = _normalize_search_resource(
-            os.getenv("AI_PRIMARY_SEARCH_RESOURCE") or _read_secret_file(ai_primary_search_resource_path),
+            os.getenv("AI_PRIMARY_SEARCH_RESOURCE")
+            or _read_first_secret_file(
+                ai_primary_search_resource_path,
+                _legacy_settings_file("ai_primary_search_resource"),
+            ),
             "pubmed",
         )
         pdf_downloader_mode = _normalize_pdf_downloader_mode(
-            os.getenv("PDF_DOWNLOADER_MODE") or _read_secret_file(pdf_downloader_mode_path),
+            os.getenv("PDF_DOWNLOADER_MODE")
+            or _read_first_secret_file(pdf_downloader_mode_path, _legacy_settings_file("pdf_downloader_mode")),
             "pdf_xml",
         )
-        ollama_base_url = (os.getenv("OLLAMA_BASE_URL") or _read_secret_file(ollama_base_url_path) or "http://localhost:11434").strip()
+        ollama_base_url = (
+            os.getenv("OLLAMA_BASE_URL")
+            or _read_first_secret_file(ollama_base_url_path, _legacy_settings_file("ollama_base_url"))
+            or "http://localhost:11434"
+        ).strip()
         if ollama_base_url and "://" not in ollama_base_url:
             ollama_base_url = f"http://{ollama_base_url}"
-        ollama_model = os.getenv("OLLAMA_MODEL") or _read_secret_file(ollama_model_path) or ""
+        ollama_model = os.getenv("OLLAMA_MODEL") or _read_first_secret_file(
+            ollama_model_path,
+            _legacy_settings_file("ollama_model"),
+        ) or ""
         ollama_thinking_level = _normalize_ollama_thinking_level(
-            os.getenv("OLLAMA_THINKING_LEVEL") or _read_secret_file(ollama_thinking_level_path),
+            os.getenv("OLLAMA_THINKING_LEVEL")
+            or _read_first_secret_file(ollama_thinking_level_path, _legacy_settings_file("ollama_thinking_level")),
             "off",
         )
         pdf_unpaywall_fallback_enabled = _parse_bool(
-            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED") or _read_secret_file(pdf_unpaywall_fallback_enabled_path),
+            os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED")
+            or _read_first_secret_file(
+                pdf_unpaywall_fallback_enabled_path,
+                _legacy_settings_file("pdf_unpaywall_fallback_enabled"),
+            ),
             True,
         )
         pdf_core_fallback_enabled = _parse_bool(
-            os.getenv("PDF_CORE_FALLBACK_ENABLED") or _read_secret_file(pdf_core_fallback_enabled_path),
+            os.getenv("PDF_CORE_FALLBACK_ENABLED")
+            or _read_first_secret_file(
+                pdf_core_fallback_enabled_path,
+                _legacy_settings_file("pdf_core_fallback_enabled"),
+            ),
             False,
         )
         pdf_arxiv_fallback_enabled = _parse_bool(
-            os.getenv("PDF_ARXIV_FALLBACK_ENABLED") or _read_secret_file(pdf_arxiv_fallback_enabled_path),
+            os.getenv("PDF_ARXIV_FALLBACK_ENABLED")
+            or _read_first_secret_file(
+                pdf_arxiv_fallback_enabled_path,
+                _legacy_settings_file("pdf_arxiv_fallback_enabled"),
+            ),
             False,
         )
         default_rps = 10.0 if api_key else 2.5

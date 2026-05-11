@@ -5,6 +5,7 @@ output/
 logs/
 workspace/
 downloads/
+runtime/
 
 __pycache__/
 *.py[cod]

@@ -114,6 +114,16 @@ const els = {
   assistantThreadShell: document.getElementById("assistantThreadShell"),
   assistantMessages: document.getElementById("assistantMessages"),
   assistantInput: document.getElementById("assistantInput"),
+  assistantDraftBtn: document.getElementById("assistantDraftBtn"),
+  assistantModesOverlay: document.getElementById("assistantModesOverlay"),
+  assistantModesPopup: document.getElementById("assistantModesPopup"),
+  assistantModesClose: document.getElementById("assistantModesClose"),
+  assistantModesNewChatBtn: document.getElementById("assistantModesNewChatBtn"),
+  deepResearchTopicInput: document.getElementById("deepResearchTopicInput"),
+  deepResearchTargetInput: document.getElementById("deepResearchTargetInput"),
+  deepResearchCriteriaInput: document.getElementById("deepResearchCriteriaInput"),
+  deepResearchPlanNotesInput: document.getElementById("deepResearchPlanNotesInput"),
+  deepResearchGenerateBtn: document.getElementById("deepResearchGenerateBtn"),
   apiKeysBtn: document.getElementById("apiKeysBtn"),
   apiKeysOverlay: document.getElementById("apiKeysOverlay"),
   apiKeysPopup: document.getElementById("apiKeysPopup"),
@@ -2265,6 +2275,90 @@ function createNewAssistantChat() {
   persistAssistantSessions({ preserveCurrentSelection: false });
   requestAnimationFrame(() => {
     els.assistantInput?.focus();
+  });
+}
+
+function setAssistantModesDialogOpen(next) {
+  const isOpen = Boolean(next);
+  if (!els.assistantModesOverlay || !els.assistantModesPopup) return;
+  els.assistantModesOverlay.hidden = false;
+  els.assistantModesPopup.hidden = false;
+  requestAnimationFrame(() => {
+    els.assistantModesOverlay.classList.toggle("is-open", isOpen);
+    els.assistantModesPopup.classList.toggle("is-open", isOpen);
+  });
+  if (!isOpen) {
+    window.setTimeout(() => {
+      if (!els.assistantModesPopup.classList.contains("is-open")) {
+        els.assistantModesOverlay.hidden = true;
+        els.assistantModesPopup.hidden = true;
+      }
+    }, 180);
+    return;
+  }
+  requestAnimationFrame(() => {
+    els.deepResearchTopicInput?.focus();
+  });
+}
+
+function buildDeepResearchPlanPrompt({ topic, targetCount, criteria, notes }) {
+  const safeTargetCount = Number.isFinite(targetCount) && targetCount > 0 ? targetCount : 20;
+  const criteriaText = criteria?.trim()
+    ? criteria.trim()
+    : "Infer clear inclusion and exclusion criteria from the topic.";
+  const notesText = notes?.trim()
+    ? notes.trim()
+    : "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant. Start with target_count * 2 candidates per database. Do not run a live search yet.";
+  return [
+    "You are the Native Researcher Researcher Agent.",
+    "",
+    "Create the first Deep Research plan only. Do not search databases yet, do not claim results, and do not download papers.",
+    "",
+    `Topic: ${topic.trim()}`,
+    `Target selected papers: ${safeTargetCount}`,
+    "",
+    "User criteria:",
+    criteriaText,
+    "",
+    "Manual plan notes:",
+    notesText,
+    "",
+    "Return a practical plan the user can edit. Use these sections:",
+    "1. Research objective",
+    "2. Inclusion criteria",
+    "3. Exclusion criteria",
+    "4. Database-specific search strategy",
+    "5. First-pass candidate budget",
+    "6. Screening agent JSON schema with 0.0-1.0 criterion scores",
+    "7. Relevance scoring rule",
+    "8. Query expansion policy if fewer than the target count survive screening",
+    "9. Open questions for the user",
+    "",
+    "Keep the plan concrete and ready for the next agent step.",
+  ].join("\n");
+}
+
+async function generateDeepResearchPlan() {
+  const topic = String(els.deepResearchTopicInput?.value || "").trim();
+  if (!topic) {
+    els.deepResearchTopicInput?.focus();
+    return;
+  }
+  const targetCount = Number.parseInt(String(els.deepResearchTargetInput?.value || "20"), 10);
+  const criteria = String(els.deepResearchCriteriaInput?.value || "").trim();
+  const notes = String(els.deepResearchPlanNotesInput?.value || "").trim();
+  const prompt = buildDeepResearchPlanPrompt({
+    topic,
+    targetCount,
+    criteria,
+    notes,
+  });
+  const displayMessage = `Deep Research plan: ${topic}`;
+  setAssistantModesDialogOpen(false);
+  await sendAssistantMessage({
+    message: prompt,
+    displayMessage,
+    source: "deep_research_plan",
   });
 }
 
@@ -4867,8 +4961,13 @@ function applyAssistantActions(actions) {
   return applied;
 }
 
-async function sendAssistantMessage() {
-  const message = els.assistantInput.value.trim();
+async function sendAssistantMessage(options = {}) {
+  const message = typeof options.message === "string"
+    ? options.message.trim()
+    : els.assistantInput.value.trim();
+  const displayMessage = typeof options.displayMessage === "string"
+    ? options.displayMessage.trim()
+    : message;
   if (!message) return;
   if (runtime.assistantModelLoading) {
     trackAppEvent("error", "assistant_model_loading_blocked", "Assistant model is still loading.", {
@@ -4906,7 +5005,7 @@ async function sendAssistantMessage() {
   const controller = new AbortController();
   state.assistantStreamAbort = controller;
 
-  pushAssistantMessage({ role: "user", text: message });
+  pushAssistantMessage({ role: "user", text: displayMessage || message });
   const pendingMessage = pushAssistantMessage({
     role: "assistant",
     text: "",
@@ -4916,8 +5015,10 @@ async function sendAssistantMessage() {
     thinkingEnabled: assistantThinkingLevelForRequest() !== "off",
   });
   let searchAppliedDuringStream = false;
-  els.assistantInput.value = "";
-  autoResizeTextarea(els.assistantInput);
+  if (!options.preserveComposer) {
+    els.assistantInput.value = "";
+    autoResizeTextarea(els.assistantInput);
+  }
 
   try {
     await streamJsonEvents(
@@ -5170,8 +5271,31 @@ function bindEvents() {
   els.modelSettingsClose?.addEventListener("click", () => {
     setModelSettingsDialogOpen(false);
   });
+  els.assistantDraftBtn?.addEventListener("click", () => {
+    setAssistantModesDialogOpen(true);
+  });
+  els.assistantModesOverlay?.addEventListener("click", () => {
+    setAssistantModesDialogOpen(false);
+  });
+  els.assistantModesClose?.addEventListener("click", () => {
+    setAssistantModesDialogOpen(false);
+  });
+  els.assistantModesNewChatBtn?.addEventListener("click", () => {
+    setAssistantModesDialogOpen(false);
+    createNewAssistantChat();
+  });
+  els.deepResearchTopicInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchTopicInput));
+  els.deepResearchCriteriaInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchCriteriaInput));
+  els.deepResearchPlanNotesInput?.addEventListener("input", () => autoResizeTextarea(els.deepResearchPlanNotesInput));
+  els.deepResearchGenerateBtn?.addEventListener("click", () => {
+    void generateDeepResearchPlan();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (els.assistantModesPopup && !els.assistantModesPopup.hidden) {
+      setAssistantModesDialogOpen(false);
+      return;
+    }
     if (els.modelSettingsPopup && !els.modelSettingsPopup.hidden) {
       setModelSettingsDialogOpen(false);
       return;

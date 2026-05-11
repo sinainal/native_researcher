@@ -3880,6 +3880,144 @@ function openDetailPopup(articleId, field) {
   setDetailPopupOpen(true);
 }
 
+function researchPlanDetailAction(messageId, actionIndex) {
+  const message = state.assistantMessages.find((item) => item.id === messageId);
+  if (!message || !Array.isArray(message.actions)) return null;
+  const action = message.actions[Number(actionIndex)];
+  return action?.name === "create_research_plan" ? action : null;
+}
+
+function researchPlanListMarkup(items, emptyText = "Not specified.") {
+  const list = Array.isArray(items) ? items.filter((item) => String(item || "").trim()) : [];
+  if (!list.length) return `<p>${escapeHtml(emptyText)}</p>`;
+  return `<ul>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function researchPlanDetailMarkup(action) {
+  const plan = action?.details?.plan || {};
+  const databases = Array.isArray(plan.databases) ? plan.databases : [];
+  const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
+  const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
+  const rawJson = JSON.stringify(
+    {
+      action: {
+        title: action.title,
+        status: action.status,
+        execution_state: action.details?.execution_state,
+        revision_state: action.details?.revision_state,
+      },
+      plan,
+    },
+    null,
+    2,
+  );
+  return `
+    <div class="research-plan-detail">
+      <section class="research-plan-detail-section">
+        <h4>Objective</h4>
+        <p>${escapeHtml(plan.objective || "No objective provided.")}</p>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Candidate Budget</h4>
+        <div class="research-plan-detail-grid">
+          <div><span>Target</span><strong>${escapeHtml(plan.target_count || 20)}</strong></div>
+          <div><span>Per database</span><strong>${escapeHtml(plan.candidate_budget?.per_database || "-")}</strong></div>
+          <div><span>Sources</span><strong>${escapeHtml(databases.length)}</strong></div>
+          <div><span>Queries</span><strong>${escapeHtml(queries.length)}</strong></div>
+        </div>
+        <p>${escapeHtml(plan.candidate_budget?.rule || "Fetch target_count * 2 candidates per enabled database in the first pass.")}</p>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Database Queries</h4>
+        ${queries.length ? `
+          <div class="research-plan-query-list">
+            ${queries.map((item) => `
+              <div class="research-plan-query-item">
+                <div class="research-plan-query-head">
+                  <strong>${escapeHtml(item.database || "Database")}</strong>
+                  <span>${escapeHtml(item.candidate_limit || plan.candidate_budget?.per_database || "-")} candidates</span>
+                </div>
+                <code>${escapeHtml(item.query || "")}</code>
+                ${item.rationale ? `<p>${escapeHtml(item.rationale)}</p>` : ""}
+              </div>
+            `).join("")}
+          </div>
+        ` : "<p>No database queries provided.</p>"}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Screening Criteria</h4>
+        ${criteria.length ? `
+          <div class="research-plan-criteria-list">
+            ${criteria.map((item) => `
+              <div class="research-plan-criterion">
+                <div>
+                  <strong>${escapeHtml(item.label || item.id || "Criterion")}</strong>
+                  <span>${escapeHtml(item.id || "")}${item.required ? " · required" : ""}${item.weight ? ` · weight ${escapeHtml(item.weight)}` : ""}</span>
+                </div>
+                <p>${escapeHtml(item.description || "")}</p>
+                <p>${escapeHtml(item.scoring_guidance || "")}</p>
+              </div>
+            `).join("")}
+          </div>
+        ` : "<p>No screening criteria provided.</p>"}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Inclusion Criteria</h4>
+        ${researchPlanListMarkup(plan.inclusion_criteria)}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Exclusion Criteria</h4>
+        ${researchPlanListMarkup(plan.exclusion_criteria)}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Scoring Rule</h4>
+        <code>${escapeHtml(plan.scoring_rule || "-")}</code>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Query Expansion Policy</h4>
+        ${researchPlanListMarkup(plan.query_expansion_policy)}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Raw JSON</h4>
+        <pre>${escapeHtml(rawJson)}</pre>
+      </section>
+    </div>
+  `;
+}
+
+function openResearchPlanPopup(messageId, actionIndex) {
+  const action = researchPlanDetailAction(messageId, actionIndex);
+  if (!action) return;
+  const plan = action.details?.plan || {};
+  els.detailPopupEyebrow.textContent = "Research Agent Plan";
+  els.detailPopupTitle.textContent = plan.topic || "Structured Research Plan";
+  els.detailPopupMeta.textContent = [
+    action.details?.revision_state ? `Revision ${action.details.revision_state}` : "",
+    action.details?.execution_state ? `State ${action.details.execution_state}` : "",
+    plan.target_count ? `Target ${plan.target_count}` : "",
+  ].filter(Boolean).join(" • ");
+  els.detailPopupBody.innerHTML = researchPlanDetailMarkup(action);
+  setDetailPopupOpen(true);
+}
+
+function bindResearchPlanPreviewEvents(root = document) {
+  root.querySelectorAll(".research-plan-preview[data-research-plan-details]").forEach((node) => {
+    if (node.dataset.boundResearchPlan === "true") return;
+    node.dataset.boundResearchPlan = "true";
+    const open = (event) => {
+      if (event.target.closest("[data-research-plan-action='execute']")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openResearchPlanPopup(node.dataset.messageId || "", node.dataset.actionIndex || "0");
+    };
+    node.addEventListener("click", open);
+    node.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      open(event);
+    });
+  });
+}
+
 function detailBlockMarkup(article, field, label, text, subtext = "") {
   return `
     <button
@@ -4693,14 +4831,22 @@ function upsertAssistantAction(actions, action, callId) {
   return next;
 }
 
-function researchPlanActionMarkup(action) {
+function researchPlanActionMarkup(action, messageId = "", actionIndex = 0) {
   const plan = action?.details?.plan || {};
   const databases = Array.isArray(plan.databases) ? plan.databases : [];
   const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
   const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
   const inclusion = Array.isArray(plan.inclusion_criteria) ? plan.inclusion_criteria : [];
   return `
-    <div class="research-plan-preview">
+    <div
+      class="research-plan-preview"
+      role="button"
+      tabindex="0"
+      data-research-plan-details="true"
+      data-message-id="${escapeHtml(messageId)}"
+      data-action-index="${escapeHtml(actionIndex)}"
+      title="Open full plan details"
+    >
       <div class="research-plan-preview-head">
         <div>
           <div class="research-plan-preview-kicker">Research Agent Plan</div>
@@ -4724,6 +4870,7 @@ function researchPlanActionMarkup(action) {
         <ul>${(inclusion.slice(0, 4).length ? inclusion.slice(0, 4) : ["No inclusion criteria provided."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
       </div>
       <div class="research-plan-preview-actions">
+        <button class="btn btn-secondary btn-sm research-plan-details-btn" type="button" data-research-plan-action="details">Details</button>
         <button class="btn btn-primary btn-sm research-plan-execute-btn" type="button" data-research-plan-action="execute" disabled>Execute</button>
         <span>Execution will be enabled after the screening agent is implemented.</span>
       </div>
@@ -4792,8 +4939,8 @@ function assistantThinkingMarkup(item) {
 
 function assistantActionsMarkup(item) {
   return item.role !== "user" && item.actions?.length
-    ? `<div class="ai-action-list">${item.actions.map((act) => act.name === "create_research_plan" && act.status === "success"
-        ? researchPlanActionMarkup(act)
+    ? `<div class="ai-action-list">${item.actions.map((act, actionIndex) => act.name === "create_research_plan" && act.status === "success"
+        ? researchPlanActionMarkup(act, item.id || "", actionIndex)
         : `
         <div class="ai-action-row ${act.status || "success"}">
           <span class="ai-action-row-status ${act.status || "success"}">${act.status === "error" ? "!" : act.status === "success" ? "✓" : ""}</span>
@@ -4851,6 +4998,7 @@ function updateAssistantMessageNode(message) {
   node.querySelector(".assistant-message-actions-slot").innerHTML = assistantActionsMarkup(message);
   node.querySelector(".assistant-message-content-slot").innerHTML = assistantContentMarkup(message);
   node.querySelector(".assistant-message-meta-slot").innerHTML = assistantMetaMarkup(message);
+  bindResearchPlanPreviewEvents(node);
   if (message.pending) {
     scrollAssistantThinkingToBottom(node);
   }
@@ -4903,6 +5051,7 @@ function renderAssistantMessages() {
     ? state.assistantMessages.map(assistantMessageMarkup).join("")
     : assistantEmptyStateMarkup();
   if (hasMessages) {
+    bindResearchPlanPreviewEvents(els.assistantMessages);
     scrollAssistantMessagesToBottom();
   } else {
     els.assistantMessages.scrollTop = 0;

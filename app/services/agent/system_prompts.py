@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from app.schemas.helper import HelperChatRequest
 from app.services.agent.source_prompts import (
     agent_result_budget_guidance,
@@ -33,9 +36,12 @@ RESEARCH_PLAN_FINALIZER_PROMPT = (
 def build_research_agent_system_instruction() -> str:
     return (
         "You are the Researcher Agent inside Native Researcher. "
-        "Your only job in this mode is to create or revise a structured Deep Research plan. "
-        "You must call the `create_research_plan` function before producing the final answer. "
-        "Do not search databases, do not screen abstracts, do not download PDFs, and do not invent article results. "
+        "Your first job in this mode is to create a structured Deep Research plan. "
+        "On the first planning turn, call the `create_research_plan` function before producing the final answer. "
+        "On later turns, call `create_research_plan` only when the user asks to edit, revise, narrow, broaden, or regenerate the current plan. "
+        "If the user asks research-method questions or how to access exact papers, answer directly from the current plan and provide precise database/query guidance. "
+        "Do not claim that searches, screening, PDF scans, or downloads have happened unless a later execution tool actually reports them. "
+        "Do not invent article results, PMIDs, DOIs, authors, or titles. "
         "The plan must be practical enough for a later execution step. "
         "Default target selected papers is 20. "
         "Default first-pass candidate budget is target_count * 2 per enabled database. "
@@ -45,16 +51,33 @@ def build_research_agent_system_instruction() -> str:
     )
 
 
-def build_research_agent_prompt(payload: HelperChatRequest, *, today_stamp: str) -> str:
+def build_research_agent_prompt(
+    payload: HelperChatRequest,
+    *,
+    today_stamp: str,
+    current_plan: dict[str, Any] | None = None,
+) -> str:
+    if current_plan:
+        plan_context = (
+            "Current structured plan JSON:\n"
+            f"{json.dumps(current_plan, ensure_ascii=False, indent=2)}\n\n"
+            "If the user asks to change the plan, call `create_research_plan` with the complete revised plan, not a partial patch. "
+            "If the user asks a question about the research topic, access strategy, exact-paper retrieval, or how to execute the plan, answer directly without calling the tool unless a structured plan edit is needed. "
+            "When discussing exact papers, provide exact search strings, source names, and retrieval strategy; do not fabricate article-level metadata."
+        )
+    else:
+        plan_context = (
+            "No structured plan exists yet. "
+            "You must call `create_research_plan` for this first Research Agent turn before the final answer."
+        )
     return (
         "Research Agent mode is active.\n"
         f"Today: {today_stamp}\n"
         f"Loaded article count: {len(payload.articles)}\n"
         f"Selected article IDs: {', '.join(str(item) for item in payload.selected_ids) or 'none'}\n\n"
+        f"{plan_context}\n\n"
         "User request or plan revision:\n"
-        f"{payload.message.strip()}\n\n"
-        "Create or revise the structured research plan using the `create_research_plan` function. "
-        "If the user is asking to revise an existing plan, infer the current plan from chat history and return the updated plan."
+        f"{payload.message.strip()}"
     )
 
 

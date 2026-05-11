@@ -47,6 +47,7 @@ RESEARCH_AGENT_MODE = "research_agent"
 @dataclass
 class HelperThreadState:
     history: list[dict[str, str]] = field(default_factory=list)
+    research_plan: dict[str, Any] | None = None
 
 
 class HelperAIService:
@@ -1072,6 +1073,7 @@ class HelperAIService:
     ) -> HelperChatResponse:
         self._require_gemini_api_key(payload.api_key)
         _genai, types = load_genai_sdk()
+        has_existing_plan = bool(thread_state.research_plan)
         contents = self._research_agent_contents(types, thread_state, payload)
         response = await asyncio.to_thread(
             self._generate_research_response,
@@ -1079,6 +1081,7 @@ class HelperAIService:
             model_name,
             contents,
             True,
+            not has_existing_plan,
         )
         model_content = response.candidates[0].content
         function_calls = [
@@ -1092,8 +1095,10 @@ class HelperAIService:
                 result, action = await self._execute_research_tool_call(
                     function_call.name,
                     dict(function_call.args or {}),
+                    previous_plan=thread_state.research_plan,
                 )
                 executed_actions.append(action)
+                thread_state.research_plan = action.details["plan"]
                 response_parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(
@@ -1113,6 +1118,8 @@ class HelperAIService:
                 )
             else:
                 answer = self._extract_text_response(response).strip() or "Research plan could not be created."
+        elif has_existing_plan:
+            answer = self._extract_text_response(response).strip() or "I can revise the plan or help you access papers from it."
         else:
             answer = self._extract_text_response(response).strip() or "Research plan could not be created."
 
@@ -1148,6 +1155,7 @@ class HelperAIService:
         self._require_gemini_api_key(payload.api_key)
         client = create_genai_client(payload.api_key)
         _genai, types = load_genai_sdk()
+        has_existing_plan = bool(thread_state.research_plan)
         contents = self._research_agent_contents(types, thread_state, payload)
         executed_actions: list[HelperExecutedAction] = []
         streamed_thoughts: list[str] = []
@@ -1163,7 +1171,7 @@ class HelperAIService:
                 allow_tools=True,
                 thinking_level=payload.thinking_level,
                 include_thoughts=payload.thinking_level != "off",
-                force_tool=True,
+                force_tool=not has_existing_plan,
             ),
         )
         collected_parts: list[Any] = []
@@ -1216,8 +1224,13 @@ class HelperAIService:
                         "details": args,
                     },
                 }
-                result, action = await self._execute_research_tool_call(function_call.name, args)
+                result, action = await self._execute_research_tool_call(
+                    function_call.name,
+                    args,
+                    previous_plan=thread_state.research_plan,
+                )
                 executed_actions.append(action)
+                thread_state.research_plan = action.details["plan"]
                 self._log(
                     "assistant_tool_result",
                     thread_id=thread_id,
@@ -1272,6 +1285,16 @@ class HelperAIService:
             answer = "".join(answer_chunks).strip()
             if not answer and executed_actions:
                 answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
+        elif has_existing_plan:
+            answer = "".join(
+                getattr(part, "text", None) or ""
+                for part in collected_parts
+                if not getattr(part, "thought", None) and getattr(part, "text", None)
+            ).strip()
+            if not answer:
+                answer = "I can revise the current plan or help you access exact papers with database-specific queries."
+            if answer:
+                yield {"type": "answer_delta", "text": answer}
         else:
             answer = "Research plan could not be created because the model did not call the planning tool."
             yield {"type": "answer_delta", "text": answer}
@@ -1310,7 +1333,14 @@ class HelperAIService:
         messages = [
             {"role": "system", "content": build_research_agent_system_instruction()},
             *self._history_to_ollama_messages(thread_state.history),
-            {"role": "user", "content": build_research_agent_prompt(payload, today_stamp=date.today().isoformat())},
+            {
+                "role": "user",
+                "content": build_research_agent_prompt(
+                    payload,
+                    today_stamp=date.today().isoformat(),
+                    current_plan=thread_state.research_plan,
+                ),
+            },
         ]
         response = await ollama_chat(
             base_url=self._ollama_base_url(),
@@ -1326,8 +1356,13 @@ class HelperAIService:
         thinking_text = str(message.get("thinking") or "").strip()
         if tool_calls:
             for call in tool_calls[:1]:
-                result, action = await self._execute_research_tool_call(call.name, call.args)
+                result, action = await self._execute_research_tool_call(
+                    call.name,
+                    call.args,
+                    previous_plan=thread_state.research_plan,
+                )
                 executed_actions.append(action)
+                thread_state.research_plan = action.details["plan"]
                 messages.append(
                     self._ollama_assistant_message(
                         content=str(message.get("content") or "").strip(),
@@ -1354,6 +1389,9 @@ class HelperAIService:
             answer = str(final_message.get("content") or "").strip()
             final_thinking = str(final_message.get("thinking") or "").strip()
             thinking = "\n\n".join(item for item in [thinking_text, final_thinking] if item).strip() or None
+        elif thread_state.research_plan:
+            answer = str(message.get("content") or "").strip() or "I can revise the current plan or help you access exact papers with database-specific queries."
+            thinking = thinking_text or None
         else:
             answer = "Research plan could not be created because the model did not call the planning tool."
             thinking = thinking_text or None
@@ -1432,7 +1470,14 @@ class HelperAIService:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_research_agent_system_instruction()},
             *self._history_to_ollama_messages(thread_state.history),
-            {"role": "user", "content": build_research_agent_prompt(payload, today_stamp=date.today().isoformat())},
+            {
+                "role": "user",
+                "content": build_research_agent_prompt(
+                    payload,
+                    today_stamp=date.today().isoformat(),
+                    current_plan=thread_state.research_plan,
+                ),
+            },
         ]
         executed_actions: list[HelperExecutedAction] = []
         streamed_thoughts: list[str] = []
@@ -1497,8 +1542,13 @@ class HelperAIService:
                 },
             }
             yield {"type": "status", "text": "Research Agent is normalizing the plan."}
-            result, action = await self._execute_research_tool_call(call.name, call.args)
+            result, action = await self._execute_research_tool_call(
+                call.name,
+                call.args,
+                previous_plan=thread_state.research_plan,
+            )
             executed_actions.append(action)
+            thread_state.research_plan = action.details["plan"]
             self._log(
                 "assistant_tool_result",
                 thread_id=thread_id,
@@ -1546,8 +1596,10 @@ class HelperAIService:
                 answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
                 yield {"type": "answer_delta", "text": answer}
         else:
-            if raw_answer:
+            if raw_answer and thread_state.research_plan:
                 answer = raw_answer
+            elif not thread_state.research_plan:
+                yield {"type": "answer_delta", "text": answer}
 
         self._append_history(thread_state, payload.message, answer)
         self.thread_cache.set(thread_id, thread_state)
@@ -1633,6 +1685,7 @@ class HelperAIService:
         model_name: str,
         contents: list[Any],
         allow_tools: bool,
+        force_tool: bool,
     ):
         client = create_genai_client(api_key)
         _genai, types = load_genai_sdk()
@@ -1642,7 +1695,7 @@ class HelperAIService:
             config=self._build_research_generate_config(
                 types,
                 allow_tools=allow_tools,
-                force_tool=allow_tools,
+                force_tool=force_tool,
             ),
         )
 
@@ -1689,7 +1742,13 @@ class HelperAIService:
             types.Content(
                 role="user",
                 parts=[
-                    types.Part(text=build_research_agent_prompt(payload, today_stamp=date.today().isoformat()))
+                    types.Part(
+                        text=build_research_agent_prompt(
+                            payload,
+                            today_stamp=date.today().isoformat(),
+                            current_plan=thread_state.research_plan,
+                        )
+                    )
                 ],
             )
         )
@@ -1831,6 +1890,10 @@ class HelperAIService:
                 "open_questions": {
                     "type": "array",
                     "items": {"type": "string"},
+                },
+                "revision_summary": {
+                    "type": "string",
+                    "description": "Short summary of what changed when revising an existing plan.",
                 },
                 "notes": {"type": "string"},
             },
@@ -2103,23 +2166,28 @@ class HelperAIService:
         self,
         name: str,
         args: dict[str, Any],
+        *,
+        previous_plan: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], HelperExecutedAction]:
         if name != "create_research_plan":
             raise ValueError(f"Unknown research tool call: {name}")
         plan = self._normalize_research_plan(args)
+        revision_state = "updated" if previous_plan else "created"
         result = {
             "plan": plan,
             "execution_state": "planned",
-            "message": "Plan created. No search, screening, or download has been executed.",
+            "revision_state": revision_state,
+            "message": f"Plan {revision_state}. No search, screening, or download has been executed.",
         }
         action = HelperExecutedAction(
             type="tool_call",
             name="create_research_plan",
-            title="Research plan created",
+            title=f"Research plan {revision_state}",
             status="success",
             details={
                 "plan": plan,
                 "execution_state": "planned",
+                "revision_state": revision_state,
             },
         )
         return result, action
@@ -2272,6 +2340,7 @@ class HelperAIService:
                 ],
             ),
             "open_questions": self._as_string_list(args.get("open_questions")),
+            "revision_summary": str(args.get("revision_summary") or "").strip(),
             "notes": str(args.get("notes") or "").strip(),
         }
 

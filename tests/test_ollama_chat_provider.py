@@ -17,7 +17,7 @@ from app.llm.ollama import (
 )
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
-from app.services.agent.helper_ai_service import HelperAIService
+from app.services.agent.helper_ai_service import HelperAIService, HelperThreadState
 from app.services.agent.native_researcher_service import NativeResearcherService
 from app.utils.cache import TTLCache
 
@@ -219,6 +219,127 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
         assert final_event["response"]["executed_actions"][0]["name"] == "create_research_plan"
         assert "Building a research plan" in final_event["response"]["thinking"]
         assert "Researcher plan preview is ready" in final_event["response"]["answer"]
+
+    asyncio.run(runner())
+
+
+def test_research_agent_ollama_followup_answers_from_existing_plan(monkeypatch) -> None:
+    seen_messages: list[list[dict[str, object]]] = []
+
+    async def fake_ollama_chat_stream(**kwargs):
+        seen_messages.append(list(kwargs.get("messages") or []))
+        prompt = str((kwargs.get("messages") or [])[-1].get("content") or "")
+        assert "Current structured plan JSON" in prompt
+        assert "dopamine receptor docking" in prompt
+        yield {
+            "message": {
+                "content": (
+                    "Use the PubMed query `(dopamine receptor) AND molecular docking` first, "
+                    "then verify exact papers through DOI, PMID, or publisher landing pages."
+                )
+            }
+        }
+
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        cache = TTLCache(ttl_seconds=60, max_entries=4)
+        cache.set(
+            "thread_followup",
+            HelperThreadState(
+                research_plan={
+                    "topic": "dopamine receptor docking",
+                    "objective": "Find exact docking papers and interaction regions.",
+                    "target_count": 20,
+                    "databases": ["PubMed"],
+                    "candidate_budget": {"target_count": 20, "per_database": 40, "rule": "Fetch 40."},
+                    "database_queries": [
+                        {
+                            "database": "PubMed",
+                            "query": "(dopamine receptor) AND molecular docking",
+                            "candidate_limit": 40,
+                        }
+                    ],
+                    "screening_criteria": [],
+                },
+            ),
+        )
+        service = HelperAIService(thread_cache=cache, pubmed_service=FakePubMedService())
+        payload = HelperChatRequest(
+            api_key="",
+            thread_id="thread_followup",
+            message="How do I access the exact papers for this plan?",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        final_event = next(event for event in events if event["type"] == "final")
+        assert final_event["response"]["executed_actions"] == []
+        assert "PubMed query" in final_event["response"]["answer"]
+        assert cache.get("thread_followup").research_plan["topic"] == "dopamine receptor docking"
+
+    asyncio.run(runner())
+
+
+def test_research_agent_ollama_followup_revises_existing_plan(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            prompt = str((kwargs.get("messages") or [])[-1].get("content") or "")
+            assert "Current structured plan JSON" in prompt
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "revise_plan",
+                                "name": "create_research_plan",
+                                "arguments": {
+                                    "topic": "dopamine receptor docking",
+                                    "objective": "Find docking papers with interaction maps.",
+                                    "target_count": 10,
+                                    "databases": ["PubMed"],
+                                    "revision_summary": "Reduced target count to 10.",
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        yield {"message": {"content": "The plan is revised to target 10 final papers."}}
+
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        cache = TTLCache(ttl_seconds=60, max_entries=4)
+        cache.set(
+            "thread_edit",
+            HelperThreadState(
+                research_plan={
+                    "topic": "dopamine receptor docking",
+                    "objective": "Find docking papers.",
+                    "target_count": 20,
+                    "databases": ["PubMed"],
+                },
+            ),
+        )
+        service = HelperAIService(thread_cache=cache, pubmed_service=FakePubMedService())
+        payload = HelperChatRequest(
+            api_key="",
+            thread_id="thread_edit",
+            message="Make the plan target 10 final papers.",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        plan = tool_result["action"]["details"]["plan"]
+        assert tool_result["action"]["details"]["revision_state"] == "updated"
+        assert plan["target_count"] == 10
+        assert plan["candidate_budget"]["per_database"] == 20
+        assert cache.get("thread_edit").research_plan["target_count"] == 10
 
     asyncio.run(runner())
 

@@ -46,8 +46,9 @@ def build_research_agent_system_instruction() -> str:
         "Default target selected papers is 20. "
         "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
         "Build search_branches from explicit targets or comparable categories in the user request. "
-        "Put aliases, synonyms, abbreviations, and spelling variants directly inside each branch query. "
+        "In each branch query, include only the branch target identity: names, aliases, abbreviations, gene/protein names, subtype names, and exact variants. "
         "Use shared_query_concepts for distinct evidence categories that should be paired with every branch, such as structural, experimental, computational, or assay evidence. "
+        "Put methods, evidence terms, outcomes, features, and content terms in shared_query_concepts, not in branch queries. "
         "Keep screening criteria tied to the user's stated objective. "
         "Always write English prompts, plans, labels, and output text in this mode."
     )

@@ -107,7 +107,7 @@ def test_ollama_runtime_defaults_set_context_and_thinking_budget() -> None:
     options = _ollama_runtime_options()
     assert options["num_ctx"] == OLLAMA_DEFAULT_NUM_CTX == 16_384
     assert options["num_predict"] == OLLAMA_DEFAULT_NUM_PREDICT == 4_096
-    assert options["temperature"] == OLLAMA_DEFAULT_TEMPERATURE == 0.2
+    assert options["temperature"] == OLLAMA_DEFAULT_TEMPERATURE == 0.7
     assert options["top_p"] == OLLAMA_DEFAULT_TOP_P == 0.9
     assert options["repeat_last_n"] == OLLAMA_DEFAULT_REPEAT_LAST_N == 256
     assert options["repeat_penalty"] == OLLAMA_DEFAULT_REPEAT_PENALTY == 1.12
@@ -115,7 +115,7 @@ def test_ollama_runtime_defaults_set_context_and_thinking_budget() -> None:
     assert _ollama_thinking_budget("on") == {
         "budget_tokens": OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS,
     }
-    assert OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS == 2_048
+    assert OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS == 4_096
 
 
 def test_research_plan_tool_normalizes_defaults() -> None:

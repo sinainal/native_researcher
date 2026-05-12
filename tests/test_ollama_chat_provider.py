@@ -135,6 +135,9 @@ def test_research_plan_tool_normalizes_defaults() -> None:
         assert plan["databases"] == ["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"]
         assert plan["active_databases"] == plan["databases"]
         assert plan["search_branches"][0]["label"] == "dopamine D1-D5 docking papers with interaction maps"
+        assert "database_queries" not in plan
+        assert len(plan["raw_search_queries"]) == 5
+        assert plan["raw_search_queries"][0]["branch_label"] == "dopamine D1-D5 docking papers with interaction maps"
         assert plan["total_queries"] == 5
         assert plan["estimated_candidates"] == 200
         assert plan["estimated_time_seconds"] == 100
@@ -181,8 +184,12 @@ def test_research_plan_tool_normalizes_search_branches_and_active_databases() ->
         assert plan["active_databases"] == ["PubMed", "OpenAlex"]
         assert [item["id"] for item in plan["search_branches"]] == ["target_a", "target_b"]
         assert plan["search_branches"][0]["query"] == '"Target A" OR "Alias A"'
+        assert "aliases" not in plan["search_branches"][0]
         assert plan["shared_query_concepts"][0]["query"] == '"binding site" OR mutagenesis OR structure'
+        assert "terms" not in plan["shared_query_concepts"][0]
         assert plan["candidate_budget"]["per_database"] == 20
+        assert len(plan["raw_search_queries"]) == 4
+        assert plan["raw_search_queries"][0]["query"] == '("Target A" OR "Alias A") AND ("binding site" OR mutagenesis OR structure)'
         assert plan["total_queries"] == 4
         assert plan["estimated_candidates"] == 80
         assert plan["estimated_time_seconds"] == 40
@@ -209,6 +216,17 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
                                     "objective": "Find docking papers that identify strong interaction regions.",
                                     "target_count": 20,
                                     "databases": ["PubMed", "OpenAlex"],
+                                    "search_branches": [
+                                        {
+                                            "label": "Dopamine D1-D5 docking",
+                                            "query": '"dopamine receptor" OR DRD1 OR DRD2 OR DRD3 OR DRD4 OR DRD5',
+                                        }
+                                    ],
+                                    "shared_query_concepts": [
+                                        {
+                                            "query": '"molecular docking" OR "interaction map" OR "binding pose"',
+                                        }
+                                    ],
                                     "screening_criteria": [
                                         {
                                             "id": "docking_performed",
@@ -222,13 +240,6 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
                                             "description": "The article identifies receptor-ligand interaction regions.",
                                             "required": True,
                                         },
-                                    ],
-                                    "database_queries": [
-                                        {
-                                            "database": "PubMed",
-                                            "query": "(dopamine receptor) AND molecular docking",
-                                            "candidate_limit": 40,
-                                        }
                                     ],
                                 },
                             }
@@ -262,6 +273,9 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
         plan = tool_result["action"]["details"]["plan"]
         assert plan["topic"] == "dopamine D1-D5 docking papers"
         assert plan["candidate_budget"]["per_database"] == 40
+        assert plan["total_queries"] == 2
+        assert len(plan["raw_search_queries"]) == 2
+        assert "molecular docking" in plan["raw_search_queries"][0]["query"]
         assert [item["id"] for item in plan["screening_criteria"]] == [
             "docking_performed",
             "interaction_region",
@@ -368,9 +382,11 @@ def test_research_agent_ollama_followup_answers_from_existing_plan(monkeypatch) 
                     "target_count": 20,
                     "databases": ["PubMed"],
                     "candidate_budget": {"target_count": 20, "per_database": 40, "rule": "Fetch 40."},
-                    "database_queries": [
+                    "raw_search_queries": [
                         {
                             "database": "PubMed",
+                            "branch_id": "dopamine_receptor_docking",
+                            "branch_label": "dopamine receptor docking",
                             "query": "(dopamine receptor) AND molecular docking",
                             "candidate_limit": 40,
                         }

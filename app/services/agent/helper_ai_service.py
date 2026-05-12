@@ -1890,16 +1890,13 @@ class HelperAIService:
                         "properties": {
                             "label": {"type": "string"},
                             "query": {"type": "string"},
-                            "aliases": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["label", "query"],
                     },
-                    "description": "Executable main search branches. Split only when the user asks for multiple targets, subtypes, categories, or comparable branches.",
-                },
-                "search_topics": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Legacy alias for search_branches.",
+                    "description": (
+                        "Executable main search branches. Split explicit user-named targets, subtypes, "
+                        "categories, or comparable branches. Put aliases and synonyms directly in query."
+                    ),
                 },
                 "shared_query_concepts": {
                     "type": "array",
@@ -1908,11 +1905,10 @@ class HelperAIService:
                         "properties": {
                             "label": {"type": "string"},
                             "query": {"type": "string"},
-                            "terms": {"type": "array", "items": {"type": "string"}},
                         },
-                        "required": ["label", "query"],
+                        "required": ["query"],
                     },
-                    "description": "Common query/concept blocks added to every search branch with AND during execution.",
+                    "description": "Common query blocks added to every search branch with AND during execution.",
                 },
                 "exclusion_criteria": {
                     "type": "array",
@@ -1934,20 +1930,6 @@ class HelperAIService:
                         "required": ["id", "label", "description"],
                     },
                     "description": "Criteria for the Screening Agent to score from 0.0 to 1.0.",
-                },
-                "database_queries": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "database": {"type": "string"},
-                            "query": {"type": "string"},
-                            "rationale": {"type": "string"},
-                            "candidate_limit": {"type": "integer"},
-                        },
-                        "required": ["database", "query"],
-                    },
-                    "description": "Optional legacy/debug field. Prefer search_branches and shared_query_concepts.",
                 },
                 "candidate_budget": {
                     "type": "object",
@@ -2306,7 +2288,6 @@ class HelperAIService:
                     "id": self._slug_id(str(item.get("id") or label), f"branch_{index}"),
                     "label": label,
                     "query": query or label,
-                    "aliases": aliases,
                 }
             )
         if search_branches:
@@ -2316,7 +2297,6 @@ class HelperAIService:
                 "id": "main_branch",
                 "label": topic,
                 "query": topic,
-                "aliases": [],
             }
         ]
 
@@ -2325,35 +2305,59 @@ class HelperAIService:
             concepts: list[dict[str, Any]] = []
             for index, item in enumerate(value, start=1):
                 if isinstance(item, str):
-                    label = item.strip()
-                    if not label:
+                    query = item.strip()
+                    if not query:
                         continue
                     concepts.append(
                         {
-                            "id": self._slug_id(label, f"concept_{index}"),
-                            "label": label,
-                            "query": label,
-                            "terms": [label],
+                            "id": self._slug_id(query, f"concept_{index}"),
+                            "label": f"Shared query {index}",
+                            "query": query,
                         }
                     )
                     continue
                 if not isinstance(item, dict):
                     continue
-                label = str(item.get("label") or item.get("name") or f"Concept {index}").strip()
-                terms = self._as_string_list(item.get("terms"), fallback=[label])
+                label = str(item.get("label") or item.get("name") or f"Shared query {index}").strip()
                 query = str(item.get("query") or "").strip()
                 if not query:
+                    terms = self._as_string_list(item.get("terms"), fallback=[label])
                     query = " OR ".join(f'"{term}"' if " " in term else term for term in terms if term) or label
                 concepts.append(
                     {
                         "id": self._slug_id(str(item.get("id") or label), f"concept_{index}"),
                         "label": label,
                         "query": query,
-                        "terms": terms,
                     }
                 )
             return concepts
         return []
+
+    @staticmethod
+    def _compose_raw_search_queries(
+        *,
+        databases: list[str],
+        search_branches: list[dict[str, Any]],
+        shared_query_concepts: list[dict[str, Any]],
+        candidate_limit: int,
+    ) -> list[dict[str, Any]]:
+        shared_queries = [str(item.get("query") or "").strip() for item in shared_query_concepts if str(item.get("query") or "").strip()]
+        raw_queries: list[dict[str, Any]] = []
+        for database in databases:
+            for branch in search_branches:
+                branch_query = str(branch.get("query") or branch.get("label") or "").strip()
+                query_parts = [branch_query, *shared_queries]
+                query = " AND ".join(f"({part})" for part in query_parts if part)
+                raw_queries.append(
+                    {
+                        "database": database,
+                        "branch_id": branch.get("id") or "",
+                        "branch_label": branch.get("label") or "",
+                        "query": query,
+                        "candidate_limit": candidate_limit,
+                    }
+                )
+        return raw_queries
 
     def _normalize_research_plan(self, args: dict[str, Any]) -> dict[str, Any]:
         topic = str(args.get("topic") or "").strip() or "Untitled research topic"
@@ -2418,33 +2422,19 @@ class HelperAIService:
                     "scoring_guidance": "Score 1.0 for explicit evidence, 0.5 for likely evidence, 0.0 if absent.",
                 },
             ]
-        raw_queries = self._as_dict_list(args.get("database_queries"))
-        database_queries: list[dict[str, Any]] = []
-        for item in raw_queries:
-            database = str(item.get("database") or "").strip()
-            query = str(item.get("query") or "").strip()
-            if not database or not query:
-                continue
-            database_queries.append(
-                {
-                    "database": database,
-                    "query": query,
-                    "rationale": str(item.get("rationale") or "").strip(),
-                    "candidate_limit": parse_bounded_int(
-                        item.get("candidate_limit"),
-                        default=per_database,
-                        minimum=1,
-                        maximum=500,
-                    ),
-                }
-            )
         candidate_budget = args.get("candidate_budget") if isinstance(args.get("candidate_budget"), dict) else {}
         normalized_budget = {
             "target_count": parse_bounded_int(candidate_budget.get("target_count"), default=target_count, minimum=1, maximum=100),
             "per_database": parse_bounded_int(candidate_budget.get("per_database"), default=per_database, minimum=1, maximum=500),
             "rule": str(candidate_budget.get("rule") or "Fetch target_count * 2 candidates per enabled database in the first pass.").strip(),
         }
-        total_queries = max(1, len(search_branches)) * max(1, len(databases))
+        raw_search_queries = self._compose_raw_search_queries(
+            databases=databases,
+            search_branches=search_branches,
+            shared_query_concepts=shared_query_concepts,
+            candidate_limit=normalized_budget["per_database"],
+        )
+        total_queries = len(raw_search_queries) or (max(1, len(search_branches)) * max(1, len(databases)))
         estimated_candidates = total_queries * normalized_budget["per_database"]
         estimated_time_seconds = max(20, ((estimated_candidates + 39) // 40) * 20)
         screening_json_schema = args.get("screening_json_schema")
@@ -2469,9 +2459,9 @@ class HelperAIService:
             "total_queries": total_queries,
             "estimated_candidates": estimated_candidates,
             "estimated_time_seconds": estimated_time_seconds,
+            "raw_search_queries": raw_search_queries,
             "exclusion_criteria": exclusion,
             "screening_criteria": screening_criteria,
-            "database_queries": database_queries,
             "screening_json_schema": screening_json_schema,
             "scoring_rule": str(
                 args.get("scoring_rule")
@@ -2496,7 +2486,7 @@ class HelperAIService:
         target_count = plan.get("target_count_per_branch") or plan.get("target_count") or 20
         databases = ", ".join(plan.get("databases") or [])
         criteria = plan.get("screening_criteria") or []
-        query_count = plan.get("total_queries") or len(plan.get("database_queries") or [])
+        query_count = plan.get("total_queries") or len(plan.get("raw_search_queries") or [])
         branch_count = len(plan.get("search_branches") or [])
         return (
             f"Researcher plan created for **{topic}**.\n\n"

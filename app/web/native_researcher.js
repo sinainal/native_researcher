@@ -3912,13 +3912,6 @@ function researchPlanDatabases(plan) {
   return values.filter((item) => String(item || "").trim());
 }
 
-function splitResearchPlanTerms(value) {
-  return String(value || "")
-    .split(/[\n,;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function researchPlanSearchBranches(plan) {
   const branches = Array.isArray(plan?.search_branches) ? plan.search_branches : [];
   if (branches.length) return branches;
@@ -3928,14 +3921,12 @@ function researchPlanSearchBranches(plan) {
       id: item.id,
       label: item.label || "Branch",
       query: item.query || [...(item.must_include || []), ...(item.synonyms || [])].filter(Boolean).join(" OR "),
-      aliases: item.aliases || item.synonyms || [],
     }));
   }
   return [{
     id: "main_branch",
     label: plan?.topic || "Main topic",
     query: plan?.topic || "Main topic",
-    aliases: [],
   }];
 }
 
@@ -3943,15 +3934,55 @@ function researchPlanSharedConcepts(plan) {
   const concepts = Array.isArray(plan?.shared_query_concepts) ? plan.shared_query_concepts : [];
   return concepts.map((item, index) => {
     if (typeof item === "string") {
-      return { id: `concept_${index + 1}`, label: item, query: item, terms: [item] };
+      return { id: `concept_${index + 1}`, label: `Shared query ${index + 1}`, query: item };
     }
     return {
       id: item.id || `concept_${index + 1}`,
-      label: item.label || `Concept ${index + 1}`,
+      label: item.label || `Shared query ${index + 1}`,
       query: item.query || (item.terms || []).join(" OR ") || item.label || "",
-      terms: Array.isArray(item.terms) ? item.terms : [],
     };
   });
+}
+
+function researchPlanRawSearchQueries(plan) {
+  if (Array.isArray(plan?.raw_search_queries) && plan.raw_search_queries.length) {
+    return plan.raw_search_queries;
+  }
+  const databases = researchPlanDatabases(plan);
+  const branches = researchPlanSearchBranches(plan);
+  const sharedQueries = researchPlanSharedConcepts(plan).map((item) => item.query).filter(Boolean);
+  const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
+  return databases.flatMap((database) => branches.map((branch) => {
+    const parts = [branch.query || branch.label, ...sharedQueries].filter(Boolean);
+    return {
+      database,
+      branch_id: branch.id || "",
+      branch_label: branch.label || "",
+      query: parts.map((part) => `(${part})`).join(" AND "),
+      candidate_limit: Math.max(1, perDatabase),
+    };
+  }));
+}
+
+function researchPlanDisplayPlan(plan, rawSearchQueries, totalQueries, estimatedCandidates, estimatedSeconds) {
+  const { database_queries: _databaseQueries, search_topics: _searchTopics, ...basePlan } = plan || {};
+  return {
+    ...basePlan,
+    search_branches: researchPlanSearchBranches(plan).map((branch) => ({
+      id: branch.id || "",
+      label: branch.label || "",
+      query: branch.query || branch.label || "",
+    })),
+    shared_query_concepts: researchPlanSharedConcepts(plan).map((concept) => ({
+      id: concept.id || "",
+      label: concept.label || "",
+      query: concept.query || "",
+    })),
+    total_queries: totalQueries,
+    estimated_candidates: estimatedCandidates,
+    estimated_time_seconds: estimatedSeconds,
+    raw_search_queries: rawSearchQueries,
+  };
 }
 
 function researchPlanTotalQueries(plan) {
@@ -3988,7 +4019,8 @@ function recomputeResearchPlanEstimates(plan) {
   plan.shared_query_concepts = researchPlanSharedConcepts(plan);
   plan.candidate_budget.target_count = targetCount;
   plan.candidate_budget.per_database = Math.max(1, Number.parseInt(String(plan.candidate_budget.per_database || targetCount * 2), 10) || targetCount * 2);
-  plan.total_queries = Math.max(1, plan.search_branches.length) * Math.max(1, plan.active_databases.length);
+  plan.raw_search_queries = researchPlanRawSearchQueries(plan);
+  plan.total_queries = plan.raw_search_queries.length || (Math.max(1, plan.search_branches.length) * Math.max(1, plan.active_databases.length));
   plan.estimated_candidates = plan.total_queries * plan.candidate_budget.per_database;
   plan.estimated_time_seconds = Math.max(20, Math.ceil(plan.estimated_candidates / 40) * 20);
   return plan;
@@ -4018,14 +4050,12 @@ function researchPlanBranchEditMarkup(branches) {
       ${branches.map((branch, index) => `
         <div class="research-plan-branch-edit" data-branch-index="${escapeHtml(index)}">
           <label><span>Branch label</span><input type="text" value="${escapeHtml(branch.label || "")}" data-branch-label="${escapeHtml(index)}"></label>
-          <label><span>Branch query</span><textarea rows="2" data-branch-query="${escapeHtml(index)}">${escapeHtml(branch.query || "")}</textarea></label>
-          <label><span>Aliases</span><textarea rows="2" data-branch-aliases="${escapeHtml(index)}">${escapeHtml((branch.aliases || []).join(", "))}</textarea></label>
+          <label><span>Search query</span><textarea rows="3" data-branch-query="${escapeHtml(index)}">${escapeHtml(branch.query || "")}</textarea></label>
         </div>
       `).join("")}
       <div class="research-plan-branch-edit is-new">
         <label><span>New branch</span><input type="text" placeholder="Branch label" data-new-branch-label></label>
-        <label><span>Branch query</span><textarea rows="2" placeholder="Broad OR query for this branch" data-new-branch-query></textarea></label>
-        <label><span>Aliases</span><textarea rows="2" placeholder="Comma-separated aliases" data-new-branch-aliases></textarea></label>
+        <label><span>Search query</span><textarea rows="3" placeholder="Broad query for this branch, including aliases and synonyms" data-new-branch-query></textarea></label>
       </div>
     </div>
   `;
@@ -4036,15 +4066,11 @@ function researchPlanConceptEditMarkup(concepts) {
     <div class="research-plan-branch-edit-list">
       ${concepts.map((concept, index) => `
         <div class="research-plan-branch-edit" data-concept-index="${escapeHtml(index)}">
-          <label><span>Concept label</span><input type="text" value="${escapeHtml(concept.label || "")}" data-concept-label="${escapeHtml(index)}"></label>
-          <label><span>Concept query</span><textarea rows="2" data-concept-query="${escapeHtml(index)}">${escapeHtml(concept.query || "")}</textarea></label>
-          <label><span>Terms</span><textarea rows="2" data-concept-terms="${escapeHtml(index)}">${escapeHtml((concept.terms || []).join(", "))}</textarea></label>
+          <label><span>Shared query</span><textarea rows="3" data-concept-query="${escapeHtml(index)}">${escapeHtml(concept.query || "")}</textarea></label>
         </div>
       `).join("")}
       <div class="research-plan-branch-edit is-new">
-        <label><span>New shared concept</span><input type="text" placeholder="Concept label" data-new-concept-label></label>
-        <label><span>Concept query</span><textarea rows="2" placeholder="OR query added to every branch" data-new-concept-query></textarea></label>
-        <label><span>Terms</span><textarea rows="2" placeholder="Comma-separated terms" data-new-concept-terms></textarea></label>
+        <label><span>New shared query</span><textarea rows="3" placeholder="Query block added to every branch" data-new-concept-query></textarea></label>
       </div>
     </div>
   `;
@@ -4053,13 +4079,14 @@ function researchPlanConceptEditMarkup(concepts) {
 function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
   const plan = action?.details?.plan || {};
   const databases = researchPlanDatabases(plan);
-  const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
   const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
   const searchBranches = researchPlanSearchBranches(plan);
   const sharedConcepts = researchPlanSharedConcepts(plan);
+  const rawSearchQueries = researchPlanRawSearchQueries(plan);
   const totalQueries = researchPlanTotalQueries(plan);
   const estimatedCandidates = researchPlanEstimatedCandidates(plan);
   const estimatedSeconds = researchPlanEstimatedSeconds(plan);
+  const effectivePlan = researchPlanDisplayPlan(plan, rawSearchQueries, totalQueries, estimatedCandidates, estimatedSeconds);
   const rawJson = JSON.stringify(
     {
       action: {
@@ -4068,7 +4095,7 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
         execution_state: action.details?.execution_state,
         revision_state: action.details?.revision_state,
       },
-      plan,
+      plan: effectivePlan,
     },
     null,
     2,
@@ -4111,8 +4138,8 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
         ${researchPlanBranchEditMarkup(searchBranches)}
       </section>
       <section class="research-plan-detail-section">
-        <h4>Shared Query Concepts</h4>
-        <p>Each shared concept query is combined with every search branch during execution.</p>
+        <h4>Shared Query Blocks</h4>
+        <p>Each shared query is combined with every search branch during execution.</p>
         ${researchPlanConceptEditMarkup(sharedConcepts)}
       </section>
       <section class="research-plan-detail-section">
@@ -4126,28 +4153,6 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
           <div><span>Estimated time</span><strong>${escapeHtml(formatResearchPlanDuration(estimatedSeconds))}</strong></div>
         </div>
         <p>${escapeHtml(plan.candidate_budget?.rule || "Fetch target_count * 2 candidates per enabled database in the first pass.")}</p>
-      </section>
-      <section class="research-plan-detail-section">
-        <h4>Active Databases</h4>
-        <p>${escapeHtml(databases.join(", ") || "Not specified")}</p>
-      </section>
-      <section class="research-plan-detail-section">
-        <h4>Backend Query Preview</h4>
-        <p>Execution will run each search branch against every active database, with shared query concepts added to each branch.</p>
-        ${queries.length ? `
-          <div class="research-plan-query-list">
-            ${queries.map((item) => `
-              <div class="research-plan-query-item">
-                <div class="research-plan-query-head">
-                  <strong>${escapeHtml(item.database || "Database")}</strong>
-                  <span>${escapeHtml(item.candidate_limit || plan.candidate_budget?.per_database || "-")} candidates</span>
-                </div>
-                <code>${escapeHtml(item.query || "")}</code>
-                ${item.rationale ? `<p>${escapeHtml(item.rationale)}</p>` : ""}
-              </div>
-            `).join("")}
-          </div>
-        ` : "<p>No DB-specific queries are stored yet.</p>"}
       </section>
       <section class="research-plan-detail-section">
         <h4>Screening Criteria</h4>
@@ -4190,8 +4195,21 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
         <code>${escapeHtml(plan.scoring_rule || "-")}</code>
       </section>
       <section class="research-plan-detail-section">
-        <h4>Query Expansion Policy</h4>
-        ${researchPlanListMarkup(plan.query_expansion_policy)}
+        <h4>Generated Search Queries</h4>
+        <p>Readonly execution preview. Execute will run these generated branch/database queries.</p>
+        ${rawSearchQueries.length ? `
+          <div class="research-plan-query-list">
+            ${rawSearchQueries.map((item) => `
+              <div class="research-plan-query-item">
+                <div class="research-plan-query-head">
+                  <strong>${escapeHtml(item.database || "Database")} · ${escapeHtml(item.branch_label || "Branch")}</strong>
+                  <span>${escapeHtml(item.candidate_limit || plan.candidate_budget?.per_database || "-")} candidates</span>
+                </div>
+                <code>${escapeHtml(item.query || "")}</code>
+              </div>
+            `).join("")}
+          </div>
+        ` : "<p>No executable queries are available yet.</p>"}
       </section>
       <section class="research-plan-detail-section">
         <h4>Raw JSON</h4>
@@ -4263,47 +4281,40 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
     const index = node.dataset.branchIndex;
     const label = root.querySelector(`[data-branch-label='${index}']`)?.value.trim();
     if (!label) return null;
-    const aliases = splitResearchPlanTerms(root.querySelector(`[data-branch-aliases='${index}']`)?.value || "");
-    const query = root.querySelector(`[data-branch-query='${index}']`)?.value.trim()
-      || [label, ...aliases].filter(Boolean).join(" OR ");
+    const query = root.querySelector(`[data-branch-query='${index}']`)?.value.trim() || label;
     return {
       id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `branch_${Number(index) + 1}`,
       label,
       query,
-      aliases,
     };
   }).filter(Boolean);
   const newBranchLabel = root.querySelector("[data-new-branch-label]")?.value.trim();
   if (newBranchLabel) {
-    const aliases = splitResearchPlanTerms(root.querySelector("[data-new-branch-aliases]")?.value || "");
     branches.push({
       id: newBranchLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `branch_${branches.length + 1}`,
       label: newBranchLabel,
-      query: root.querySelector("[data-new-branch-query]")?.value.trim() || [newBranchLabel, ...aliases].filter(Boolean).join(" OR "),
-      aliases,
+      query: root.querySelector("[data-new-branch-query]")?.value.trim() || newBranchLabel,
     });
   }
   if (branches.length) plan.search_branches = branches;
   const concepts = [...root.querySelectorAll("[data-concept-index]")].map((node) => {
     const index = node.dataset.conceptIndex;
-    const label = root.querySelector(`[data-concept-label='${index}']`)?.value.trim();
-    if (!label) return null;
-    const terms = splitResearchPlanTerms(root.querySelector(`[data-concept-terms='${index}']`)?.value || "");
+    const query = root.querySelector(`[data-concept-query='${index}']`)?.value.trim();
+    if (!query) return null;
+    const label = `Shared query ${Number(index) + 1}`;
     return {
       id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${Number(index) + 1}`,
       label,
-      query: root.querySelector(`[data-concept-query='${index}']`)?.value.trim() || terms.join(" OR ") || label,
-      terms,
+      query,
     };
   }).filter(Boolean);
-  const newConceptLabel = root.querySelector("[data-new-concept-label]")?.value.trim();
-  if (newConceptLabel) {
-    const terms = splitResearchPlanTerms(root.querySelector("[data-new-concept-terms]")?.value || "");
+  const newConceptQuery = root.querySelector("[data-new-concept-query]")?.value.trim();
+  if (newConceptQuery) {
+    const label = `Shared query ${concepts.length + 1}`;
     concepts.push({
-      id: newConceptLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${concepts.length + 1}`,
-      label: newConceptLabel,
-      query: root.querySelector("[data-new-concept-query]")?.value.trim() || terms.join(" OR ") || newConceptLabel,
-      terms,
+      id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${concepts.length + 1}`,
+      label,
+      query: newConceptQuery,
     });
   }
   plan.shared_query_concepts = concepts;

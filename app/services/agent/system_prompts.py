@@ -47,11 +47,13 @@ def build_research_agent_system_instruction() -> str:
         "Default target selected papers is 20. "
         "Default first-pass candidate budget is target_count * 2 per enabled database. "
         "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
-        "Create a search-ready plan: search_branches are the main executable search units, and shared_query_concepts are common concept blocks added to every branch. "
-        "If the user names multiple targets, subtypes, variants, groups, conditions, categories, or comparable research branches, split them into separate search_branches; otherwise use one branch. "
-        "For each search_branch, write a broad query string with the branch label and aliases combined as recall-oriented alternatives. "
-        "For shared_query_concepts, write broad concept/query blocks that should be combined with every search branch. "
-        "Include a screening schema with 0.0 to 1.0 criterion scores and the squared-score relevance rule. "
+        "Create a search-ready plan: search_branches are the executable search units, and shared_query_concepts are common query blocks added to every branch. "
+        "If the user explicitly names multiple targets, subtypes, variants, conditions, or categories, make those named items the separate search_branches. "
+        "Do not create extra umbrella/grouping branches unless the user asked for those groups as separate outputs. "
+        "Each branch must have one broad query string containing useful aliases, synonyms, abbreviations, and variants for that branch. "
+        "Each shared_query_concept must have one broad query string only for concepts that should be added to every branch. "
+        "Screening criteria must directly serve the user's stated objective; do not add unrelated species, method, date, or article-type constraints unless the user requested them or they are essential to the objective. "
+        "Include 0.0 to 1.0 screening scores and the squared-score relevance rule. "
         "Always write English prompts, plans, labels, and output text in this mode."
     )
 

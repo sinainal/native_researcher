@@ -11,7 +11,12 @@ from typing import Any
 import httpx
 
 OLLAMA_DEFAULT_NUM_CTX = 16_384
-OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS = 8_192
+OLLAMA_DEFAULT_NUM_PREDICT = 4_096
+OLLAMA_DEFAULT_REPEAT_LAST_N = 256
+OLLAMA_DEFAULT_REPEAT_PENALTY = 1.12
+OLLAMA_DEFAULT_TEMPERATURE = 0.2
+OLLAMA_DEFAULT_TOP_P = 0.9
+OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS = 2_048
 
 
 @dataclass(frozen=True)
@@ -139,8 +144,15 @@ def _ollama_think_option(thinking_level: str) -> bool | str:
     return True
 
 
-def _ollama_runtime_options(*, num_ctx: int = OLLAMA_DEFAULT_NUM_CTX) -> dict[str, int]:
-    return {"num_ctx": num_ctx}
+def _ollama_runtime_options(*, num_ctx: int = OLLAMA_DEFAULT_NUM_CTX) -> dict[str, int | float]:
+    return {
+        "num_ctx": num_ctx,
+        "num_predict": OLLAMA_DEFAULT_NUM_PREDICT,
+        "temperature": OLLAMA_DEFAULT_TEMPERATURE,
+        "top_p": OLLAMA_DEFAULT_TOP_P,
+        "repeat_last_n": OLLAMA_DEFAULT_REPEAT_LAST_N,
+        "repeat_penalty": OLLAMA_DEFAULT_REPEAT_PENALTY,
+    }
 
 
 def _ollama_thinking_budget(thinking_level: str) -> dict[str, int] | None:

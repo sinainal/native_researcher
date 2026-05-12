@@ -2592,6 +2592,9 @@ body.is-document-viewer-open .native-document-viewer {
 .btn-send:active:not(:disabled) { transform: scale(.94); }
 .btn-send:disabled { opacity: .45; cursor: not-allowed; }
 .btn-send svg { width: 18px; height: 18px; }
+.btn-send.is-stop {
+  color: #dc2626;
+}
 
 .test-config-body {
   gap: 12px;
@@ -6139,6 +6142,18 @@ body.is-document-viewer-open .native-document-viewer {
   border-color: rgba(179, 192, 211, 0.98) !important;
   transform: translateY(-1px);
   opacity: 1;
+}
+
+.native-assistant-panel .btn-send-minimal.is-stop {
+  color: #dc2626 !important;
+  border-color: rgba(248, 113, 113, .38) !important;
+  background: #fef2f2 !important;
+}
+
+.native-assistant-panel .btn-send-minimal.is-stop:hover {
+  color: #b91c1c !important;
+  border-color: rgba(239, 68, 68, .52) !important;
+  background: #fee2e2 !important;
 }
 
 .native-assistant-panel .btn-send-minimal svg {

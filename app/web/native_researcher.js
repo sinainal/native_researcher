@@ -672,6 +672,30 @@ function bindAppErrorLogging() {
   });
 }
 
+const assistantSendIconMarkup = `
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 19V7" />
+    <path d="m7 11 5-5 5 5" />
+  </svg>
+`;
+
+const assistantStopIconMarkup = `
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <rect x="7" y="7" width="10" height="10" rx="2" />
+  </svg>
+`;
+
+function setAssistantSendButtonStreaming(isStreaming) {
+  if (!els.assistantSendBtn) return;
+  const streaming = Boolean(isStreaming);
+  els.assistantSendBtn.classList.toggle("is-stop", streaming);
+  els.assistantSendBtn.innerHTML = streaming ? assistantStopIconMarkup : assistantSendIconMarkup;
+  els.assistantSendBtn.setAttribute("aria-label", streaming ? "Stop response" : "Send");
+  els.assistantSendBtn.title = streaming ? "Stop response" : "Send";
+  els.assistantSendBtn.disabled = Boolean(runtime.assistantModelLoading) && !streaming;
+}
+
 function clearLegacyAssistantStorage() {
   localStorage.removeItem("native_researcher_chat_sessions");
   localStorage.removeItem("native_researcher_chat_session_id");
@@ -1542,7 +1566,7 @@ function updateAssistantModelLoadingPopup() {
     if (els.assistantModelLoadingMeta) els.assistantModelLoadingMeta.textContent = "";
     if (els.assistantModelLoadingBarFill) els.assistantModelLoadingBarFill.style.width = "0%";
     if (els.assistantInput) els.assistantInput.disabled = false;
-    if (els.assistantSendBtn) els.assistantSendBtn.disabled = false;
+    setAssistantSendButtonStreaming(Boolean(state.assistantStreamAbort));
     return;
   }
   const sizeLabel = ollamaModelSizeLabel(localModel) || "Loading...";
@@ -5554,6 +5578,7 @@ async function sendAssistantMessage(options = {}) {
   if (state.assistantStreamAbort) state.assistantStreamAbort.abort();
   const controller = new AbortController();
   state.assistantStreamAbort = controller;
+  setAssistantSendButtonStreaming(true);
 
   pushAssistantMessage({ role: "user", text: displayMessage || message });
   const pendingMessage = pushAssistantMessage({
@@ -5662,16 +5687,24 @@ async function sendAssistantMessage(options = {}) {
     );
   } catch (error) {
     pendingMessage.pending = false;
-    pendingMessage.text = `Assistant error: ${error.message || "Unknown error."}`;
-    trackAppEvent("error", "assistant_stream_failed", error.message || "Unknown assistant error.", {
-      project_id: state.projectId || "",
-      model: runtime.assistantModel,
-    });
+    const stoppedByUser = controller.signal.aborted;
+    pendingMessage.text = stoppedByUser
+      ? (pendingMessage.text || "Stopped.")
+      : `Assistant error: ${error.message || "Unknown error."}`;
+    if (stoppedByUser) {
+      pendingMessage.meta = "Stopped by user.";
+    } else {
+      trackAppEvent("error", "assistant_stream_failed", error.message || "Unknown assistant error.", {
+        project_id: state.projectId || "",
+        model: runtime.assistantModel,
+      });
+    }
     scheduleAssistantMessageUpdate(pendingMessage);
     syncCurrentSession();
   } finally {
     if (state.assistantStreamAbort === controller) {
       state.assistantStreamAbort = null;
+      setAssistantSendButtonStreaming(false);
     }
     syncCurrentSession();
   }
@@ -5739,6 +5772,11 @@ function bindEvents() {
     }
   });
   els.assistantSendBtn.addEventListener("click", () => {
+    if (state.assistantStreamAbort) {
+      state.assistantStreamAbort.abort(new Error("Stopped by user."));
+      setAssistantSendButtonStreaming(false);
+      return;
+    }
     void sendAssistantMessage();
   });
 

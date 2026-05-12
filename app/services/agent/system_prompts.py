@@ -47,6 +47,10 @@ def build_research_agent_system_instruction() -> str:
         "Default target selected papers is 20. "
         "Default first-pass candidate budget is target_count * 2 per enabled database. "
         "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
+        "Create a search-ready plan: search_branches are the main executable search units, and shared_query_concepts are common concept blocks added to every branch. "
+        "If the user names multiple targets, subtypes, variants, groups, conditions, categories, or comparable research branches, split them into separate search_branches; otherwise use one branch. "
+        "For each search_branch, write a broad query string with the branch label and aliases combined as recall-oriented alternatives. "
+        "For shared_query_concepts, write broad concept/query blocks that should be combined with every search branch. "
         "Include a screening schema with 0.0 to 1.0 criterion scores and the squared-score relevance rule. "
         "Always write English prompts, plans, labels, and output text in this mode."
     )

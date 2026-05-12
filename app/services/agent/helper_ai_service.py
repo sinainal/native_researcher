@@ -1867,17 +1867,52 @@ class HelperAIService:
                 "objective": {"type": "string", "description": "Concrete research objective."},
                 "target_count": {
                     "type": "integer",
-                    "description": "Desired number of final selected papers. Defaults to 20.",
+                    "description": "Legacy alias for target_count_per_branch.",
+                },
+                "target_count_per_branch": {
+                    "type": "integer",
+                    "description": "Desired number of final selected papers per search branch. Defaults to 20.",
                 },
                 "databases": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Databases to search, such as PubMed, Europe PMC, OpenAlex, CORE, arXiv.",
+                    "description": "Legacy alias for active_databases.",
                 },
-                "inclusion_criteria": {
+                "active_databases": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Criteria papers should satisfy.",
+                    "description": "Databases the backend should search, such as PubMed, Europe PMC, OpenAlex, CORE, arXiv.",
+                },
+                "search_branches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "query": {"type": "string"},
+                            "aliases": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["label", "query"],
+                    },
+                    "description": "Executable main search branches. Split only when the user asks for multiple targets, subtypes, categories, or comparable branches.",
+                },
+                "search_topics": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Legacy alias for search_branches.",
+                },
+                "shared_query_concepts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "query": {"type": "string"},
+                            "terms": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["label", "query"],
+                    },
+                    "description": "Common query/concept blocks added to every search branch with AND during execution.",
                 },
                 "exclusion_criteria": {
                     "type": "array",
@@ -1912,7 +1947,7 @@ class HelperAIService:
                         },
                         "required": ["database", "query"],
                     },
-                    "description": "First-pass database-specific query plan.",
+                    "description": "Optional legacy/debug field. Prefer search_branches and shared_query_concepts.",
                 },
                 "candidate_budget": {
                     "type": "object",
@@ -2256,22 +2291,89 @@ class HelperAIService:
         normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
         return normalized[:64] or fallback
 
+    def _normalize_search_branches(self, value: Any, *, topic: str) -> list[dict[str, Any]]:
+        raw_branches = self._as_dict_list(value)
+        search_branches: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_branches, start=1):
+            label = str(item.get("label") or item.get("name") or f"Branch {index}").strip()
+            aliases = self._as_string_list(item.get("aliases") or item.get("synonyms"))
+            query = str(item.get("query") or "").strip()
+            if not query:
+                query_terms = [label, *aliases]
+                query = " OR ".join(f'"{term}"' if " " in term else term for term in query_terms if term)
+            search_branches.append(
+                {
+                    "id": self._slug_id(str(item.get("id") or label), f"branch_{index}"),
+                    "label": label,
+                    "query": query or label,
+                    "aliases": aliases,
+                }
+            )
+        if search_branches:
+            return search_branches
+        return [
+            {
+                "id": "main_branch",
+                "label": topic,
+                "query": topic,
+                "aliases": [],
+            }
+        ]
+
+    def _normalize_shared_query_concepts(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            concepts: list[dict[str, Any]] = []
+            for index, item in enumerate(value, start=1):
+                if isinstance(item, str):
+                    label = item.strip()
+                    if not label:
+                        continue
+                    concepts.append(
+                        {
+                            "id": self._slug_id(label, f"concept_{index}"),
+                            "label": label,
+                            "query": label,
+                            "terms": [label],
+                        }
+                    )
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or item.get("name") or f"Concept {index}").strip()
+                terms = self._as_string_list(item.get("terms"), fallback=[label])
+                query = str(item.get("query") or "").strip()
+                if not query:
+                    query = " OR ".join(f'"{term}"' if " " in term else term for term in terms if term) or label
+                concepts.append(
+                    {
+                        "id": self._slug_id(str(item.get("id") or label), f"concept_{index}"),
+                        "label": label,
+                        "query": query,
+                        "terms": terms,
+                    }
+                )
+            return concepts
+        return []
+
     def _normalize_research_plan(self, args: dict[str, Any]) -> dict[str, Any]:
         topic = str(args.get("topic") or "").strip() or "Untitled research topic"
         objective = str(args.get("objective") or "").strip() or f"Find and rank the most relevant papers for: {topic}"
-        target_count = parse_bounded_int(args.get("target_count"), default=20, minimum=1, maximum=100)
+        target_count = parse_bounded_int(
+            args.get("target_count_per_branch") or args.get("target_count"),
+            default=20,
+            minimum=1,
+            maximum=100,
+        )
         per_database = target_count * 2
         databases = self._as_string_list(
-            args.get("databases"),
+            args.get("active_databases") or args.get("databases"),
             fallback=["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"],
         )
-        inclusion = self._as_string_list(
-            args.get("inclusion_criteria"),
-            fallback=[
-                "The paper directly addresses the requested topic.",
-                "The abstract or full text contains enough evidence for screening.",
-            ],
+        search_branches = self._normalize_search_branches(
+            args.get("search_branches") or args.get("search_topics"),
+            topic=topic,
         )
+        shared_query_concepts = self._normalize_shared_query_concepts(args.get("shared_query_concepts"))
         exclusion = self._as_string_list(
             args.get("exclusion_criteria"),
             fallback=[
@@ -2336,17 +2438,15 @@ class HelperAIService:
                     ),
                 }
             )
-        if not database_queries:
-            database_queries = [
-                {
-                    "database": database,
-                    "query": topic,
-                    "rationale": "Initial broad query derived from the user topic.",
-                    "candidate_limit": per_database,
-                }
-                for database in databases
-            ]
         candidate_budget = args.get("candidate_budget") if isinstance(args.get("candidate_budget"), dict) else {}
+        normalized_budget = {
+            "target_count": parse_bounded_int(candidate_budget.get("target_count"), default=target_count, minimum=1, maximum=100),
+            "per_database": parse_bounded_int(candidate_budget.get("per_database"), default=per_database, minimum=1, maximum=500),
+            "rule": str(candidate_budget.get("rule") or "Fetch target_count * 2 candidates per enabled database in the first pass.").strip(),
+        }
+        total_queries = max(1, len(search_branches)) * max(1, len(databases))
+        estimated_candidates = total_queries * normalized_budget["per_database"]
+        estimated_time_seconds = max(20, ((estimated_candidates + 39) // 40) * 20)
         screening_json_schema = args.get("screening_json_schema")
         if not isinstance(screening_json_schema, dict):
             screening_json_schema = {
@@ -2360,13 +2460,15 @@ class HelperAIService:
             "topic": topic,
             "objective": objective,
             "target_count": target_count,
+            "target_count_per_branch": target_count,
             "databases": databases,
-            "candidate_budget": {
-                "target_count": parse_bounded_int(candidate_budget.get("target_count"), default=target_count, minimum=1, maximum=100),
-                "per_database": parse_bounded_int(candidate_budget.get("per_database"), default=per_database, minimum=1, maximum=500),
-                "rule": str(candidate_budget.get("rule") or "Fetch target_count * 2 candidates per enabled database in the first pass.").strip(),
-            },
-            "inclusion_criteria": inclusion,
+            "active_databases": databases,
+            "search_branches": search_branches,
+            "shared_query_concepts": shared_query_concepts,
+            "candidate_budget": normalized_budget,
+            "total_queries": total_queries,
+            "estimated_candidates": estimated_candidates,
+            "estimated_time_seconds": estimated_time_seconds,
             "exclusion_criteria": exclusion,
             "screening_criteria": screening_criteria,
             "database_queries": database_queries,
@@ -2391,16 +2493,18 @@ class HelperAIService:
     @staticmethod
     def _research_plan_preview_text(plan: dict[str, Any]) -> str:
         topic = plan.get("topic") or "Research topic"
-        target_count = plan.get("target_count") or 20
+        target_count = plan.get("target_count_per_branch") or plan.get("target_count") or 20
         databases = ", ".join(plan.get("databases") or [])
         criteria = plan.get("screening_criteria") or []
-        query_count = len(plan.get("database_queries") or [])
+        query_count = plan.get("total_queries") or len(plan.get("database_queries") or [])
+        branch_count = len(plan.get("search_branches") or [])
         return (
             f"Researcher plan created for **{topic}**.\n\n"
-            f"- Target papers: {target_count}\n"
+            f"- Target papers per branch: {target_count}\n"
             f"- Databases: {databases or 'not specified'}\n"
+            f"- Search branches: {branch_count or 1}\n"
             f"- Screening criteria: {len(criteria)}\n"
-            f"- First-pass database queries: {query_count}\n\n"
+            f"- Executable database queries: {query_count}\n\n"
             "Review the plan preview, ask for changes in the chat, or execute it when the screening pipeline is ready."
         )
 

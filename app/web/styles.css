@@ -5864,6 +5864,81 @@ body.is-document-viewer-open .native-document-viewer {
   gap: 8px;
 }
 
+.research-plan-edit-panel {
+  padding: 12px;
+  border: 1px solid rgba(37, 99, 235, .18);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.research-plan-edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.research-plan-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.research-plan-edit-grid label,
+.research-plan-db-edit {
+  display: grid;
+  gap: 5px;
+}
+
+.research-plan-edit-grid span,
+.research-plan-db-edit > span,
+.research-plan-criterion-edit span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.research-plan-edit-grid input,
+.research-plan-edit-line input,
+.research-plan-criterion-edit input[type="number"],
+.research-plan-branch-edit input,
+.research-plan-branch-edit textarea,
+.research-plan-criterion textarea,
+.research-plan-criterion input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(203, 213, 225, .9);
+  border-radius: 8px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: .84rem;
+  padding: 8px 9px;
+}
+
+.research-plan-branch-edit textarea,
+.research-plan-criterion textarea {
+  resize: vertical;
+}
+
+.research-plan-db-edit > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.research-plan-db-edit label,
+.research-plan-criterion-edit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid rgba(203, 213, 225, .78);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .research-plan-detail-section h4 {
   margin: 0;
   color: #0f172a;
@@ -5912,7 +5987,8 @@ body.is-document-viewer-open .native-document-viewer {
 
 .research-plan-detail-grid div,
 .research-plan-query-item,
-.research-plan-criterion {
+.research-plan-criterion,
+.research-plan-branch-edit {
   border: 1px solid rgba(203, 213, 225, .78);
   border-radius: 8px;
   background: #fff;
@@ -5939,16 +6015,33 @@ body.is-document-viewer-open .native-document-viewer {
 }
 
 .research-plan-query-list,
-.research-plan-criteria-list {
+.research-plan-criteria-list,
+.research-plan-edit-list,
+.research-plan-branch-edit-list {
   display: grid;
   gap: 8px;
 }
 
 .research-plan-query-item,
-.research-plan-criterion {
+.research-plan-criterion,
+.research-plan-branch-edit {
   display: grid;
   gap: 8px;
   padding: 10px;
+}
+
+.research-plan-branch-edit label,
+.research-plan-criterion label {
+  display: grid;
+  gap: 5px;
+}
+
+.research-plan-branch-edit span,
+.research-plan-criterion label > span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
 }
 
 .research-plan-query-head {
@@ -5966,6 +6059,31 @@ body.is-document-viewer-open .native-document-viewer {
 .research-plan-criterion > div {
   display: grid;
   gap: 2px;
+}
+
+.research-plan-criterion-edit {
+  display: flex !important;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.research-plan-criterion-edit label:first-child {
+  width: 130px;
+}
+
+.research-plan-edit-line {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.research-plan-edit-line > span {
+  color: #64748b;
+  font-size: .75rem;
+  font-weight: 850;
+  text-align: center;
 }
 
 .native-assistant-panel .btn-send {

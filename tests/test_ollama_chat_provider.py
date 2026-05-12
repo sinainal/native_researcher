@@ -130,10 +130,62 @@ def test_research_plan_tool_normalizes_defaults() -> None:
         assert action.name == "create_research_plan"
         assert action.details["execution_state"] == "planned"
         assert plan["target_count"] == 20
+        assert plan["target_count_per_branch"] == 20
         assert plan["candidate_budget"]["per_database"] == 40
         assert plan["databases"] == ["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"]
+        assert plan["active_databases"] == plan["databases"]
+        assert plan["search_branches"][0]["label"] == "dopamine D1-D5 docking papers with interaction maps"
+        assert plan["total_queries"] == 5
+        assert plan["estimated_candidates"] == 200
+        assert plan["estimated_time_seconds"] == 100
         assert plan["screening_criteria"][0]["id"] == "docking_performed"
         assert "sum(score_i ** 2" in plan["scoring_rule"]
+
+    asyncio.run(runner())
+
+
+def test_research_plan_tool_normalizes_search_branches_and_active_databases() -> None:
+    async def runner() -> None:
+        service = HelperAIService(thread_cache=TTLCache(ttl_seconds=60, max_entries=4))
+        result, _action = await service._execute_research_tool_call(
+            "create_research_plan",
+            {
+                "topic": "multi-target residue mapping",
+                "objective": "Find residue-level evidence across multiple targets.",
+                "target_count_per_branch": 10,
+                "active_databases": ["PubMed", "OpenAlex"],
+                "search_branches": [
+                    {
+                        "label": "Target A",
+                        "query": '"Target A" OR "Alias A"',
+                        "aliases": ["Alias A"],
+                    },
+                    {
+                        "label": "Target B",
+                        "query": '"Target B" OR "Alias B"',
+                        "aliases": ["Alias B"],
+                    },
+                ],
+                "shared_query_concepts": [
+                    {
+                        "label": "Residue evidence",
+                        "query": '"binding site" OR mutagenesis OR structure',
+                        "terms": ["binding site", "mutagenesis", "structure"],
+                    }
+                ],
+            },
+        )
+
+        plan = result["plan"]
+        assert plan["databases"] == ["PubMed", "OpenAlex"]
+        assert plan["active_databases"] == ["PubMed", "OpenAlex"]
+        assert [item["id"] for item in plan["search_branches"]] == ["target_a", "target_b"]
+        assert plan["search_branches"][0]["query"] == '"Target A" OR "Alias A"'
+        assert plan["shared_query_concepts"][0]["query"] == '"binding site" OR mutagenesis OR structure'
+        assert plan["candidate_budget"]["per_database"] == 20
+        assert plan["total_queries"] == 4
+        assert plan["estimated_candidates"] == 80
+        assert plan["estimated_time_seconds"] == 40
 
     asyncio.run(runner())
 

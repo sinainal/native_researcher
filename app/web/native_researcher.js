@@ -229,6 +229,8 @@ const assistantModelThinkingSupport = {
   "Gemini 2.5 Flash Lite": false,
 };
 
+const researchPlanDatabaseOptions = ["PubMed", "PMC", "Europe PMC", "OpenAlex", "CORE", "arXiv"];
+
 const assistantModelStorageKey = "native_researcher_model";
 const assistantModelVisibilityStorageKey = "native_researcher_model_visibility";
 const assistantSidebarStorageKey = "native_researcher_sidebar_open";
@@ -2115,6 +2117,16 @@ function cloneJson(value) {
 function sanitizeAssistantAction(action) {
   if (!action) return null;
   const details = action.details || {};
+  if (action.name === "create_research_plan") {
+    return {
+      type: action.type,
+      name: action.name,
+      title: action.title,
+      status: action.status,
+      call_id: action.call_id,
+      details: cloneJson(details),
+    };
+  }
   return {
     type: action.type,
     name: action.name,
@@ -3893,11 +3905,161 @@ function researchPlanListMarkup(items, emptyText = "Not specified.") {
   return `<ul>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
-function researchPlanDetailMarkup(action) {
+function researchPlanDatabases(plan) {
+  const values = Array.isArray(plan?.active_databases) && plan.active_databases.length
+    ? plan.active_databases
+    : Array.isArray(plan?.databases) ? plan.databases : [];
+  return values.filter((item) => String(item || "").trim());
+}
+
+function splitResearchPlanTerms(value) {
+  return String(value || "")
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function researchPlanSearchBranches(plan) {
+  const branches = Array.isArray(plan?.search_branches) ? plan.search_branches : [];
+  if (branches.length) return branches;
+  const legacyTopics = Array.isArray(plan?.search_topics) ? plan.search_topics : [];
+  if (legacyTopics.length) {
+    return legacyTopics.map((item) => ({
+      id: item.id,
+      label: item.label || "Branch",
+      query: item.query || [...(item.must_include || []), ...(item.synonyms || [])].filter(Boolean).join(" OR "),
+      aliases: item.aliases || item.synonyms || [],
+    }));
+  }
+  return [{
+    id: "main_branch",
+    label: plan?.topic || "Main topic",
+    query: plan?.topic || "Main topic",
+    aliases: [],
+  }];
+}
+
+function researchPlanSharedConcepts(plan) {
+  const concepts = Array.isArray(plan?.shared_query_concepts) ? plan.shared_query_concepts : [];
+  return concepts.map((item, index) => {
+    if (typeof item === "string") {
+      return { id: `concept_${index + 1}`, label: item, query: item, terms: [item] };
+    }
+    return {
+      id: item.id || `concept_${index + 1}`,
+      label: item.label || `Concept ${index + 1}`,
+      query: item.query || (item.terms || []).join(" OR ") || item.label || "",
+      terms: Array.isArray(item.terms) ? item.terms : [],
+    };
+  });
+}
+
+function researchPlanTotalQueries(plan) {
+  if (Number.isFinite(Number(plan?.total_queries))) return Number(plan.total_queries);
+  return Math.max(1, researchPlanDatabases(plan).length) * Math.max(1, researchPlanSearchBranches(plan).length);
+}
+
+function researchPlanEstimatedCandidates(plan) {
+  if (Number.isFinite(Number(plan?.estimated_candidates))) return Number(plan.estimated_candidates);
+  const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count || 20) * 2));
+  return researchPlanTotalQueries(plan) * Math.max(1, perDatabase);
+}
+
+function researchPlanEstimatedSeconds(plan) {
+  if (Number.isFinite(Number(plan?.estimated_time_seconds))) return Number(plan.estimated_time_seconds);
+  return Math.max(20, Math.ceil(researchPlanEstimatedCandidates(plan) / 40) * 20);
+}
+
+function formatResearchPlanDuration(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  if (value < 60) return `${Math.ceil(value)} sec`;
+  const minutes = Math.ceil(value / 60);
+  return `${minutes} min`;
+}
+
+function recomputeResearchPlanEstimates(plan) {
+  const targetCount = Math.max(1, Number.parseInt(String(plan.target_count || 20), 10) || 20);
+  if (!plan.candidate_budget || typeof plan.candidate_budget !== "object") plan.candidate_budget = {};
+  plan.target_count = targetCount;
+  plan.target_count_per_branch = targetCount;
+  plan.active_databases = researchPlanDatabases(plan);
+  plan.databases = plan.active_databases;
+  plan.search_branches = researchPlanSearchBranches(plan);
+  plan.shared_query_concepts = researchPlanSharedConcepts(plan);
+  plan.candidate_budget.target_count = targetCount;
+  plan.candidate_budget.per_database = Math.max(1, Number.parseInt(String(plan.candidate_budget.per_database || targetCount * 2), 10) || targetCount * 2);
+  plan.total_queries = Math.max(1, plan.search_branches.length) * Math.max(1, plan.active_databases.length);
+  plan.estimated_candidates = plan.total_queries * plan.candidate_budget.per_database;
+  plan.estimated_time_seconds = Math.max(20, Math.ceil(plan.estimated_candidates / 40) * 20);
+  return plan;
+}
+
+function researchPlanEditableListMarkup(kind, items, placeholder) {
+  const list = Array.isArray(items) ? items : [];
+  return `
+    <div class="research-plan-edit-list" data-plan-list="${escapeHtml(kind)}">
+      ${list.map((item, index) => `
+        <label class="research-plan-edit-line">
+          <span>${escapeHtml(index + 1)}</span>
+          <input type="text" value="${escapeHtml(item)}" data-plan-list-item="${escapeHtml(kind)}" data-list-index="${escapeHtml(index)}">
+        </label>
+      `).join("")}
+      <label class="research-plan-edit-line is-new">
+        <span>+</span>
+        <input type="text" placeholder="${escapeHtml(placeholder)}" data-plan-list-new="${escapeHtml(kind)}">
+      </label>
+    </div>
+  `;
+}
+
+function researchPlanBranchEditMarkup(branches) {
+  return `
+    <div class="research-plan-branch-edit-list">
+      ${branches.map((branch, index) => `
+        <div class="research-plan-branch-edit" data-branch-index="${escapeHtml(index)}">
+          <label><span>Branch label</span><input type="text" value="${escapeHtml(branch.label || "")}" data-branch-label="${escapeHtml(index)}"></label>
+          <label><span>Branch query</span><textarea rows="2" data-branch-query="${escapeHtml(index)}">${escapeHtml(branch.query || "")}</textarea></label>
+          <label><span>Aliases</span><textarea rows="2" data-branch-aliases="${escapeHtml(index)}">${escapeHtml((branch.aliases || []).join(", "))}</textarea></label>
+        </div>
+      `).join("")}
+      <div class="research-plan-branch-edit is-new">
+        <label><span>New branch</span><input type="text" placeholder="Branch label" data-new-branch-label></label>
+        <label><span>Branch query</span><textarea rows="2" placeholder="Broad OR query for this branch" data-new-branch-query></textarea></label>
+        <label><span>Aliases</span><textarea rows="2" placeholder="Comma-separated aliases" data-new-branch-aliases></textarea></label>
+      </div>
+    </div>
+  `;
+}
+
+function researchPlanConceptEditMarkup(concepts) {
+  return `
+    <div class="research-plan-branch-edit-list">
+      ${concepts.map((concept, index) => `
+        <div class="research-plan-branch-edit" data-concept-index="${escapeHtml(index)}">
+          <label><span>Concept label</span><input type="text" value="${escapeHtml(concept.label || "")}" data-concept-label="${escapeHtml(index)}"></label>
+          <label><span>Concept query</span><textarea rows="2" data-concept-query="${escapeHtml(index)}">${escapeHtml(concept.query || "")}</textarea></label>
+          <label><span>Terms</span><textarea rows="2" data-concept-terms="${escapeHtml(index)}">${escapeHtml((concept.terms || []).join(", "))}</textarea></label>
+        </div>
+      `).join("")}
+      <div class="research-plan-branch-edit is-new">
+        <label><span>New shared concept</span><input type="text" placeholder="Concept label" data-new-concept-label></label>
+        <label><span>Concept query</span><textarea rows="2" placeholder="OR query added to every branch" data-new-concept-query></textarea></label>
+        <label><span>Terms</span><textarea rows="2" placeholder="Comma-separated terms" data-new-concept-terms></textarea></label>
+      </div>
+    </div>
+  `;
+}
+
+function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
   const plan = action?.details?.plan || {};
-  const databases = Array.isArray(plan.databases) ? plan.databases : [];
+  const databases = researchPlanDatabases(plan);
   const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
   const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
+  const searchBranches = researchPlanSearchBranches(plan);
+  const sharedConcepts = researchPlanSharedConcepts(plan);
+  const totalQueries = researchPlanTotalQueries(plan);
+  const estimatedCandidates = researchPlanEstimatedCandidates(plan);
+  const estimatedSeconds = researchPlanEstimatedSeconds(plan);
   const rawJson = JSON.stringify(
     {
       action: {
@@ -3912,23 +4074,66 @@ function researchPlanDetailMarkup(action) {
     2,
   );
   return `
-    <div class="research-plan-detail">
+    <div class="research-plan-detail" data-message-id="${escapeHtml(messageId)}" data-action-index="${escapeHtml(actionIndex)}">
+      <section class="research-plan-detail-section research-plan-edit-panel">
+        <div class="research-plan-edit-head">
+          <h4>Editable Plan Basics</h4>
+          <button class="btn btn-primary btn-sm" type="button" data-research-plan-save-edits="true">Save manual edits</button>
+        </div>
+        <div class="research-plan-edit-grid">
+          <label>
+            <span>Target / branch</span>
+            <input type="number" min="1" max="100" value="${escapeHtml(plan.target_count_per_branch || plan.target_count || 20)}" data-plan-edit="target_count">
+          </label>
+          <label>
+            <span>Per database</span>
+            <input type="number" min="1" max="500" value="${escapeHtml(plan.candidate_budget?.per_database || Number(plan.target_count || 20) * 2)}" data-plan-edit="per_database">
+          </label>
+        </div>
+        <div class="research-plan-db-edit">
+          <span>Active databases</span>
+          <div>
+            ${researchPlanDatabaseOptions.map((database) => `
+              <label>
+                <input type="checkbox" value="${escapeHtml(database)}" data-plan-db-edit ${databases.includes(database) ? "checked" : ""}>
+                <span>${escapeHtml(database)}</span>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+      </section>
       <section class="research-plan-detail-section">
         <h4>Objective</h4>
         <p>${escapeHtml(plan.objective || "No objective provided.")}</p>
       </section>
       <section class="research-plan-detail-section">
+        <h4>Search Branches</h4>
+        ${researchPlanBranchEditMarkup(searchBranches)}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Shared Query Concepts</h4>
+        <p>Each shared concept query is combined with every search branch during execution.</p>
+        ${researchPlanConceptEditMarkup(sharedConcepts)}
+      </section>
+      <section class="research-plan-detail-section">
         <h4>Candidate Budget</h4>
         <div class="research-plan-detail-grid">
-          <div><span>Target</span><strong>${escapeHtml(plan.target_count || 20)}</strong></div>
+          <div><span>Target / branch</span><strong>${escapeHtml(plan.target_count_per_branch || plan.target_count || 20)}</strong></div>
           <div><span>Per database</span><strong>${escapeHtml(plan.candidate_budget?.per_database || "-")}</strong></div>
           <div><span>Sources</span><strong>${escapeHtml(databases.length)}</strong></div>
-          <div><span>Queries</span><strong>${escapeHtml(queries.length)}</strong></div>
+          <div><span>Total queries</span><strong>${escapeHtml(totalQueries)}</strong></div>
+          <div><span>Estimated pull</span><strong>${escapeHtml(estimatedCandidates)}</strong></div>
+          <div><span>Estimated time</span><strong>${escapeHtml(formatResearchPlanDuration(estimatedSeconds))}</strong></div>
         </div>
         <p>${escapeHtml(plan.candidate_budget?.rule || "Fetch target_count * 2 candidates per enabled database in the first pass.")}</p>
       </section>
       <section class="research-plan-detail-section">
-        <h4>Database Queries</h4>
+        <h4>Active Databases</h4>
+        <p>${escapeHtml(databases.join(", ") || "Not specified")}</p>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Backend Query Preview</h4>
+        <p>Execution will run each search branch against every active database, with shared query concepts added to each branch.</p>
         ${queries.length ? `
           <div class="research-plan-query-list">
             ${queries.map((item) => `
@@ -3942,13 +4147,12 @@ function researchPlanDetailMarkup(action) {
               </div>
             `).join("")}
           </div>
-        ` : "<p>No database queries provided.</p>"}
+        ` : "<p>No DB-specific queries are stored yet.</p>"}
       </section>
       <section class="research-plan-detail-section">
         <h4>Screening Criteria</h4>
-        ${criteria.length ? `
-          <div class="research-plan-criteria-list">
-            ${criteria.map((item) => `
+        <div class="research-plan-criteria-list">
+          ${criteria.length ? criteria.map((item, index) => `
               <div class="research-plan-criterion">
                 <div>
                   <strong>${escapeHtml(item.label || item.id || "Criterion")}</strong>
@@ -3956,18 +4160,30 @@ function researchPlanDetailMarkup(action) {
                 </div>
                 <p>${escapeHtml(item.description || "")}</p>
                 <p>${escapeHtml(item.scoring_guidance || "")}</p>
+                <div class="research-plan-criterion-edit">
+                  <label><span>Weight</span><input type="number" step="0.1" min="0" max="10" value="${escapeHtml(item.weight ?? 1)}" data-criterion-weight="${escapeHtml(index)}"></label>
+                  <label><input type="checkbox" ${item.required ? "checked" : ""} data-criterion-required="${escapeHtml(index)}"><span>Required</span></label>
+                </div>
               </div>
-            `).join("")}
+            `).join("") : "<p>No screening criteria provided.</p>"}
+          <div class="research-plan-criterion is-new">
+            <div>
+              <strong>New criterion</strong>
+              <span>Add scoring signal</span>
+            </div>
+            <label><span>Label</span><input type="text" placeholder="Criterion label" data-new-criterion-label></label>
+            <label><span>Description</span><textarea rows="2" placeholder="What the screener should score" data-new-criterion-description></textarea></label>
+            <label><span>Guidance</span><textarea rows="2" placeholder="Score 1.0 when..." data-new-criterion-guidance></textarea></label>
+            <div class="research-plan-criterion-edit">
+              <label><span>Weight</span><input type="number" step="0.1" min="0" max="10" value="1" data-new-criterion-weight></label>
+              <label><input type="checkbox" data-new-criterion-required><span>Required</span></label>
+            </div>
           </div>
-        ` : "<p>No screening criteria provided.</p>"}
-      </section>
-      <section class="research-plan-detail-section">
-        <h4>Inclusion Criteria</h4>
-        ${researchPlanListMarkup(plan.inclusion_criteria)}
+        </div>
       </section>
       <section class="research-plan-detail-section">
         <h4>Exclusion Criteria</h4>
-        ${researchPlanListMarkup(plan.exclusion_criteria)}
+        ${researchPlanEditableListMarkup("exclusion_criteria", plan.exclusion_criteria, "Add exclusion rule")}
       </section>
       <section class="research-plan-detail-section">
         <h4>Scoring Rule</h4>
@@ -3996,8 +4212,135 @@ function openResearchPlanPopup(messageId, actionIndex) {
     action.details?.execution_state ? `State ${action.details.execution_state}` : "",
     plan.target_count ? `Target ${plan.target_count}` : "",
   ].filter(Boolean).join(" • ");
-  els.detailPopupBody.innerHTML = researchPlanDetailMarkup(action);
+  els.detailPopupBody.innerHTML = researchPlanDetailMarkup(action, messageId, actionIndex);
+  bindResearchPlanManualEditEvents(els.detailPopupBody);
   setDetailPopupOpen(true);
+}
+
+function saveResearchPlanManualEdits(messageId, actionIndex, root) {
+  const action = researchPlanDetailAction(messageId, actionIndex);
+  if (!action) return;
+  const plan = cloneJson(action.details?.plan || {});
+  const targetInput = root.querySelector("[data-plan-edit='target_count']");
+  const perDatabaseInput = root.querySelector("[data-plan-edit='per_database']");
+  const targetCount = Number.parseInt(String(targetInput?.value || ""), 10);
+  const perDatabase = Number.parseInt(String(perDatabaseInput?.value || ""), 10);
+  if (Number.isFinite(targetCount)) plan.target_count = Math.min(100, Math.max(1, targetCount));
+  if (!plan.candidate_budget || typeof plan.candidate_budget !== "object") plan.candidate_budget = {};
+  if (Number.isFinite(perDatabase)) plan.candidate_budget.per_database = Math.min(500, Math.max(1, perDatabase));
+  const activeDatabases = [...root.querySelectorAll("[data-plan-db-edit]:checked")]
+    .map((node) => node.value)
+    .filter(Boolean);
+  if (activeDatabases.length) {
+    plan.active_databases = activeDatabases;
+    plan.databases = activeDatabases;
+  }
+  root.querySelectorAll("[data-criterion-weight]").forEach((node) => {
+    const index = Number(node.dataset.criterionWeight);
+    if (!Array.isArray(plan.screening_criteria) || !plan.screening_criteria[index]) return;
+    const nextWeight = Number.parseFloat(String(node.value || ""));
+    if (Number.isFinite(nextWeight)) plan.screening_criteria[index].weight = Math.max(0, Math.min(10, nextWeight));
+  });
+  root.querySelectorAll("[data-criterion-required]").forEach((node) => {
+    const index = Number(node.dataset.criterionRequired);
+    if (!Array.isArray(plan.screening_criteria) || !plan.screening_criteria[index]) return;
+    plan.screening_criteria[index].required = Boolean(node.checked);
+  });
+  const newCriterionLabel = root.querySelector("[data-new-criterion-label]")?.value.trim();
+  if (newCriterionLabel) {
+    if (!Array.isArray(plan.screening_criteria)) plan.screening_criteria = [];
+    const newCriterionWeight = Number.parseFloat(String(root.querySelector("[data-new-criterion-weight]")?.value || ""));
+    plan.screening_criteria.push({
+      id: newCriterionLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `criterion_${plan.screening_criteria.length + 1}`,
+      label: newCriterionLabel,
+      description: root.querySelector("[data-new-criterion-description]")?.value.trim() || newCriterionLabel,
+      required: Boolean(root.querySelector("[data-new-criterion-required]")?.checked),
+      weight: Number.isFinite(newCriterionWeight) ? Math.max(0, Math.min(10, newCriterionWeight)) : 1,
+      scoring_guidance: root.querySelector("[data-new-criterion-guidance]")?.value.trim() || "Score 1.0 for explicit evidence, 0.5 for partial evidence, and 0.0 when absent.",
+    });
+  }
+  const branches = [...root.querySelectorAll("[data-branch-index]")].map((node) => {
+    const index = node.dataset.branchIndex;
+    const label = root.querySelector(`[data-branch-label='${index}']`)?.value.trim();
+    if (!label) return null;
+    const aliases = splitResearchPlanTerms(root.querySelector(`[data-branch-aliases='${index}']`)?.value || "");
+    const query = root.querySelector(`[data-branch-query='${index}']`)?.value.trim()
+      || [label, ...aliases].filter(Boolean).join(" OR ");
+    return {
+      id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `branch_${Number(index) + 1}`,
+      label,
+      query,
+      aliases,
+    };
+  }).filter(Boolean);
+  const newBranchLabel = root.querySelector("[data-new-branch-label]")?.value.trim();
+  if (newBranchLabel) {
+    const aliases = splitResearchPlanTerms(root.querySelector("[data-new-branch-aliases]")?.value || "");
+    branches.push({
+      id: newBranchLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `branch_${branches.length + 1}`,
+      label: newBranchLabel,
+      query: root.querySelector("[data-new-branch-query]")?.value.trim() || [newBranchLabel, ...aliases].filter(Boolean).join(" OR "),
+      aliases,
+    });
+  }
+  if (branches.length) plan.search_branches = branches;
+  const concepts = [...root.querySelectorAll("[data-concept-index]")].map((node) => {
+    const index = node.dataset.conceptIndex;
+    const label = root.querySelector(`[data-concept-label='${index}']`)?.value.trim();
+    if (!label) return null;
+    const terms = splitResearchPlanTerms(root.querySelector(`[data-concept-terms='${index}']`)?.value || "");
+    return {
+      id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${Number(index) + 1}`,
+      label,
+      query: root.querySelector(`[data-concept-query='${index}']`)?.value.trim() || terms.join(" OR ") || label,
+      terms,
+    };
+  }).filter(Boolean);
+  const newConceptLabel = root.querySelector("[data-new-concept-label]")?.value.trim();
+  if (newConceptLabel) {
+    const terms = splitResearchPlanTerms(root.querySelector("[data-new-concept-terms]")?.value || "");
+    concepts.push({
+      id: newConceptLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${concepts.length + 1}`,
+      label: newConceptLabel,
+      query: root.querySelector("[data-new-concept-query]")?.value.trim() || terms.join(" OR ") || newConceptLabel,
+      terms,
+    });
+  }
+  plan.shared_query_concepts = concepts;
+  ["exclusion_criteria"].forEach((key) => {
+    const values = [...root.querySelectorAll(`[data-plan-list-item='${key}']`)]
+      .map((node) => node.value.trim())
+      .filter(Boolean);
+    const newValue = root.querySelector(`[data-plan-list-new='${key}']`)?.value.trim();
+    if (newValue) values.push(newValue);
+    plan[key] = values;
+  });
+  recomputeResearchPlanEstimates(plan);
+  action.details = {
+    ...(action.details || {}),
+    plan,
+    revision_state: "manual",
+  };
+  action.title = "Research plan edited";
+  const message = state.assistantMessages.find((item) => item.id === messageId);
+  if (message) {
+    scheduleAssistantMessageUpdate(message);
+  }
+  syncCurrentSession();
+  openResearchPlanPopup(messageId, actionIndex);
+}
+
+function bindResearchPlanManualEditEvents(root = document) {
+  root.querySelectorAll("[data-research-plan-save-edits]").forEach((node) => {
+    if (node.dataset.boundManualPlanSave === "true") return;
+    node.dataset.boundManualPlanSave = "true";
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      const container = node.closest(".research-plan-detail");
+      if (!container) return;
+      saveResearchPlanManualEdits(container.dataset.messageId || "", container.dataset.actionIndex || "0", container);
+    });
+  });
 }
 
 function bindResearchPlanPreviewEvents(root = document) {
@@ -4833,10 +5176,11 @@ function upsertAssistantAction(actions, action, callId) {
 
 function researchPlanActionMarkup(action, messageId = "", actionIndex = 0) {
   const plan = action?.details?.plan || {};
-  const databases = Array.isArray(plan.databases) ? plan.databases : [];
+  const databases = researchPlanDatabases(plan);
   const criteria = Array.isArray(plan.screening_criteria) ? plan.screening_criteria : [];
-  const queries = Array.isArray(plan.database_queries) ? plan.database_queries : [];
-  const inclusion = Array.isArray(plan.inclusion_criteria) ? plan.inclusion_criteria : [];
+  const branches = researchPlanSearchBranches(plan);
+  const totalQueries = researchPlanTotalQueries(plan);
+  const exclusions = Array.isArray(plan.exclusion_criteria) ? plan.exclusion_criteria : [];
   return `
     <div
       class="research-plan-preview"
@@ -4856,18 +5200,24 @@ function researchPlanActionMarkup(action, messageId = "", actionIndex = 0) {
       </div>
       <div class="research-plan-preview-objective">${escapeHtml(plan.objective || "No objective provided.")}</div>
       <div class="research-plan-preview-grid">
-        <div><span>Target</span><strong>${escapeHtml(plan.target_count || 20)}</strong></div>
+        <div><span>Target / branch</span><strong>${escapeHtml(plan.target_count_per_branch || plan.target_count || 20)}</strong></div>
         <div><span>Databases</span><strong>${escapeHtml(databases.length || 0)}</strong></div>
         <div><span>Criteria</span><strong>${escapeHtml(criteria.length || 0)}</strong></div>
-        <div><span>Queries</span><strong>${escapeHtml(queries.length || 0)}</strong></div>
+        <div><span>Branches</span><strong>${escapeHtml(branches.length || 0)}</strong></div>
+        <div><span>Total queries</span><strong>${escapeHtml(totalQueries)}</strong></div>
+        <div><span>Est. pull</span><strong>${escapeHtml(researchPlanEstimatedCandidates(plan))}</strong></div>
       </div>
       <div class="research-plan-preview-section">
         <span>Sources</span>
         <p>${escapeHtml(databases.join(", ") || "Not specified")}</p>
       </div>
       <div class="research-plan-preview-section">
-        <span>First inclusion rules</span>
-        <ul>${(inclusion.slice(0, 4).length ? inclusion.slice(0, 4) : ["No inclusion criteria provided."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        <span>Search branches</span>
+        <p>${escapeHtml(branches.map((item) => item.label).join(", ") || "Main branch")}</p>
+      </div>
+      <div class="research-plan-preview-section">
+        <span>First exclusion rules</span>
+        <ul>${(exclusions.slice(0, 4).length ? exclusions.slice(0, 4) : ["No exclusion criteria provided."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
       </div>
       <div class="research-plan-preview-actions">
         <button class="btn btn-secondary btn-sm research-plan-details-btn" type="button" data-research-plan-action="details">Details</button>

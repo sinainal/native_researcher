@@ -3945,23 +3945,57 @@ function researchPlanSharedConcepts(plan) {
 }
 
 function researchPlanRawSearchQueries(plan) {
-  if (Array.isArray(plan?.raw_search_queries) && plan.raw_search_queries.length) {
+  const existingQueries = Array.isArray(plan?.raw_search_queries) ? plan.raw_search_queries : [];
+  const concepts = researchPlanSharedConcepts(plan).filter((item) => item.query);
+  const existingQueriesHaveCategories = !concepts.length
+    || existingQueries.some((item) => item.category_id || item.category_label);
+  if (existingQueries.length && existingQueriesHaveCategories) {
     return plan.raw_search_queries;
   }
   const databases = researchPlanDatabases(plan);
   const branches = researchPlanSearchBranches(plan);
-  const sharedQueries = researchPlanSharedConcepts(plan).map((item) => item.query).filter(Boolean);
+  const conceptQueries = concepts.length ? concepts : [{ id: "", label: "", query: "" }];
   const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
-  return databases.flatMap((database) => branches.map((branch) => {
-    const parts = [branch.query || branch.label, ...sharedQueries].filter(Boolean);
+  return databases.flatMap((database) => branches.flatMap((branch) => conceptQueries.map((concept) => {
+    const parts = [branch.query || branch.label, concept.query].filter(Boolean);
     return {
       database,
       branch_id: branch.id || "",
       branch_label: branch.label || "",
+      category_id: concept.id || "",
+      category_label: concept.label || "",
       query: parts.map((part) => `(${part})`).join(" AND "),
       candidate_limit: Math.max(1, perDatabase),
     };
-  }));
+  })));
+}
+
+function researchPlanGroupedSearchQueries(rawSearchQueries) {
+  const groups = new Map();
+  (Array.isArray(rawSearchQueries) ? rawSearchQueries : []).forEach((item) => {
+    const key = [
+      item.branch_id || "",
+      item.branch_label || "",
+      item.category_id || "",
+      item.category_label || "",
+      item.query || "",
+      item.candidate_limit || "",
+    ].join("::");
+    const current = groups.get(key) || {
+      branch_id: item.branch_id || "",
+      branch_label: item.branch_label || "Branch",
+      category_id: item.category_id || "",
+      category_label: item.category_label || "",
+      query: item.query || "",
+      candidate_limit: item.candidate_limit || "",
+      databases: [],
+    };
+    if (item.database && !current.databases.includes(item.database)) {
+      current.databases.push(item.database);
+    }
+    groups.set(key, current);
+  });
+  return [...groups.values()];
 }
 
 function researchPlanDisplayPlan(plan, rawSearchQueries, totalQueries, estimatedCandidates, estimatedSeconds) {
@@ -4019,6 +4053,7 @@ function recomputeResearchPlanEstimates(plan) {
   plan.shared_query_concepts = researchPlanSharedConcepts(plan);
   plan.candidate_budget.target_count = targetCount;
   plan.candidate_budget.per_database = Math.max(1, Number.parseInt(String(plan.candidate_budget.per_database || targetCount * 2), 10) || targetCount * 2);
+  delete plan.raw_search_queries;
   plan.raw_search_queries = researchPlanRawSearchQueries(plan);
   plan.total_queries = plan.raw_search_queries.length || (Math.max(1, plan.search_branches.length) * Math.max(1, plan.active_databases.length));
   plan.estimated_candidates = plan.total_queries * plan.candidate_budget.per_database;
@@ -4055,7 +4090,7 @@ function researchPlanBranchEditMarkup(branches) {
       `).join("")}
       <div class="research-plan-branch-edit is-new">
         <label><span>New branch</span><input type="text" placeholder="Branch label" data-new-branch-label></label>
-        <label><span>Search query</span><textarea rows="3" placeholder="Broad query for this branch, including aliases and synonyms" data-new-branch-query></textarea></label>
+        <label><span>Search query</span><textarea rows="3" placeholder="Detailed query for this branch, including aliases and synonyms" data-new-branch-query></textarea></label>
       </div>
     </div>
   `;
@@ -4066,11 +4101,13 @@ function researchPlanConceptEditMarkup(concepts) {
     <div class="research-plan-branch-edit-list">
       ${concepts.map((concept, index) => `
         <div class="research-plan-branch-edit" data-concept-index="${escapeHtml(index)}">
-          <label><span>Shared query</span><textarea rows="3" data-concept-query="${escapeHtml(index)}">${escapeHtml(concept.query || "")}</textarea></label>
+          <label><span>Category label</span><input type="text" value="${escapeHtml(concept.label || `Shared query ${index + 1}`)}" data-concept-label="${escapeHtml(index)}"></label>
+          <label><span>Search query</span><textarea rows="3" data-concept-query="${escapeHtml(index)}">${escapeHtml(concept.query || "")}</textarea></label>
         </div>
       `).join("")}
       <div class="research-plan-branch-edit is-new">
-        <label><span>New shared query</span><textarea rows="3" placeholder="Query block added to every branch" data-new-concept-query></textarea></label>
+        <label><span>New category</span><input type="text" placeholder="Category label" data-new-concept-label></label>
+        <label><span>Search query</span><textarea rows="3" placeholder="Query block added to every branch" data-new-concept-query></textarea></label>
       </div>
     </div>
   `;
@@ -4083,6 +4120,7 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
   const searchBranches = researchPlanSearchBranches(plan);
   const sharedConcepts = researchPlanSharedConcepts(plan);
   const rawSearchQueries = researchPlanRawSearchQueries(plan);
+  const groupedSearchQueries = researchPlanGroupedSearchQueries(rawSearchQueries);
   const totalQueries = researchPlanTotalQueries(plan);
   const estimatedCandidates = researchPlanEstimatedCandidates(plan);
   const estimatedSeconds = researchPlanEstimatedSeconds(plan);
@@ -4139,7 +4177,7 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
       </section>
       <section class="research-plan-detail-section">
         <h4>Shared Query Blocks</h4>
-        <p>Each shared query is combined with every search branch during execution.</p>
+        <p>Each category is searched with every branch during execution.</p>
         ${researchPlanConceptEditMarkup(sharedConcepts)}
       </section>
       <section class="research-plan-detail-section">
@@ -4196,14 +4234,17 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
       </section>
       <section class="research-plan-detail-section">
         <h4>Generated Search Queries</h4>
-        <p>Readonly execution preview. Execute will run these generated branch/database queries.</p>
-        ${rawSearchQueries.length ? `
+        <p>Readonly execution preview. Databases: ${escapeHtml(databases.join(", ") || "not specified")}.</p>
+        ${groupedSearchQueries.length ? `
           <div class="research-plan-query-list">
-            ${rawSearchQueries.map((item) => `
+            ${groupedSearchQueries.map((item) => `
               <div class="research-plan-query-item">
                 <div class="research-plan-query-head">
-                  <strong>${escapeHtml(item.database || "Database")} · ${escapeHtml(item.branch_label || "Branch")}</strong>
+                  <strong>${escapeHtml(item.category_label ? `${item.branch_label || "Branch"} · ${item.category_label}` : item.branch_label || "Branch")}</strong>
                   <span>${escapeHtml(item.candidate_limit || plan.candidate_budget?.per_database || "-")} candidates</span>
+                </div>
+                <div class="research-plan-query-databases">
+                  ${item.databases.map((database) => `<span>${escapeHtml(database)}</span>`).join("")}
                 </div>
                 <code>${escapeHtml(item.query || "")}</code>
               </div>
@@ -4301,7 +4342,7 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
     const index = node.dataset.conceptIndex;
     const query = root.querySelector(`[data-concept-query='${index}']`)?.value.trim();
     if (!query) return null;
-    const label = `Shared query ${Number(index) + 1}`;
+    const label = root.querySelector(`[data-concept-label='${index}']`)?.value.trim() || `Shared query ${Number(index) + 1}`;
     return {
       id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${Number(index) + 1}`,
       label,
@@ -4310,7 +4351,7 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
   }).filter(Boolean);
   const newConceptQuery = root.querySelector("[data-new-concept-query]")?.value.trim();
   if (newConceptQuery) {
-    const label = `Shared query ${concepts.length + 1}`;
+    const label = root.querySelector("[data-new-concept-label]")?.value.trim() || `Shared query ${concepts.length + 1}`;
     concepts.push({
       id: label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `concept_${concepts.length + 1}`,
       label,

@@ -174,7 +174,11 @@ def test_research_plan_tool_normalizes_search_branches_and_active_databases() ->
                         "label": "Residue evidence",
                         "query": '"binding site" OR mutagenesis OR structure',
                         "terms": ["binding site", "mutagenesis", "structure"],
-                    }
+                    },
+                    {
+                        "label": "Computational evidence",
+                        "query": '"molecular dynamics" OR docking OR simulation',
+                    },
                 ],
             },
         )
@@ -188,11 +192,14 @@ def test_research_plan_tool_normalizes_search_branches_and_active_databases() ->
         assert plan["shared_query_concepts"][0]["query"] == '"binding site" OR mutagenesis OR structure'
         assert "terms" not in plan["shared_query_concepts"][0]
         assert plan["candidate_budget"]["per_database"] == 20
-        assert len(plan["raw_search_queries"]) == 4
+        assert len(plan["raw_search_queries"]) == 8
+        assert plan["raw_search_queries"][0]["category_label"] == "Residue evidence"
         assert plan["raw_search_queries"][0]["query"] == '("Target A" OR "Alias A") AND ("binding site" OR mutagenesis OR structure)'
-        assert plan["total_queries"] == 4
-        assert plan["estimated_candidates"] == 80
-        assert plan["estimated_time_seconds"] == 40
+        assert plan["raw_search_queries"][1]["category_label"] == "Computational evidence"
+        assert plan["raw_search_queries"][1]["query"] == '("Target A" OR "Alias A") AND ("molecular dynamics" OR docking OR simulation)'
+        assert plan["total_queries"] == 8
+        assert plan["estimated_candidates"] == 160
+        assert plan["estimated_time_seconds"] == 80
 
     asyncio.run(runner())
 

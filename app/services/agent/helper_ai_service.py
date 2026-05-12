@@ -1895,7 +1895,8 @@ class HelperAIService:
                     },
                     "description": (
                         "Executable main search branches. Split explicit user-named targets, subtypes, "
-                        "categories, or comparable branches. Put aliases and synonyms directly in query."
+                        "categories, or comparable branches. Put aliases, synonyms, spelling variants, "
+                        "abbreviations, and naming variants directly in the query."
                     ),
                 },
                 "shared_query_concepts": {
@@ -1908,7 +1909,10 @@ class HelperAIService:
                         },
                         "required": ["query"],
                     },
-                    "description": "Common query blocks added to every search branch with AND during execution.",
+                    "description": (
+                        "Literature/evidence category query blocks paired with every search branch. "
+                        "Provide at least 3 distinct categories with category labels and detailed query strings."
+                    ),
                 },
                 "exclusion_criteria": {
                     "type": "array",
@@ -2341,22 +2345,34 @@ class HelperAIService:
         shared_query_concepts: list[dict[str, Any]],
         candidate_limit: int,
     ) -> list[dict[str, Any]]:
-        shared_queries = [str(item.get("query") or "").strip() for item in shared_query_concepts if str(item.get("query") or "").strip()]
+        shared_queries = [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "label": str(item.get("label") or "").strip(),
+                "query": str(item.get("query") or "").strip(),
+            }
+            for item in shared_query_concepts
+            if str(item.get("query") or "").strip()
+        ]
         raw_queries: list[dict[str, Any]] = []
         for database in databases:
             for branch in search_branches:
                 branch_query = str(branch.get("query") or branch.get("label") or "").strip()
-                query_parts = [branch_query, *shared_queries]
-                query = " AND ".join(f"({part})" for part in query_parts if part)
-                raw_queries.append(
-                    {
-                        "database": database,
-                        "branch_id": branch.get("id") or "",
-                        "branch_label": branch.get("label") or "",
-                        "query": query,
-                        "candidate_limit": candidate_limit,
-                    }
-                )
+                concept_queries = shared_queries or [{"id": "", "label": "", "query": ""}]
+                for concept in concept_queries:
+                    query_parts = [branch_query, concept["query"]]
+                    query = " AND ".join(f"({part})" for part in query_parts if part)
+                    raw_queries.append(
+                        {
+                            "database": database,
+                            "branch_id": branch.get("id") or "",
+                            "branch_label": branch.get("label") or "",
+                            "category_id": concept["id"],
+                            "category_label": concept["label"],
+                            "query": query,
+                            "candidate_limit": candidate_limit,
+                        }
+                    )
         return raw_queries
 
     def _normalize_research_plan(self, args: dict[str, Any]) -> dict[str, Any]:

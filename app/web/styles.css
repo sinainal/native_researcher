@@ -5856,12 +5856,19 @@ body.is-document-viewer-open .native-document-viewer {
 
 .research-plan-detail {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
 .research-plan-detail-section {
   display: grid;
   gap: 8px;
+  padding: 2px 0 14px;
+  border-bottom: 1px solid rgba(226, 232, 240, .72);
+}
+
+.research-plan-detail-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
 }
 
 .research-plan-edit-panel {
@@ -6048,6 +6055,26 @@ body.is-document-viewer-open .native-document-viewer {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+}
+
+.research-plan-query-databases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.research-plan-query-databases span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid rgba(14, 165, 233, .22);
+  border-radius: 999px;
+  background: #f0f9ff;
+  color: #0369a1;
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
 }
 
 .research-plan-query-head strong,

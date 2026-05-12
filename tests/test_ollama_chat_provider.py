@@ -223,6 +223,69 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
     asyncio.run(runner())
 
 
+def test_research_agent_ollama_retries_when_first_turn_skips_tool(monkeypatch) -> None:
+    seen_messages: list[list[dict[str, object]]] = []
+
+    async def fake_ollama_chat_stream(**kwargs):
+        seen_messages.append(list(kwargs.get("messages") or []))
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            yield {"message": {"content": "I can help you research dopamine receptors."}}
+            return
+        if fake_ollama_chat_stream.calls == 2:
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "retry_plan_call",
+                                "name": "create_research_plan",
+                                "arguments": {
+                                    "topic": "dopamine D1-D5 interacting residues",
+                                    "objective": "Find residue-level interaction evidence for dopamine D1-D5 receptor types.",
+                                    "target_count": 20,
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        yield {"message": {"content": "Researcher plan preview is ready."}}
+
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        service = HelperAIService(
+            thread_cache=TTLCache(ttl_seconds=60, max_entries=4),
+            pubmed_service=FakePubMedService(),
+        )
+        payload = HelperChatRequest(
+            api_key="",
+            message="give me researchs for dopamine d1-d5 i want to research the important interacting residues of all these types",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        leaked_prose = [
+            event for event in events
+            if event["type"] == "answer_delta" and "I can help you research" in str(event.get("text") or "")
+        ]
+        assert leaked_prose == []
+        assert any(
+            event["type"] == "status" and "requesting the required planning tool call again" in str(event.get("text") or "")
+            for event in events
+        )
+        assert "You returned ordinary text instead of the required function call" in str(seen_messages[1][-1]["content"])
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        assert tool_result["action"]["details"]["plan"]["topic"] == "dopamine D1-D5 interacting residues"
+        final_event = next(event for event in events if event["type"] == "final")
+        assert final_event["response"]["executed_actions"][0]["name"] == "create_research_plan"
+
+    asyncio.run(runner())
+
+
 def test_research_agent_ollama_followup_answers_from_existing_plan(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 

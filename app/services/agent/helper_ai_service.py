@@ -1514,11 +1514,55 @@ class HelperAIService:
             answer_text = str(message.get("content") or "")
             if answer_text:
                 answer_chunks.append(answer_text)
-            if answer_text and not tool_turn_active:
+            if answer_text and not tool_turn_active and thread_state.research_plan:
                 yield {"type": "answer_delta", "text": answer_text}
 
         raw_answer = "".join(answer_chunks).strip()
         raw_thinking = "".join(thinking_chunks).strip()
+        if not tool_calls and not thread_state.research_plan:
+            if raw_answer:
+                messages.append(self._ollama_assistant_message(content=raw_answer, thinking=raw_thinking))
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "You returned ordinary text instead of the required function call. "
+                        "For this first Research Agent turn, call `create_research_plan` now. "
+                        "Do not answer in prose before the tool call."
+                    ),
+                }
+            )
+            yield {"type": "status", "text": "Research Agent is requesting the required planning tool call again."}
+            answer_chunks = []
+            thinking_chunks = []
+            raw_answer = ""
+            raw_thinking = ""
+            async for stream_event in stream_ollama_with_heartbeat(
+                heartbeat_text="Research Agent is still waiting for the required planning call.",
+                messages=messages,
+                tools=self._build_ollama_research_toolset(),
+            ):
+                if stream_event["type"] == "status":
+                    yield stream_event
+                    continue
+                message = stream_event["chunk"].get("message") or {}
+                thinking_text = str(message.get("thinking") or "")
+                if thinking_text:
+                    thinking_chunks.append(thinking_text)
+                    streamed_thoughts.append(thinking_text)
+                    yield {"type": "thinking_delta", "text": thinking_text}
+                for call in extract_ollama_tool_calls(message):
+                    call_key = (call.name, json.dumps(call.args, sort_keys=True))
+                    if call_key in seen_tool_call_keys:
+                        continue
+                    seen_tool_call_keys.add(call_key)
+                    tool_calls.append(call)
+                answer_text = str(message.get("content") or "")
+                if answer_text:
+                    answer_chunks.append(answer_text)
+            raw_answer = "".join(answer_chunks).strip()
+            raw_thinking = "".join(thinking_chunks).strip()
+
         if tool_calls:
             call = tool_calls[0]
             self._log(

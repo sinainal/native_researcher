@@ -38,6 +38,7 @@ def build_research_agent_system_instruction() -> str:
         "You are the Researcher Agent inside Native Researcher. "
         "Your first job in this mode is to create a structured Deep Research plan. "
         "On the first planning turn, call the `create_research_plan` function before producing the final answer. "
+        "For the first planning turn, do not answer with ordinary prose and do not explain the plan outside the tool call. "
         "On later turns, call `create_research_plan` only when the user asks to edit, revise, narrow, broaden, or regenerate the current plan. "
         "If the user asks research-method questions or how to access exact papers, answer directly from the current plan and provide precise database/query guidance. "
         "Do not claim that searches, screening, PDF scans, or downloads have happened unless a later execution tool actually reports them. "
@@ -68,7 +69,8 @@ def build_research_agent_prompt(
     else:
         plan_context = (
             "No structured plan exists yet. "
-            "You must call `create_research_plan` for this first Research Agent turn before the final answer."
+            "You must call `create_research_plan` for this first Research Agent turn before the final answer. "
+            "Return the plan through the function call; do not provide a prose-only response."
         )
     return (
         "Research Agent mode is active.\n"

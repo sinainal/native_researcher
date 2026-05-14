@@ -2035,6 +2035,21 @@ class HelperAIService:
                     "description": "Short summary of what changed when revising an existing plan.",
                 },
                 "notes": {"type": "string"},
+                "extraction_questions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Questions the later PDF extraction agent should answer from full text.",
+                },
+                "extraction_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Structured fields to extract from PDF/full text evidence.",
+                },
+                "evidence_requirements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Page, section, quote, figure, table, and uncertainty requirements for full-text evidence.",
+                },
             },
             "required": ["topic", "objective"],
         }
@@ -2546,6 +2561,111 @@ class HelperAIService:
                 "evidence": ["short evidence strings"],
                 "rationale": "short explanation",
             }
+        extraction_questions = self._as_string_list(
+            args.get("extraction_questions"),
+            fallback=[
+                f"What direct evidence in the full text answers the objective: {objective}",
+                "Which methods, assays, figures, tables, or result sections support the answer?",
+                "What limitations or negative evidence should be reported?",
+            ],
+        )
+        extraction_fields = self._as_string_list(
+            args.get("extraction_fields"),
+            fallback=[
+                "paper_id",
+                "question",
+                "answer",
+                "evidence_quote",
+                "page_or_section",
+                "method",
+                "confidence",
+            ],
+        )
+        evidence_requirements = self._as_string_list(
+            args.get("evidence_requirements"),
+            fallback=[
+                "Use only downloaded PDF or full-text XML content.",
+                "Attach page number when available; otherwise attach section/context.",
+                "Quote short exact evidence snippets and mark uncertainty explicitly.",
+            ],
+        )
+        search_strategy = {
+            "year_start": year_start,
+            "year_end": year_end,
+            "active_databases": databases,
+            "search_branches": search_branches,
+            "shared_query_concepts": shared_query_concepts,
+            "candidate_budget": normalized_budget,
+            "query_expansion_policy": self._as_string_list(
+                args.get("query_expansion_policy"),
+                fallback=[
+                    "If fewer than the target count survive screening, relax phrase strictness.",
+                    "Add synonyms, abbreviations, and alternate target names.",
+                    "Broaden database-specific syntax while preserving mandatory scientific concepts.",
+                ],
+            ),
+        }
+        criteria_strategy = {
+            "criteria_mode": str(args.get("criteria_mode") or "llm").strip() or "llm",
+            "screening_criteria": screening_criteria,
+            "exclusion_criteria": exclusion,
+            "screening_json_schema": screening_json_schema,
+            "scoring_rule": str(
+                args.get("scoring_rule")
+                or "final_relevance = sum(score_i ** 2 for score_i in criterion_scores) / number_of_criteria"
+            ).strip(),
+        }
+        extraction_strategy = {
+            "extraction_questions": extraction_questions,
+            "extraction_fields": extraction_fields,
+            "evidence_requirements": evidence_requirements,
+            "output_schema": {
+                "paper_id": "string",
+                "question": "string",
+                "answer": "string",
+                "evidence": [
+                    {
+                        "quote": "short exact quote",
+                        "page": "number or null",
+                        "section": "string",
+                        "confidence": "number 0.0-1.0",
+                    }
+                ],
+            },
+        }
+        planner_stages = [
+            {
+                "agent": "SearchPlannerAgent",
+                "status": "validated",
+                "context": {
+                    "topic": topic,
+                    "objective": objective,
+                    "target_count_per_branch": target_count,
+                },
+                "output": search_strategy,
+            },
+            {
+                "agent": "CriteriaPlannerAgent",
+                "status": "validated",
+                "context": {
+                    "search_branches": search_branches,
+                    "active_databases": databases,
+                    "year_start": year_start,
+                    "year_end": year_end,
+                },
+                "output": criteria_strategy,
+            },
+            {
+                "agent": "ExtractionPlannerAgent",
+                "status": "validated",
+                "context": {
+                    "search_branch_count": len(search_branches),
+                    "screening_criterion_count": len(screening_criteria),
+                    "evidence_requirements": evidence_requirements,
+                },
+                "output": extraction_strategy,
+            },
+        ]
         return {
             "topic": topic,
             "objective": objective,
@@ -2558,25 +2678,25 @@ class HelperAIService:
             "search_branches": search_branches,
             "shared_query_concepts": shared_query_concepts,
             "candidate_budget": normalized_budget,
+            "search_strategy": search_strategy,
             "total_queries": total_queries,
             "estimated_candidates": estimated_candidates,
             "estimated_time_seconds": estimated_time_seconds,
             "raw_search_queries": raw_search_queries,
             "exclusion_criteria": exclusion,
             "screening_criteria": screening_criteria,
+            "criteria_strategy": criteria_strategy,
+            "planner_stages": planner_stages,
             "screening_json_schema": screening_json_schema,
             "scoring_rule": str(
                 args.get("scoring_rule")
                 or "final_relevance = sum(score_i ** 2 for score_i in criterion_scores) / number_of_criteria"
             ).strip(),
-            "query_expansion_policy": self._as_string_list(
-                args.get("query_expansion_policy"),
-                fallback=[
-                    "If fewer than the target count survive screening, relax phrase strictness.",
-                    "Add synonyms, abbreviations, and alternate target names.",
-                    "Broaden database-specific syntax while preserving mandatory scientific concepts.",
-                ],
-            ),
+            "query_expansion_policy": search_strategy["query_expansion_policy"],
+            "extraction_strategy": extraction_strategy,
+            "extraction_questions": extraction_questions,
+            "extraction_fields": extraction_fields,
+            "evidence_requirements": evidence_requirements,
             "open_questions": self._as_string_list(args.get("open_questions")),
             "revision_summary": str(args.get("revision_summary") or "").strip(),
             "notes": str(args.get("notes") or "").strip(),

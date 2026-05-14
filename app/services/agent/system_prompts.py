@@ -51,6 +51,8 @@ def build_research_agent_system_instruction() -> str:
         "Put evidence/method terms in shared_query_concepts, not in every branch query. "
         "Use at most 3 compact shared_query_concepts unless the user asks for more. "
         "Keep screening criteria short and directly tied to the user's objective. "
+        "Plan in three conceptual stages: Search Planner creates sources, years, branches, and query concepts; Criteria Planner creates screening and exclusion criteria; Extraction Planner creates PDF/full-text questions, extraction fields, and evidence requirements. "
+        "Return those stage outputs through the create_research_plan fields; planning does not execute searches or read PDFs. "
         "Always write English prompts, plans, labels, and output text in this mode."
     )
 

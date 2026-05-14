@@ -15,9 +15,13 @@ from app.schemas.article import Article
 from app.schemas.helper import HelperChatResponse
 from app.schemas.llm import LLMProcessResponse
 from app.schemas.pdf import PDFAvailabilityResponse, PDFResolveResponse
+from app.schemas.pdf import PDFDownloadResponse, PDFDownloadResult
+from app.schemas.pdf_extraction import PDFExtractionRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.schemas.research_execution import ResearchScreeningTrace
+from app.services.pdf_extraction_service import PDFExtractionService
 from app.services.research_execution_service import ResearchExecutionService
+from app.services.research_screening_service import ResearchScreeningService
 
 
 class FakePubMedService:
@@ -101,6 +105,9 @@ class FakePDFService:
     async def quick_availability(self, articles):  # noqa: ANN001
         return PDFAvailabilityResponse(items=[])
 
+    async def download_articles(self, payload):  # noqa: ANN001
+        return PDFDownloadResponse(total=0, success_count=0, failed_count=0, results=[])
+
 
 class FakeHelperService:
     async def chat(self, payload):  # noqa: ANN001
@@ -180,6 +187,74 @@ def test_research_execution_enforces_required_screening_criteria() -> None:
         excluded_ids = response.run_trace.excluded_candidate_ids
         assert selected_ids == ["cand_1"]
         assert "cand_2" in excluded_ids
+
+    asyncio.run(runner())
+
+
+def test_screening_agent_maps_label_scores_to_criterion_ids() -> None:
+    async def runner() -> None:
+        service = ResearchScreeningService()
+        candidates = []
+        article = Article(id=1, pmid="", title="Alpha residue interaction", abstract="Residue interaction evidence.")
+        from app.services.research_candidate_normalizer import NormalizedResearchCandidate
+
+        candidates.append(NormalizedResearchCandidate(candidate_id="cand_1", article=article))
+        traces = service._normalize_agent_items(
+            candidates,
+            {
+                "screening_criteria": [
+                    {"id": "residue_evidence", "label": "Residue Evidence", "description": "Residue evidence"}
+                ],
+                "exclusion_criteria": [],
+            },
+            [{"candidate_id": "cand_1", "criterion_scores": {"Residue Evidence": 1.0}, "exclusion_scores": {}}],
+        )
+        assert traces[0].criterion_scores["residue_evidence"] == 1.0
+        assert traces[0].final_score == 1.0
+
+    asyncio.run(runner())
+
+
+def test_pdf_extraction_reads_downloaded_xml_and_answers_questions(tmp_path) -> None:
+    xml_path = tmp_path / "paper.xml"
+    xml_path.write_text(
+        "<article><body><sec><title>Results</title><p>Docking identified residue Alpha123 as a key interaction site.</p></sec></body></article>",
+        encoding="utf-8",
+    )
+
+    class XMLPDFService:
+        async def download_articles(self, payload):  # noqa: ANN001
+            article = payload.articles[0]
+            return PDFDownloadResponse(
+                total=1,
+                success_count=1,
+                failed_count=0,
+                results=[
+                    PDFDownloadResult(
+                        article=article,
+                        success=True,
+                        file_path=str(xml_path),
+                        content_kind="xml_fulltext",
+                    )
+                ],
+            )
+
+    async def runner() -> None:
+        service = PDFExtractionService(pdf_service=XMLPDFService())
+        response = await service.extract(
+            PDFExtractionRequest(
+                articles=[
+                    {
+                        "title": "Docking paper",
+                        "year": "2024",
+                        "doi": "10.1/test",
+                    }
+                ],
+                questions=["Which residue is the key interaction site?"],
+            )
+        )
+        assert response.success_count == 1
+        assert "Alpha123" in response.results[0].answers[0].answer
 
     asyncio.run(runner())
 

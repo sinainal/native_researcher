@@ -8,15 +8,20 @@
 - Made execution fail loudly when every normalized query errors before candidate normalization.
 - Added a chat-visible Search Report card after research plan execution.
 - Expanded the Search Report popup with candidate status, scores, criteria, exclusion visibility, filters, and a "save checked as query" flow.
+- Fixed score normalization when the Screening Agent returns criterion labels or alternate score keys instead of exact criterion IDs.
+- Added report plots for branch coverage and score distribution, and tightened report layout for desktop and mobile popups.
+- Added `search_strategy`, `criteria_strategy`, `extraction_strategy`, and ordered `planner_stages` metadata to Research Agent plans.
+- Added a `/pdf/extract` endpoint that downloads PDF/XML artifacts, extracts text, and answers extraction questions from the downloaded full text.
 
 ## Remaining Known Issues
 
 - Research Agent structured plans still live primarily in assistant thread cache and frontend session state. A backend restart or cache expiry can break plan-followup continuity.
 - Execution intentionally rebuilds normalized database queries from branch and shared concept plan fields. This is safer than trusting LLM raw queries, but database-specific syntax adaptation is still shallow.
 - Query failure handling is stricter only when all queries fail. Partial source failures are still allowed and should be surfaced more strongly in the report.
-- Screening is abstract/title-level only. Full-text/PDF evidence extraction is not yet part of this execution path.
+- Screening execution is still abstract/title-level. Full-text/PDF extraction now exists as a backend endpoint, but is not yet wired into the main research execution UI as an automatic next stage.
 - The Screening Agent currently scores one candidate per model call. This is reliable but slow for large runs.
 - Candidate pre-screening still limits the number of candidates sent to the LLM by recency per branch, which can miss older seminal papers.
+- The planner stages are now explicit in the normalized plan, but the existing chat flow still enters through one `create_research_plan` tool call. A deeper split into separate model calls should be done after the current execution/report path is stable.
 
 ## Proposed Three-Agent Architecture
 
@@ -74,8 +79,8 @@ Backend responsibility:
 ## Suggested Next Implementation Order
 
 1. Persist `research_plan` into project state as a first-class object keyed by run/session.
-2. Split the existing `create_research_plan` tool into deterministic backend plan schema plus separate Search Strategy and Screening Criteria tool outputs.
+2. Split the existing `create_research_plan` tool into separate SearchPlannerAgent, CriteriaPlannerAgent, and ExtractionPlannerAgent model calls once the UI can show per-stage status/errors.
 3. Add database-specific query normalization in backend adapters.
 4. Add partial-failure warnings and retry/broaden controls in the Search Report.
 5. Add a user approval step before PDF downloads.
-6. Build Full-Text Extraction Agent around downloaded PDF text and page-aware citations.
+6. Wire `/pdf/extract` into the research execution flow after selected/backup candidate approval, with page-aware evidence tables in the report.

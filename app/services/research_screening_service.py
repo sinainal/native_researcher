@@ -470,6 +470,7 @@ class ResearchScreeningService:
     ) -> list[ResearchScreeningTrace]:
         criteria = _criteria(plan)
         exclusions = [str(item).strip() for item in plan.get("exclusion_criteria") or [] if str(item).strip()]
+        criterion_aliases = _criterion_aliases(criteria)
         item_by_id = {
             str(item.get("candidate_id") or ""): item
             for item in items
@@ -501,10 +502,12 @@ class ResearchScreeningService:
                     )
                 )
                 continue
-            criterion_scores = {
-                criterion["id"]: _clamp_score((item.get("criterion_scores") or {}).get(criterion["id"], 0))
-                for criterion in criteria
-            }
+            raw_criterion_scores = item.get("criterion_scores") or item.get("criteria_scores") or item.get("scores") or {}
+            criterion_scores = _normalize_criterion_scores(
+                raw_criterion_scores,
+                criteria,
+                criterion_aliases,
+            )
             exclusion_scores = {
                 _exclusion_id(index): _clamp_score((item.get("exclusion_scores") or {}).get(_exclusion_id(index), 0))
                 for index, _exclusion in enumerate(exclusions, start=1)
@@ -603,6 +606,43 @@ def _terms(value: str) -> list[str]:
         seen.add(normalized)
         terms.append(normalized)
     return terms[:32]
+
+
+def _score_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _criterion_aliases(criteria: list[dict[str, Any]]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for criterion in criteria:
+        criterion_id = str(criterion.get("id") or "")
+        label = str(criterion.get("label") or "")
+        aliases[_score_key(criterion_id)] = criterion_id
+        aliases[_score_key(label)] = criterion_id
+        aliases[_score_key(criterion_id.replace("_", " "))] = criterion_id
+        aliases[_score_key(label.replace("_", " "))] = criterion_id
+    return {key: value for key, value in aliases.items() if key and value}
+
+
+def _normalize_criterion_scores(
+    raw_scores: Any,
+    criteria: list[dict[str, Any]],
+    aliases: dict[str, str],
+) -> dict[str, float]:
+    normalized = {str(criterion["id"]): 0.0 for criterion in criteria}
+    if not isinstance(raw_scores, dict):
+        return normalized
+    for raw_key, raw_value in raw_scores.items():
+        key = aliases.get(_score_key(str(raw_key)))
+        if key is None:
+            continue
+        normalized[key] = max(normalized.get(key, 0.0), _clamp_score(raw_value))
+    if len(criteria) == 1 and not any(normalized.values()):
+        for fallback_key in ("score", "relevance", "confidence", "overall", "final_score"):
+            if fallback_key in raw_scores:
+                normalized[str(criteria[0]["id"])] = _clamp_score(raw_scores[fallback_key])
+                break
+    return normalized
 
 
 def _keyword_score(text: str, terms: list[str]) -> float:

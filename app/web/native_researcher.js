@@ -4748,6 +4748,18 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
         </div>
       </section>
       <section class="research-plan-detail-section">
+        <h4>PDF Extraction Plan</h4>
+        <div class="research-plan-detail-grid">
+          <div><span>Questions</span><strong>${escapeHtml((plan.extraction_questions || plan.extraction_strategy?.extraction_questions || []).length || 0)}</strong></div>
+          <div><span>Fields</span><strong>${escapeHtml((plan.extraction_fields || plan.extraction_strategy?.extraction_fields || []).length || 0)}</strong></div>
+          <div><span>Evidence rules</span><strong>${escapeHtml((plan.evidence_requirements || plan.extraction_strategy?.evidence_requirements || []).length || 0)}</strong></div>
+        </div>
+        <span>Questions</span>
+        ${researchPlanListMarkup(plan.extraction_questions || plan.extraction_strategy?.extraction_questions || [], "No PDF extraction questions yet.")}
+        <span>Evidence requirements</span>
+        ${researchPlanListMarkup(plan.evidence_requirements || plan.extraction_strategy?.evidence_requirements || [], "No evidence requirements yet.")}
+      </section>
+      <section class="research-plan-detail-section">
         <h4>Exclusion Criteria</h4>
         ${researchPlanEditableListMarkup("exclusion_criteria", plan.exclusion_criteria, "Add exclusion rule")}
       </section>
@@ -4837,6 +4849,7 @@ function openResearchExecutionReportPopup(response) {
     <div class="research-plan-detail">
       <section class="research-plan-detail-section">
         <h4>Execution Summary</h4>
+        ${researchExecutionReportPlotMarkup(response)}
         <div class="research-plan-detail-grid">
           <div><span>Selected</span><strong>${escapeHtml(selectedCount)}</strong></div>
           <div><span>Candidates</span><strong>${escapeHtml(candidateCount)}</strong></div>
@@ -4895,6 +4908,57 @@ function openResearchExecutionReportPopup(response) {
   bindResearchExecutionReportEvents(els.detailPopupBody);
   renderResearchExecutionReportCandidates(els.detailPopupBody, response);
   setDetailPopupOpen(true);
+}
+
+function researchExecutionReportPlotMarkup(response) {
+  const trace = response?.run_trace || {};
+  const distribution = trace.meta?.distribution || {};
+  const branchRows = distribution.branch_distribution || [];
+  const articles = Array.isArray(response?.candidate_articles) ? response.candidate_articles : [];
+  const scores = articles.map((article) => Number(article.research_meta?.score || 0)).filter((value) => Number.isFinite(value));
+  const buckets = [
+    { label: "0-.25", min: 0, max: 0.25 },
+    { label: ".25-.5", min: 0.25, max: 0.5 },
+    { label: ".5-.75", min: 0.5, max: 0.75 },
+    { label: ".75-1", min: 0.75, max: 1.01 },
+  ].map((bucket) => ({
+    ...bucket,
+    count: scores.filter((score) => score >= bucket.min && score < bucket.max).length,
+  }));
+  const branchMax = Math.max(1, ...branchRows.map((row) => Number(row.candidate_count || 0)));
+  const scoreMax = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  return `
+    <div class="research-report-plots">
+      <div class="research-report-plot">
+        <div class="research-report-plot-title">Branch coverage</div>
+        <div class="research-report-bars">
+          ${branchRows.map((row) => {
+            const candidateWidth = Math.max(3, Math.round((Number(row.candidate_count || 0) / branchMax) * 100));
+            const selectedWidth = Math.max(0, Math.round((Number(row.selected_count || 0) / branchMax) * 100));
+            return `
+              <div class="research-report-bar-row">
+                <span>${escapeHtml(row.branch_label || row.branch_id || "Branch")}</span>
+                <div class="research-report-bar-track"><i style="width:${candidateWidth}%"></i><b style="width:${selectedWidth}%"></b></div>
+                <em>${escapeHtml(row.selected_count || 0)}/${escapeHtml(row.candidate_count || 0)}</em>
+              </div>
+            `;
+          }).join("") || "<p>No branch data.</p>"}
+        </div>
+      </div>
+      <div class="research-report-plot">
+        <div class="research-report-plot-title">Score distribution</div>
+        <div class="research-report-bars">
+          ${buckets.map((bucket) => `
+            <div class="research-report-bar-row">
+              <span>${escapeHtml(bucket.label)}</span>
+              <div class="research-report-bar-track"><i style="width:${Math.max(3, Math.round((bucket.count / scoreMax) * 100))}%"></i></div>
+              <em>${escapeHtml(bucket.count)}</em>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function researchExecutionReportPayloadFromAction(action) {
@@ -5009,11 +5073,13 @@ function renderResearchExecutionReportCandidates(root, response) {
               <span>${escapeHtml(status)}</span>
             </label>
             <div>
-              <strong>${escapeHtml(article.title || "Untitled article")}</strong>
-              <p>${escapeHtml([article.year, article.journal, article.doi || article.pmid].filter(Boolean).join(" · ") || "No metadata")}</p>
-              <p>${escapeHtml((article.abstract || "").slice(0, 420))}${(article.abstract || "").length > 420 ? "..." : ""}</p>
+              <div class="research-report-row-head">
+                <strong>${escapeHtml(article.title || "Untitled article")}</strong>
+                <span>${escapeHtml(Number(meta.score || screening.final_score || 0).toFixed(2))}</span>
+              </div>
+              <p class="research-report-meta">${escapeHtml([article.year, article.journal, article.doi || article.pmid].filter(Boolean).join(" · ") || "No metadata")}</p>
+              <p class="research-report-abstract">${escapeHtml((article.abstract || "").slice(0, 520))}${(article.abstract || "").length > 520 ? "..." : ""}</p>
               <div class="research-report-scoreline">
-                <span>Score ${escapeHtml(Number(meta.score || screening.final_score || 0).toFixed(2))}</span>
                 ${(meta.branches || []).slice(0, 4).map((branch) => `<span>${escapeHtml(branch.label || branch.id || "Branch")}</span>`).join("")}
                 ${(meta.sources || []).slice(0, 4).map((source) => `<span>${escapeHtml(searchResourceLabel(source))}</span>`).join("")}
               </div>

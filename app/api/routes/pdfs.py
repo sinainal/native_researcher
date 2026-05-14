@@ -15,7 +15,9 @@ from app.schemas.pdf import (
     PDFTestRequest,
     PDFTestResponse,
 )
+from app.schemas.pdf_extraction import PDFExtractionRequest, PDFExtractionResponse
 from app.schemas.pubmed import PubMedSearchRequest
+from app.services.pdf_extraction_service import PDFExtractionService
 from app.services.pdf_service import PDFService
 from app.services.pubmed_service import PubMedService
 
@@ -122,6 +124,22 @@ async def test_pdf_pipeline(
             reason_counts=reason_counts,
             results=diagnostics,
         )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/extract", response_model=PDFExtractionResponse)
+async def extract_pdf_answers(
+    payload: PDFExtractionRequest,
+    request: Request,
+) -> PDFExtractionResponse:
+    pdf_service = get_pdf_service(request)
+    service = PDFExtractionService(
+        pdf_service=pdf_service,
+        settings=getattr(request.app.state, "settings", None),
+    )
+    try:
+        return await service.extract(payload)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

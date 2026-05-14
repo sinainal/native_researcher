@@ -10,3 +10,4 @@ openpyxl
 requests
 autologging
 articledownloader==9.1.1
+pypdf

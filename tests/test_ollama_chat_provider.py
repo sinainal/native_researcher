@@ -154,6 +154,16 @@ def test_research_plan_tool_normalizes_defaults() -> None:
         assert plan["estimated_time_seconds"] == 100
         assert plan["screening_criteria"][0]["id"] == "docking_performed"
         assert "sum(score_i ** 2" in plan["scoring_rule"]
+        assert plan["search_strategy"]["active_databases"] == plan["active_databases"]
+        assert plan["criteria_strategy"]["screening_criteria"][0]["id"] == "docking_performed"
+        assert plan["extraction_strategy"]["extraction_questions"]
+        assert "evidence_requirements" in plan["extraction_strategy"]
+        assert [stage["agent"] for stage in plan["planner_stages"]] == [
+            "SearchPlannerAgent",
+            "CriteriaPlannerAgent",
+            "ExtractionPlannerAgent",
+        ]
+        assert plan["planner_stages"][1]["context"]["search_branches"] == plan["search_branches"]
 
     asyncio.run(runner())
 

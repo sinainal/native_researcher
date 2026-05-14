@@ -5883,9 +5883,15 @@ body.is-document-viewer-open .native-document-viewer {
 
 .research-plan-edit-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.research-plan-edit-head p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: .78rem;
 }
 
 .research-plan-edit-grid {
@@ -5914,6 +5920,8 @@ body.is-document-viewer-open .native-document-viewer {
 .research-plan-criterion-edit input[type="number"],
 .research-plan-branch-edit input,
 .research-plan-branch-edit textarea,
+.research-plan-question-edit textarea,
+.research-plan-question-edit select,
 .research-plan-criterion textarea,
 .research-plan-criterion input[type="text"] {
   width: 100%;
@@ -5928,6 +5936,7 @@ body.is-document-viewer-open .native-document-viewer {
 }
 
 .research-plan-branch-edit textarea,
+.research-plan-question-edit textarea,
 .research-plan-criterion textarea {
   resize: vertical;
 }
@@ -6027,6 +6036,7 @@ body.is-document-viewer-open .native-document-viewer {
 .research-plan-query-list,
 .research-plan-criteria-list,
 .research-plan-edit-list,
+.research-plan-question-list,
 .research-plan-branch-edit-list {
   display: grid;
   gap: 8px;
@@ -6034,6 +6044,7 @@ body.is-document-viewer-open .native-document-viewer {
 
 .research-plan-query-item,
 .research-plan-criterion,
+.research-plan-question-edit,
 .research-plan-branch-edit {
   display: grid;
   gap: 8px;
@@ -6041,12 +6052,14 @@ body.is-document-viewer-open .native-document-viewer {
 }
 
 .research-plan-branch-edit label,
+.research-plan-question-edit label,
 .research-plan-criterion label {
   display: grid;
   gap: 5px;
 }
 
 .research-plan-branch-edit span,
+.research-plan-question-edit span,
 .research-plan-criterion label > span {
   color: #64748b;
   font-size: 10px;
@@ -6084,6 +6097,22 @@ body.is-document-viewer-open .native-document-viewer {
 .research-plan-criterion strong {
   color: #0f172a;
   font-size: .86rem;
+}
+
+.research-plan-subsection {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(226, 232, 240, .72);
+}
+
+.research-plan-subsection h5 {
+  margin: 0;
+  color: #0f172a;
+  font-size: .78rem;
+  font-weight: 900;
+  text-transform: uppercase;
 }
 
 .research-plan-criterion > div {

@@ -184,6 +184,8 @@ const els = {
   modelSettingsPopup: document.getElementById("modelSettingsPopup"),
   modelSettingsClose: document.getElementById("modelSettingsClose"),
   modelSettingsSummary: document.getElementById("modelSettingsSummary"),
+  researchPlannerModeInput: document.getElementById("researchPlannerModeInput"),
+  researchPlannerModeStatus: document.getElementById("researchPlannerModeStatus"),
   downloadWorkerCountInput: document.getElementById("downloadWorkerCountInput"),
   downloadWorkerCountStatus: document.getElementById("downloadWorkerCountStatus"),
   sidebarOpenApiKeysBtn: document.getElementById("sidebarOpenApiKeysBtn"),
@@ -262,6 +264,7 @@ const sidebarPanelStorageKey = "native_researcher_sidebar_panel";
 const pubmedOaOnlyStorageKey = "native_researcher_pubmed_oa_only";
 const downloadWorkersStorageKey = "native_researcher_download_workers";
 const searchResourceStorageKey = "native_researcher_search_resource";
+const researchPlannerModeStorageKey = "native_researcher_research_planner_mode";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
@@ -319,6 +322,7 @@ const runtime = {
   searchResource: normalizeSearchResource(localStorage.getItem(searchResourceStorageKey), "pubmed"),
   aiPrimarySearchResource: "pubmed",
   pdfDownloaderMode: "pdf_xml",
+  researchPlannerMode: localStorage.getItem(researchPlannerModeStorageKey) === "legacy" ? "legacy" : "staged",
   assistantModel: stateModel,
   assistantModelVisibility: loadAssistantModelVisibility(),
   assistantModelLoading: false,
@@ -1727,6 +1731,14 @@ function renderSettingsPanel() {
       runtime.llamacppConnected ? "llama.cpp on" : "llama.cpp off",
     ].join(" · ");
     els.modelSettingsSummary.textContent = `${assistantModelDisplayLabel(selectedModel) || selectedModel} selected · ${visibleGemini} Gemini visible · ${visibleLocal} local visible · ${localState}.`;
+  }
+  if (els.researchPlannerModeInput) {
+    els.researchPlannerModeInput.value = runtime.researchPlannerMode === "legacy" ? "legacy" : "staged";
+  }
+  if (els.researchPlannerModeStatus) {
+    els.researchPlannerModeStatus.textContent = runtime.researchPlannerMode === "legacy"
+      ? "Research Agent uses the legacy single planning block for new plans."
+      : "Research Agent uses Search, Criteria and Extraction planner stages for new plans.";
   }
   if (els.ollamaBaseUrlInput) {
     els.ollamaBaseUrlInput.value = runtime.ollamaBaseUrl || "http://localhost:11434";
@@ -4584,6 +4596,62 @@ function researchPlanEditableListMarkup(kind, items, placeholder) {
   `;
 }
 
+function researchPlanQuestionSpecs(plan) {
+  const rawSpecs = Array.isArray(plan?.extraction_question_specs)
+    ? plan.extraction_question_specs
+    : Array.isArray(plan?.extraction_strategy?.extraction_question_specs)
+      ? plan.extraction_strategy.extraction_question_specs
+      : [];
+  if (rawSpecs.length) {
+    return rawSpecs.map((item, index) => ({
+      id: item.id || `question_${index + 1}`,
+      question: item.question || "",
+      answer_format: item.answer_format === "exact_text" ? "exact_text" : "factual_answer",
+    })).filter((item) => item.question.trim());
+  }
+  const questions = Array.isArray(plan?.extraction_questions)
+    ? plan.extraction_questions
+    : Array.isArray(plan?.extraction_strategy?.extraction_questions)
+      ? plan.extraction_strategy.extraction_questions
+      : [];
+  return questions.map((question, index) => ({
+    id: `question_${index + 1}`,
+    question,
+    answer_format: index === 0 ? "exact_text" : "factual_answer",
+  })).filter((item) => String(item.question || "").trim());
+}
+
+function researchPlanQuestionEditMarkup(questionSpecs) {
+  return `
+    <div class="research-plan-question-list">
+      ${questionSpecs.map((item, index) => `
+        <div class="research-plan-question-edit" data-question-index="${escapeHtml(index)}">
+          <div class="research-plan-edit-row-head">
+            <span>Question ${escapeHtml(index + 1)}</span>
+            <button class="btn btn-secondary btn-sm" type="button" data-question-delete="${escapeHtml(index)}">Delete</button>
+          </div>
+          <label><span>Answer format</span>
+            <select data-question-format="${escapeHtml(index)}">
+              <option value="exact_text" ${item.answer_format === "exact_text" ? "selected" : ""}>Exact text quote</option>
+              <option value="factual_answer" ${item.answer_format !== "exact_text" ? "selected" : ""}>Specific fact</option>
+            </select>
+          </label>
+          <label><span>Question</span><textarea rows="2" data-question-text="${escapeHtml(index)}">${escapeHtml(item.question || "")}</textarea></label>
+        </div>
+      `).join("")}
+      <div class="research-plan-question-edit is-new">
+        <label><span>New answer format</span>
+          <select data-new-question-format>
+            <option value="exact_text">Exact text quote</option>
+            <option value="factual_answer" selected>Specific fact</option>
+          </select>
+        </label>
+        <label><span>New question</span><textarea rows="2" placeholder="Ask for an exact quote or a concrete data point from the paper" data-new-question-text></textarea></label>
+      </div>
+    </div>
+  `;
+}
+
 function researchPlanBranchEditMarkup(branches) {
   return `
     <div class="research-plan-branch-edit-list">
@@ -4634,6 +4702,7 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
   const sharedConcepts = researchPlanSharedConcepts(plan);
   const rawSearchQueries = researchPlanRawSearchQueries(plan);
   const groupedSearchQueries = researchPlanGroupedSearchQueries(rawSearchQueries);
+  const questionSpecs = researchPlanQuestionSpecs(plan);
   const totalQueries = rawSearchQueries.length || researchPlanTotalQueries(plan);
   const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
   const estimatedCandidates = totalQueries * Math.max(1, perDatabase);
@@ -4656,8 +4725,11 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
     <div class="research-plan-detail" data-message-id="${escapeHtml(messageId)}" data-action-index="${escapeHtml(actionIndex)}">
       <section class="research-plan-detail-section research-plan-edit-panel">
         <div class="research-plan-edit-head">
-          <h4>Editable Plan Basics</h4>
-          <button class="btn btn-primary btn-sm" type="button" data-research-plan-save-edits="true">Save manual edits</button>
+          <div>
+            <h4>Plan Settings</h4>
+            <p>Edit the execution values, branches, criteria, exclusion rules, and full-text questions.</p>
+          </div>
+          <button class="btn btn-primary btn-sm" type="button" data-research-plan-save-edits="true">Save changes</button>
         </div>
         <div class="research-plan-edit-grid">
           <label>
@@ -4746,22 +4818,22 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
             </div>
           </div>
         </div>
+        <div class="research-plan-subsection">
+          <h5>Exclusion Criteria</h5>
+          ${researchPlanEditableListMarkup("exclusion_criteria", plan.exclusion_criteria, "Add exclusion rule")}
+        </div>
       </section>
       <section class="research-plan-detail-section">
         <h4>PDF Extraction Plan</h4>
         <div class="research-plan-detail-grid">
-          <div><span>Questions</span><strong>${escapeHtml((plan.extraction_questions || plan.extraction_strategy?.extraction_questions || []).length || 0)}</strong></div>
+          <div><span>Questions</span><strong>${escapeHtml(questionSpecs.length || 0)}</strong></div>
           <div><span>Fields</span><strong>${escapeHtml((plan.extraction_fields || plan.extraction_strategy?.extraction_fields || []).length || 0)}</strong></div>
           <div><span>Evidence rules</span><strong>${escapeHtml((plan.evidence_requirements || plan.extraction_strategy?.evidence_requirements || []).length || 0)}</strong></div>
         </div>
-        <span>Questions</span>
-        ${researchPlanListMarkup(plan.extraction_questions || plan.extraction_strategy?.extraction_questions || [], "No PDF extraction questions yet.")}
+        <p>Use exact text quote when the answer must be copied from the paper. Use specific fact when the answer should be a concrete extracted value such as residue, method, figure, assay, organism, mutation effect, or binding value.</p>
+        ${researchPlanQuestionEditMarkup(questionSpecs)}
         <span>Evidence requirements</span>
         ${researchPlanListMarkup(plan.evidence_requirements || plan.extraction_strategy?.evidence_requirements || [], "No evidence requirements yet.")}
-      </section>
-      <section class="research-plan-detail-section">
-        <h4>Exclusion Criteria</h4>
-        ${researchPlanEditableListMarkup("exclusion_criteria", plan.exclusion_criteria, "Add exclusion rule")}
       </section>
       <section class="research-plan-detail-section">
         <h4>Scoring Rule</h4>
@@ -5266,6 +5338,32 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
     if (newValue) values.push(newValue);
     plan[key] = values;
   });
+  const questionSpecs = [...root.querySelectorAll("[data-question-index]")].map((node) => {
+    if (node.dataset.deleted === "true") return null;
+    const index = node.dataset.questionIndex;
+    const question = root.querySelector(`[data-question-text='${index}']`)?.value.trim();
+    if (!question) return null;
+    const answerFormat = root.querySelector(`[data-question-format='${index}']`)?.value === "exact_text" ? "exact_text" : "factual_answer";
+    return {
+      id: question.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || `question_${Number(index) + 1}`,
+      question,
+      answer_format: answerFormat,
+    };
+  }).filter(Boolean);
+  const newQuestion = root.querySelector("[data-new-question-text]")?.value.trim();
+  if (newQuestion) {
+    const answerFormat = root.querySelector("[data-new-question-format]")?.value === "exact_text" ? "exact_text" : "factual_answer";
+    questionSpecs.push({
+      id: newQuestion.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || `question_${questionSpecs.length + 1}`,
+      question: newQuestion,
+      answer_format: answerFormat,
+    });
+  }
+  plan.extraction_question_specs = questionSpecs;
+  plan.extraction_questions = questionSpecs.map((item) => item.question);
+  if (!plan.extraction_strategy || typeof plan.extraction_strategy !== "object") plan.extraction_strategy = {};
+  plan.extraction_strategy.extraction_question_specs = questionSpecs;
+  plan.extraction_strategy.extraction_questions = plan.extraction_questions;
   recomputeResearchPlanEstimates(plan);
   action.details = {
     ...(action.details || {}),
@@ -5282,12 +5380,12 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
 }
 
 function bindResearchPlanManualEditEvents(root = document) {
-  root.querySelectorAll("[data-branch-delete], [data-concept-delete], [data-criterion-delete], [data-plan-list-delete]").forEach((node) => {
+  root.querySelectorAll("[data-branch-delete], [data-concept-delete], [data-criterion-delete], [data-question-delete], [data-plan-list-delete]").forEach((node) => {
     if (node.dataset.boundPlanDelete === "true") return;
     node.dataset.boundPlanDelete = "true";
     node.addEventListener("click", (event) => {
       event.preventDefault();
-      const row = node.closest("[data-branch-index], [data-concept-index], [data-criterion-index], .research-plan-edit-line");
+      const row = node.closest("[data-branch-index], [data-concept-index], [data-criterion-index], [data-question-index], .research-plan-edit-line");
       if (!row) return;
       row.dataset.deleted = "true";
       row.hidden = true;
@@ -6813,6 +6911,7 @@ async function sendAssistantMessage(options = {}) {
           message,
           model: runtime.assistantModel,
           mode: state.assistantMode === "research_agent" ? "research_agent" : "fast",
+          research_planner_mode: runtime.researchPlannerMode,
           thread_id: state.assistantThreadId,
           thinking_level: assistantThinkingLevelForRequest(),
           articles: helperArticlePayload(),
@@ -7444,6 +7543,15 @@ function bindEvents() {
     renderSettingsPanel();
     trackAppEvent("info", "download_worker_setting_updated", "Batch download worker count updated.", {
       download_workers: nextValue,
+    });
+  });
+  els.researchPlannerModeInput?.addEventListener("change", () => {
+    const nextValue = els.researchPlannerModeInput?.value === "legacy" ? "legacy" : "staged";
+    runtime.researchPlannerMode = nextValue;
+    localStorage.setItem(researchPlannerModeStorageKey, nextValue);
+    renderSettingsPanel();
+    trackAppEvent("info", "research_planner_mode_updated", "Research planner flow updated.", {
+      research_planner_mode: nextValue,
     });
   });
   els.sidebarQuickSearchResource?.addEventListener("change", () => {

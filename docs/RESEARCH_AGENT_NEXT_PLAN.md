@@ -14,6 +14,8 @@
 - Added a `/pdf/extract` endpoint that downloads PDF/XML artifacts, extracts text, and answers extraction questions from the downloaded full text.
 - Changed the first local Research Agent planning turn from one planner tool call to three visible stage calls: `create_search_plan`, `create_criteria_plan`, and `create_extraction_plan`, then backend merge into `create_research_plan`.
 - Added screening recovery when a local model returns valid JSON text instead of the `screen_research_candidates` tool call. If the model returns neither a valid tool call nor parseable JSON, the backend sends explicit retry feedback; after retries fail, execution stops with an error instead of silently using deterministic scoring.
+- Added a Research Planner Flow setting so new local Research Agent plans can use either staged planner agents or the legacy single-block planner.
+- Made PDF extraction questions editable in plan details, with explicit `exact_text` and `factual_answer` answer formats.
 
 ## Remaining Known Issues
 
@@ -23,7 +25,7 @@
 - Screening execution is still abstract/title-level. Full-text/PDF extraction now exists as a backend endpoint, but is not yet wired into the main research execution UI as an automatic next stage.
 - The Screening Agent currently scores one candidate per model call. This is reliable but slow for large runs.
 - Candidate pre-screening still limits the number of candidates sent to the LLM by recency per branch, which can miss older seminal papers.
-- The three-stage planner split is implemented for the first local Research Agent planning turn. Existing-plan edits still use the legacy single `create_research_plan` path until edit semantics are redesigned.
+- The three-stage planner split is implemented for the first local Research Agent planning turn. Existing-plan edits still use the legacy single `create_research_plan` path until edit semantics are redesigned. The legacy first-plan path remains available from settings.
 
 ## Proposed Three-Agent Architecture
 

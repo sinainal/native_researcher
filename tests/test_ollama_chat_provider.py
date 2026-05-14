@@ -470,6 +470,54 @@ def test_research_agent_ollama_retries_when_first_turn_skips_tool(monkeypatch) -
     asyncio.run(runner())
 
 
+def test_research_agent_ollama_legacy_planner_mode_uses_single_tool(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            assert kwargs["tools"][0]["function"]["name"] == "create_research_plan"
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "legacy_plan_call",
+                                "name": "create_research_plan",
+                                "arguments": {
+                                    "topic": "dopamine receptor docking",
+                                    "objective": "Find docking papers.",
+                                    "target_count": 5,
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        yield {"message": {"content": "Legacy plan preview is ready."}}
+
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        service = HelperAIService(
+            thread_cache=TTLCache(ttl_seconds=60, max_entries=4),
+            pubmed_service=FakePubMedService(),
+        )
+        payload = HelperChatRequest(
+            api_key="",
+            message="Plan dopamine receptor docking papers",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+            research_planner_mode="legacy",
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        tool_results = [event for event in events if event["type"] == "tool_result"]
+        assert [event["action"]["name"] for event in tool_results] == ["create_research_plan"]
+        assert fake_ollama_chat_stream.calls == 2
+
+    asyncio.run(runner())
+
+
 def test_research_agent_ollama_followup_answers_from_existing_plan(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 

@@ -1506,6 +1506,21 @@ class HelperAIService:
 
         for stage in stages:
             yield {"type": "status", "text": stage["status"]}
+            stage_call_id = f"{stage['stage']}_plan"
+            yield {
+                "type": "tool_call",
+                "call_id": stage_call_id,
+                "action": {
+                    "type": "tool_call",
+                    "name": stage["tool_name"],
+                    "title": self._tool_pending_title(stage["tool_name"]),
+                    "status": "running",
+                    "details": {
+                        "agent": stage["agent"],
+                        "stage": stage["stage"],
+                    },
+                },
+            }
             context = {
                 "today": date.today().isoformat(),
                 "user_request": payload.message.strip(),
@@ -1520,7 +1535,9 @@ class HelperAIService:
                     "content": (
                         f"You are {stage['agent']} inside Native Researcher. "
                         f"Call `{stage['tool_name']}` exactly once. Do not answer in prose. "
-                        "Planning does not execute database searches, screening, downloads, or PDF scans."
+                        "Planning does not execute database searches, screening, downloads, or PDF scans. "
+                        "For ExtractionPlannerAgent, write data-oriented questions that can be answered from full text. "
+                        "Use only two answer formats: exact_text for direct quoted phrases/sentences, or factual_answer for a concise extracted fact."
                     ),
                 },
                 {
@@ -1583,17 +1600,6 @@ class HelperAIService:
                         if call.name != stage["tool_name"]:
                             continue
                         call_args = call.args
-                        yield {
-                            "type": "tool_call",
-                            "call_id": call.call_id,
-                            "action": {
-                                "type": "tool_call",
-                                "name": stage["tool_name"],
-                                "title": self._tool_pending_title(stage["tool_name"]),
-                                "status": "running",
-                                "details": call.args,
-                            },
-                        }
                         break
                     if call_args is not None:
                         break
@@ -1616,7 +1622,7 @@ class HelperAIService:
             executed_actions.append(action)
             yield {
                 "type": "tool_result",
-                "call_id": f"{stage['stage']}_plan",
+                "call_id": stage_call_id,
                 "action": action.model_dump(),
             }
 
@@ -1676,7 +1682,8 @@ class HelperAIService:
         model_name: str,
         provider: str = "ollama",
     ) -> AsyncIterator[dict[str, Any]]:
-        if not thread_state.research_plan:
+        planner_mode = str(getattr(payload, "research_planner_mode", "staged") or "staged").strip().lower()
+        if not thread_state.research_plan and planner_mode != "legacy":
             async for event in self._chat_stream_research_agent_ollama_three_stage(
                 payload,
                 thread_id=thread_id,
@@ -2251,6 +2258,21 @@ class HelperAIService:
             "type": "object",
             "properties": {
                 "extraction_questions": {"type": "array", "items": {"type": "string"}},
+                "extraction_question_specs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "answer_format": {
+                                "type": "string",
+                                "enum": ["exact_text", "factual_answer"],
+                            },
+                        },
+                        "required": ["question", "answer_format"],
+                    },
+                    "description": "Precise full-text questions. exact_text requires a direct quote; factual_answer requires a concise fact from the paper.",
+                },
                 "extraction_fields": {"type": "array", "items": {"type": "string"}},
                 "evidence_requirements": {"type": "array", "items": {"type": "string"}},
                 "notes": {"type": "string"},
@@ -2908,20 +2930,45 @@ class HelperAIService:
         extraction_questions = self._as_string_list(
             args.get("extraction_questions"),
             fallback=[
-                f"What direct evidence in the full text answers the objective: {objective}",
-                "Which methods, assays, figures, tables, or result sections support the answer?",
-                "What limitations or negative evidence should be reported?",
+                f"Return the exact sentence or phrase that directly supports the objective: {objective}",
+                "Return the specific named entity, residue, method, assay, figure, table, or numeric value that answers the objective.",
             ],
         )
+        raw_question_specs = self._as_dict_list(args.get("extraction_question_specs"))
+        extraction_question_specs: list[dict[str, str]] = []
+        for index, item in enumerate(raw_question_specs, start=1):
+            question = str(item.get("question") or "").strip()
+            if not question:
+                continue
+            answer_format = str(item.get("answer_format") or item.get("format") or "factual_answer").strip()
+            if answer_format not in {"exact_text", "factual_answer"}:
+                answer_format = "factual_answer"
+            extraction_question_specs.append(
+                {
+                    "id": self._slug_id(str(item.get("id") or question), f"question_{index}"),
+                    "question": question,
+                    "answer_format": answer_format,
+                }
+            )
+        if not extraction_question_specs:
+            extraction_question_specs = [
+                {
+                    "id": self._slug_id(question, f"question_{index}"),
+                    "question": question,
+                    "answer_format": "exact_text" if index == 1 else "factual_answer",
+                }
+                for index, question in enumerate(extraction_questions, start=1)
+            ]
+        extraction_questions = [item["question"] for item in extraction_question_specs]
         extraction_fields = self._as_string_list(
             args.get("extraction_fields"),
             fallback=[
                 "paper_id",
                 "question",
+                "answer_format",
                 "answer",
                 "evidence_quote",
                 "page_or_section",
-                "method",
                 "confidence",
             ],
         )
@@ -2961,6 +3008,7 @@ class HelperAIService:
         }
         extraction_strategy = {
             "extraction_questions": extraction_questions,
+            "extraction_question_specs": extraction_question_specs,
             "extraction_fields": extraction_fields,
             "evidence_requirements": evidence_requirements,
             "output_schema": {
@@ -3039,6 +3087,7 @@ class HelperAIService:
             "query_expansion_policy": search_strategy["query_expansion_policy"],
             "extraction_strategy": extraction_strategy,
             "extraction_questions": extraction_questions,
+            "extraction_question_specs": extraction_question_specs,
             "extraction_fields": extraction_fields,
             "evidence_requirements": evidence_requirements,
             "open_questions": self._as_string_list(args.get("open_questions")),

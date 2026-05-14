@@ -213,6 +213,24 @@
               <div class="native-settings-card">
                 <div class="native-settings-row">
                   <div class="native-settings-copy">
+                    <div class="native-settings-title">Research Planner Flow</div>
+                    <div class="native-settings-description">
+                      Selects whether Research Agent planning uses the staged planner agents or the legacy single planning block.
+                    </div>
+                  </div>
+                  <label class="native-settings-field native-settings-field-wide" for="researchPlannerModeInput">
+                    <span>Flow</span>
+                    <select id="researchPlannerModeInput" class="native-settings-select">
+                      <option value="staged" selected>Staged agents</option>
+                      <option value="legacy">Legacy block</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="researchPlannerModeStatus" class="native-settings-note">Research Agent uses Search, Criteria and Extraction planner stages.</div>
+              </div>
+              <div class="native-settings-card">
+                <div class="native-settings-row">
+                  <div class="native-settings-copy">
                     <div class="native-settings-title">Download Methods</div>
                     <div class="native-settings-description">
                       Selects which downloader bridge the browser download flow uses for article fetches.

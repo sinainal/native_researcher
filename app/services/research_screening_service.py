@@ -181,18 +181,31 @@ class ResearchScreeningService:
             ensure_ascii=False,
         )
         if model_target.provider in {"ollama", "llamacpp"}:
-            return await self._run_ollama_agent_batch_stream(
-                model_name=model_target.model_name,
-                provider=model_target.provider,
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": user_prompt},
-                ],
-                tools=self._build_ollama_screening_toolset(),
-                thinking_level=thinking_level,
-                progress=progress,
-                format_retries=1,
-            )
+            try:
+                return await self._run_ollama_agent_batch_stream(
+                    model_name=model_target.model_name,
+                    provider=model_target.provider,
+                    messages=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    tools=self._build_ollama_screening_toolset(),
+                    thinking_level=thinking_level,
+                    progress=progress,
+                    format_retries=1,
+                )
+            except RuntimeError as exc:
+                if not _screening_error_allows_local_fallback(str(exc)):
+                    raise
+                if progress is not None:
+                    await progress(
+                        {
+                            "stage": "screening_agent_local_fallback",
+                            "message": f"Screening agent failed to return a valid tool call; local scorer completed this batch. Error: {exc}",
+                            "model": model_target.model_name,
+                        }
+                    )
+                return _trace_items(self._screen_candidates_deterministic(candidates, plan))
 
         if len((api_key or "").strip()) < 10:
             raise RuntimeError("Screening agent requires a Gemini API key for Gemini models.")
@@ -344,6 +357,19 @@ class ResearchScreeningService:
 
         if tool_items is not None:
             return tool_items
+        if content_parts:
+            parsed_items = _parse_screening_text_items("".join(content_parts))
+            if parsed_items is not None:
+                if progress is not None:
+                    await progress(
+                        {
+                            "stage": "screening_agent_text_json",
+                            "message": "Screening agent returned JSON text instead of a function call; parsed it without failing the run.",
+                            "candidate_count": len(parsed_items),
+                            "model": model_name,
+                        }
+                    )
+                return parsed_items
         if format_errors and format_retries > 0:
             if progress is not None:
                 await progress(
@@ -791,6 +817,43 @@ def _parse_agent_json_list(raw_text: str) -> list[Any]:
         if not isinstance(parsed, list):
             raise ValueError(f"Screening agent returned {type(parsed)} instead of a JSON list.")
         return parsed
+
+
+def _parse_screening_text_items(raw_text: str) -> list[Any] | None:
+    try:
+        items = _parse_agent_json_list(raw_text)
+    except Exception:
+        return None
+    try:
+        return _tool_call_screening_items({"items": items})
+    except RuntimeError:
+        return None
+
+
+def _screening_error_allows_local_fallback(message: str) -> bool:
+    return any(
+        fragment in message
+        for fragment in (
+            "did not call `screen_research_candidates`",
+            "returned prose/JSON text",
+            "finished without emitting",
+            "did not include a candidate score list",
+        )
+    )
+
+
+def _trace_items(traces: list[ResearchScreeningTrace]) -> list[dict[str, Any]]:
+    return [
+        {
+            "candidate_id": trace.candidate_id,
+            "criterion_scores": dict(trace.criterion_scores),
+            "exclusion_scores": dict(trace.exclusion_scores),
+            "confidence": trace.final_score,
+            "evidence": list(trace.evidence),
+            "rationale": trace.rationale,
+        }
+        for trace in traces
+    ]
 
 
 def _strip_code_fence(raw_text: str) -> str:

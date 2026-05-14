@@ -1446,6 +1446,227 @@ class HelperAIService:
             executed_actions=executed_actions,
         )
 
+    async def _chat_stream_research_agent_ollama_three_stage(
+        self,
+        payload: HelperChatRequest,
+        *,
+        thread_id: str,
+        thread_state: HelperThreadState,
+        model_name: str,
+        provider: str = "ollama",
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
+        yield {"type": "status", "text": "SearchPlannerAgent is creating sources, branches, and filters."}
+
+        executed_actions: list[HelperExecutedAction] = []
+        streamed_thoughts: list[str] = []
+        stage_outputs: dict[str, dict[str, Any]] = {}
+
+        stages = [
+            {
+                "stage": "search",
+                "agent": "SearchPlannerAgent",
+                "tool_name": "create_search_plan",
+                "title": "Search plan created",
+                "status": "SearchPlannerAgent is creating sources, branches, and filters.",
+                "schema": self._research_search_plan_parameters_schema(),
+                "tools": self._build_ollama_research_stage_toolset(
+                    name="create_search_plan",
+                    description="Create only the search planning stage: topic, objective, sources, year filters, branches, and query concepts.",
+                    parameters=self._research_search_plan_parameters_schema(),
+                ),
+            },
+            {
+                "stage": "criteria",
+                "agent": "CriteriaPlannerAgent",
+                "tool_name": "create_criteria_plan",
+                "title": "Criteria plan created",
+                "status": "CriteriaPlannerAgent is creating screening and exclusion criteria.",
+                "schema": self._research_criteria_plan_parameters_schema(),
+                "tools": self._build_ollama_research_stage_toolset(
+                    name="create_criteria_plan",
+                    description="Create only the criteria planning stage from the validated search plan context.",
+                    parameters=self._research_criteria_plan_parameters_schema(),
+                ),
+            },
+            {
+                "stage": "extraction",
+                "agent": "ExtractionPlannerAgent",
+                "tool_name": "create_extraction_plan",
+                "title": "Extraction plan created",
+                "status": "ExtractionPlannerAgent is creating PDF/full-text questions and evidence rules.",
+                "schema": self._research_extraction_plan_parameters_schema(),
+                "tools": self._build_ollama_research_stage_toolset(
+                    name="create_extraction_plan",
+                    description="Create only the PDF/full-text extraction stage from search and criteria context.",
+                    parameters=self._research_extraction_plan_parameters_schema(),
+                ),
+            },
+        ]
+
+        for stage in stages:
+            yield {"type": "status", "text": stage["status"]}
+            context = {
+                "today": date.today().isoformat(),
+                "user_request": payload.message.strip(),
+                "loaded_article_count": len(payload.articles),
+                "selected_article_ids": payload.selected_ids,
+                "search_plan": stage_outputs.get("search"),
+                "criteria_plan": stage_outputs.get("criteria"),
+            }
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are {stage['agent']} inside Native Researcher. "
+                        f"Call `{stage['tool_name']}` exactly once. Do not answer in prose. "
+                        "Planning does not execute database searches, screening, downloads, or PDF scans."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "stage": stage["stage"],
+                            "context": context,
+                            "required_tool": stage["tool_name"],
+                            "required_schema": stage["schema"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+            call_args: dict[str, Any] | None = None
+            raw_answer = ""
+            raw_thinking = ""
+            for attempt in range(2):
+                if attempt:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"You did not call `{stage['tool_name']}`. "
+                                f"Call `{stage['tool_name']}` now with valid arguments only. No prose."
+                            ),
+                        }
+                    )
+                async for chunk in self._local_llm_chat_stream(
+                    provider=provider,
+                    model=model_name,
+                    messages=messages,
+                    tools=stage["tools"],
+                    thinking_level=payload.thinking_level,
+                    **(
+                        {
+                            "tool_choice": {
+                                "type": "function",
+                                "function": {"name": stage["tool_name"]},
+                            }
+                        }
+                        if provider == "llamacpp"
+                        else {}
+                    ),
+                    keep_alive="10m",
+                    timeout_seconds=900.0,
+                    request_user_agent=self._ollama_request_user_agent(),
+                ):
+                    message = chunk.get("message") or {}
+                    thinking = str(message.get("thinking") or "")
+                    if thinking:
+                        raw_thinking += thinking
+                        streamed_thoughts.append(thinking)
+                        yield {"type": "thinking_delta", "text": thinking}
+                    content = str(message.get("content") or "")
+                    if content:
+                        raw_answer += content
+                    for call in extract_ollama_tool_calls(message):
+                        if call.name != stage["tool_name"]:
+                            continue
+                        call_args = call.args
+                        yield {
+                            "type": "tool_call",
+                            "call_id": call.call_id,
+                            "action": {
+                                "type": "tool_call",
+                                "name": stage["tool_name"],
+                                "title": self._tool_pending_title(stage["tool_name"]),
+                                "status": "running",
+                                "details": call.args,
+                            },
+                        }
+                        break
+                    if call_args is not None:
+                        break
+                if call_args is not None:
+                    break
+            if call_args is None:
+                raise RuntimeError(f"{stage['agent']} did not call `{stage['tool_name']}`.")
+            stage_outputs[stage["stage"]] = dict(call_args)
+            action = HelperExecutedAction(
+                type="tool_call",
+                name=str(stage["tool_name"]),
+                title=str(stage["title"]),
+                status="success",
+                details={
+                    "agent": stage["agent"],
+                    "stage": stage["stage"],
+                    "output": dict(call_args),
+                },
+            )
+            executed_actions.append(action)
+            yield {
+                "type": "tool_result",
+                "call_id": f"{stage['stage']}_plan",
+                "action": action.model_dump(),
+            }
+
+        merged_args: dict[str, Any] = {}
+        for stage_name in ("search", "criteria", "extraction"):
+            merged_args.update(stage_outputs.get(stage_name) or {})
+        plan = self._normalize_research_plan(merged_args)
+        thread_state.research_plan = plan
+        plan_action = HelperExecutedAction(
+            type="tool_call",
+            name="create_research_plan",
+            title="Research plan merged",
+            status="success",
+            details={
+                "plan": plan,
+                "execution_state": "planned",
+                "revision_state": "created",
+            },
+        )
+        executed_actions.append(plan_action)
+        yield {
+            "type": "tool_result",
+            "call_id": "research_plan_merged",
+            "action": plan_action.model_dump(),
+        }
+        answer = self._research_plan_preview_text(plan)
+        yield {"type": "answer_delta", "text": answer}
+        self._append_history(thread_state, payload.message, answer)
+        self.thread_cache.set(thread_id, thread_state)
+        self._log(
+            "assistant_stream_final",
+            thread_id=thread_id,
+            mode=RESEARCH_AGENT_MODE,
+            model=model_name,
+            answer=answer,
+            used_article_ids=[],
+            executed_actions=[action.model_dump() for action in executed_actions],
+            history_size=len(thread_state.history),
+        )
+        response = HelperChatResponse(
+            thread_id=thread_id,
+            answer=answer,
+            model=model_name,
+            mode=RESEARCH_AGENT_MODE,
+            history_size=len(thread_state.history),
+            thinking="\n\n".join(streamed_thoughts).strip() or None,
+            executed_actions=executed_actions,
+        )
+        yield {"type": "final", "response": response.model_dump()}
+
     async def _chat_stream_research_agent_ollama(
         self,
         payload: HelperChatRequest,
@@ -1455,6 +1676,17 @@ class HelperAIService:
         model_name: str,
         provider: str = "ollama",
     ) -> AsyncIterator[dict[str, Any]]:
+        if not thread_state.research_plan:
+            async for event in self._chat_stream_research_agent_ollama_three_stage(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+                provider=provider,
+            ):
+                yield event
+            return
+
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
         yield {"type": "status", "text": "Research Agent is building the first planning tool call."}
 
@@ -1918,6 +2150,115 @@ class HelperAIService:
         ]
 
     @staticmethod
+    def _build_ollama_research_stage_toolset(
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                },
+            }
+        ]
+
+    @staticmethod
+    def _research_search_plan_parameters_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string"},
+                "objective": {"type": "string"},
+                "target_count": {"type": "integer"},
+                "target_count_per_branch": {"type": "integer"},
+                "year_start": {"type": "integer"},
+                "year_end": {"type": "integer"},
+                "databases": {"type": "array", "items": {"type": "string"}},
+                "active_databases": {"type": "array", "items": {"type": "string"}},
+                "search_branches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "query": {"type": "string"},
+                        },
+                        "required": ["label", "query"],
+                    },
+                },
+                "shared_query_concepts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "query": {"type": "string"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+                "candidate_budget": {
+                    "type": "object",
+                    "properties": {
+                        "target_count": {"type": "integer"},
+                        "per_database": {"type": "integer"},
+                        "rule": {"type": "string"},
+                    },
+                },
+                "query_expansion_policy": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["topic", "objective", "search_branches"],
+        }
+
+    @staticmethod
+    def _research_criteria_plan_parameters_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "criteria_mode": {"type": "string"},
+                "screening_criteria": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "description": {"type": "string"},
+                            "required": {"type": "boolean"},
+                            "weight": {"type": "number"},
+                            "scoring_guidance": {"type": "string"},
+                        },
+                        "required": ["id", "label", "description"],
+                    },
+                },
+                "exclusion_criteria": {"type": "array", "items": {"type": "string"}},
+                "screening_json_schema": {"type": "object"},
+                "scoring_rule": {"type": "string"},
+            },
+            "required": ["screening_criteria"],
+        }
+
+    @staticmethod
+    def _research_extraction_plan_parameters_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "extraction_questions": {"type": "array", "items": {"type": "string"}},
+                "extraction_fields": {"type": "array", "items": {"type": "string"}},
+                "evidence_requirements": {"type": "array", "items": {"type": "string"}},
+                "notes": {"type": "string"},
+            },
+            "required": ["extraction_questions"],
+        }
+
+    @staticmethod
     def _research_plan_parameters_schema() -> dict[str, Any]:
         return {
             "type": "object",
@@ -2122,6 +2463,9 @@ class HelperAIService:
             "search_pubmed": "Searching literature",
             "get_article_details": "Reading article details",
             "create_research_plan": "Creating research plan",
+            "create_search_plan": "SearchPlannerAgent planning",
+            "create_criteria_plan": "CriteriaPlannerAgent planning",
+            "create_extraction_plan": "ExtractionPlannerAgent planning",
         }
         return titles.get(name, name)
 

@@ -894,7 +894,7 @@ def test_screening_agent_retries_when_model_returns_text_instead_of_tool(monkeyp
         if calls["count"] == 1:
             yield {"message": {"content": '[{"candidate_id":"cand_1","criterion_scores":{"residue_evidence":1.0},"exclusion_scores":{"exclusion_1":0.0}}]'}}
             return
-        assert "returned text/JSON instead of calling the required function" in kwargs["messages"][-1]["content"]
+            assert "returned text/JSON instead of calling the required function" in kwargs["messages"][-1]["content"]
         yield {"message": {"tool_calls": [{"function": {"id": "screen_call", "name": "screen_research_candidates", "arguments": {"items": [
             {
                 "candidate_id": "cand_1",
@@ -952,7 +952,65 @@ def test_screening_agent_retries_when_model_returns_text_instead_of_tool(monkeyp
                     json={"plan": plan, "screening_model": "ollama:test-screen-model"},
                 )
                 assert response.status_code == 200
-                assert calls["count"] == 2
-                assert response.json()["run_trace"]["screening"][0]["evidence"] == ["text retry fixed"]
+                assert calls["count"] == 1
+                assert response.json()["run_trace"]["screening"][0]["criterion_scores"]["residue_evidence"] == 1.0
+
+    asyncio.run(runner())
+
+
+def test_screening_agent_falls_back_when_model_never_calls_tool(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
+        _ = kwargs
+        yield {"message": {"content": "I cannot use the function right now."}}
+
+    monkeypatch.setattr("app.services.research_screening_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = Settings(
+                download_root=root / "downloads",
+                workspace_root=root / "workspace",
+                helper_log_path=root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=root / "assistant_api_key.txt",
+                ncbi_api_key_path=root / "ncbi_api",
+                unpaywall_email_path=root / "unpaywall_email",
+                openalex_api_key_path=root / "openalex_api_key",
+                core_api_key_path=root / "core_api_key",
+                pubmed_oa_only_path=root / "pubmed_oa_only",
+                ai_primary_search_resource_path=root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=root / "pdf_arxiv_fallback_enabled",
+            )
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                project = await client.post("/app/projects", json={"name": "Fallback Test", "description": ""})
+                project_id = project.json()["id"]
+                plan = {
+                    "topic": "Receptor binding residues",
+                    "target_count_per_branch": 1,
+                    "active_databases": ["PubMed"],
+                    "candidate_budget": {"per_database": 2},
+                    "search_branches": [{"id": "alpha", "label": "Receptor alpha", "query": "receptor alpha"}],
+                    "screening_criteria": [{"id": "residue_evidence", "label": "Residue evidence"}],
+                    "exclusion_criteria": ["review"],
+                }
+                response = await client.post(
+                    f"/app/projects/{project_id}/research-plan/execute",
+                    json={"plan": plan, "screening_model": "ollama:test-screen-model"},
+                )
+                assert response.status_code == 200
+                trace = response.json()["run_trace"]["screening"][0]
+                assert trace["rationale"] == "Deterministic local scorer used for tests or explicit offline execution."
 
     asyncio.run(runner())

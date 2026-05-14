@@ -231,16 +231,16 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
     async def fake_ollama_chat_stream(**kwargs):
         fake_ollama_chat_stream.calls += 1
         if fake_ollama_chat_stream.calls == 1:
-            assert kwargs["tools"][0]["function"]["name"] == "create_research_plan"
-            assert "Researcher Agent" in kwargs["messages"][0]["content"]
+            assert kwargs["tools"][0]["function"]["name"] == "create_search_plan"
+            assert "SearchPlannerAgent" in kwargs["messages"][0]["content"]
             yield {"message": {"thinking": "Building a research plan. "}}
             yield {
                 "message": {
                     "tool_calls": [
                         {
                             "function": {
-                                "id": "plan_call",
-                                "name": "create_research_plan",
+                                "id": "search_plan_call",
+                                "name": "create_search_plan",
                                 "arguments": {
                                     "topic": "dopamine D1-D5 docking papers",
                                     "objective": "Find docking papers that identify strong interaction regions.",
@@ -257,6 +257,24 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
                                             "query": '"molecular docking" OR "interaction map" OR "binding pose"',
                                         }
                                     ],
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        if fake_ollama_chat_stream.calls == 2:
+            assert kwargs["tools"][0]["function"]["name"] == "create_criteria_plan"
+            assert "CriteriaPlannerAgent" in kwargs["messages"][0]["content"]
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "criteria_plan_call",
+                                "name": "create_criteria_plan",
+                                "arguments": {
                                     "screening_criteria": [
                                         {
                                             "id": "docking_performed",
@@ -278,7 +296,28 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
                 }
             }
             return
-        yield {"message": {"content": "Researcher plan preview is ready. Ask for edits or execute later."}}
+        assert fake_ollama_chat_stream.calls == 3
+        assert kwargs["tools"][0]["function"]["name"] == "create_extraction_plan"
+        assert "ExtractionPlannerAgent" in kwargs["messages"][0]["content"]
+        yield {
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "id": "extraction_plan_call",
+                            "name": "create_extraction_plan",
+                            "arguments": {
+                                "extraction_questions": [
+                                    "Which receptor residues interact with ligands in the full text?"
+                                ],
+                                "extraction_fields": ["paper_id", "residue", "evidence_quote"],
+                                "evidence_requirements": ["Use only downloaded PDF/XML evidence."],
+                            },
+                        }
+                    }
+                ]
+            }
+        }
 
     fake_ollama_chat_stream.calls = 0
     monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
@@ -299,7 +338,13 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
             event["type"] == "thinking_delta" and "Building a research plan" in str(event.get("text") or "")
             for event in events
         )
-        tool_result = next(event for event in events if event["type"] == "tool_result")
+        tool_results = [event for event in events if event["type"] == "tool_result"]
+        assert [event["action"]["name"] for event in tool_results[:3]] == [
+            "create_search_plan",
+            "create_criteria_plan",
+            "create_extraction_plan",
+        ]
+        tool_result = tool_results[-1]
         plan = tool_result["action"]["details"]["plan"]
         assert plan["topic"] == "dopamine D1-D5 docking papers"
         assert plan["candidate_budget"]["per_database"] == 40
@@ -312,9 +357,14 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
         ]
         final_event = next(event for event in events if event["type"] == "final")
         assert final_event["response"]["mode"] == "research_agent"
-        assert final_event["response"]["executed_actions"][0]["name"] == "create_research_plan"
+        assert [action["name"] for action in final_event["response"]["executed_actions"]] == [
+            "create_search_plan",
+            "create_criteria_plan",
+            "create_extraction_plan",
+            "create_research_plan",
+        ]
         assert "Building a research plan" in final_event["response"]["thinking"]
-        assert "Researcher plan preview is ready" in final_event["response"]["answer"]
+        assert "Researcher plan created" in final_event["response"]["answer"]
 
     asyncio.run(runner())
 
@@ -335,11 +385,12 @@ def test_research_agent_ollama_retries_when_first_turn_skips_tool(monkeypatch) -
                         {
                             "function": {
                                 "id": "retry_plan_call",
-                                "name": "create_research_plan",
+                                "name": "create_search_plan",
                                 "arguments": {
                                     "topic": "dopamine D1-D5 interacting residues",
                                     "objective": "Find residue-level interaction evidence for dopamine D1-D5 receptor types.",
                                     "target_count": 20,
+                                    "search_branches": [{"label": "dopamine D1-D5", "query": "dopamine receptor"}],
                                 },
                             }
                         }
@@ -347,7 +398,44 @@ def test_research_agent_ollama_retries_when_first_turn_skips_tool(monkeypatch) -
                 }
             }
             return
-        yield {"message": {"content": "Researcher plan preview is ready."}}
+        if fake_ollama_chat_stream.calls == 3:
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "criteria_plan_call",
+                                "name": "create_criteria_plan",
+                                "arguments": {
+                                    "screening_criteria": [
+                                        {
+                                            "id": "residue_evidence",
+                                            "label": "Residue evidence",
+                                            "description": "Reports residue-level interaction evidence.",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        yield {
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "id": "extraction_plan_call",
+                            "name": "create_extraction_plan",
+                            "arguments": {
+                                "extraction_questions": ["Which residues are supported by full-text evidence?"]
+                            },
+                        }
+                    }
+                ]
+            }
+        }
 
     fake_ollama_chat_stream.calls = 0
     monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
@@ -370,14 +458,14 @@ def test_research_agent_ollama_retries_when_first_turn_skips_tool(monkeypatch) -
         ]
         assert leaked_prose == []
         assert any(
-            event["type"] == "status" and "requesting the required planning tool call again" in str(event.get("text") or "")
+            event["type"] == "status" and "SearchPlannerAgent" in str(event.get("text") or "")
             for event in events
         )
-        assert "You returned ordinary text instead of the required function call" in str(seen_messages[1][-1]["content"])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
+        assert "did not call `create_search_plan`" in str(seen_messages[1][-1]["content"])
+        tool_result = [event for event in events if event["type"] == "tool_result"][-1]
         assert tool_result["action"]["details"]["plan"]["topic"] == "dopamine D1-D5 interacting residues"
         final_event = next(event for event in events if event["type"] == "final")
-        assert final_event["response"]["executed_actions"][0]["name"] == "create_research_plan"
+        assert final_event["response"]["executed_actions"][-1]["name"] == "create_research_plan"
 
     asyncio.run(runner())
 

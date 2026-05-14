@@ -2545,7 +2545,7 @@ function cloneJson(value) {
 function sanitizeAssistantAction(action) {
   if (!action) return null;
   const details = action.details || {};
-  if (action.name === "create_research_plan") {
+  if (action.name === "create_research_plan" || action.name === "create_search_plan" || action.name === "create_criteria_plan" || action.name === "create_extraction_plan") {
     return {
       type: action.type,
       name: action.name,
@@ -6329,6 +6329,9 @@ function assistantActionLabel(action) {
     get_article_details: "Reading article details",
     list_catalog_articles: "Scanning catalog",
     create_research_plan: "Creating research plan",
+    create_search_plan: "Running SearchPlannerAgent",
+    create_criteria_plan: "Running CriteriaPlannerAgent",
+    create_extraction_plan: "Running ExtractionPlannerAgent",
     research_execution_report: "Preparing report",
   };
   const success = {
@@ -6336,6 +6339,9 @@ function assistantActionLabel(action) {
     get_article_details: "Read article details",
     list_catalog_articles: "Scanned catalog",
     create_research_plan: "Created research plan",
+    create_search_plan: "Search plan ready",
+    create_criteria_plan: "Criteria plan ready",
+    create_extraction_plan: "Extraction plan ready",
     research_execution_report: "Research report ready",
   };
   const error = {
@@ -6343,6 +6349,9 @@ function assistantActionLabel(action) {
     get_article_details: "Article detail read failed",
     list_catalog_articles: "Catalog scan failed",
     create_research_plan: "Research plan failed",
+    create_search_plan: "SearchPlannerAgent failed",
+    create_criteria_plan: "CriteriaPlannerAgent failed",
+    create_extraction_plan: "ExtractionPlannerAgent failed",
     research_execution_report: "Report failed",
   };
   if (action.status === "running") return running[action.name] || "Running tool";
@@ -6365,6 +6374,9 @@ function assistantActionDetail(action) {
   if (action.name === "create_research_plan") {
     return details.plan?.topic || "Structured plan";
   }
+  if (action.name === "create_search_plan" || action.name === "create_criteria_plan" || action.name === "create_extraction_plan") {
+    return details.agent || details.stage || "Planning stage";
+  }
   if (action.name === "research_execution_report") {
     return `${details.selected_count || 0} selected · ${details.candidate_count || 0} candidates`;
   }
@@ -6377,6 +6389,9 @@ function assistantActionKindLabel(action) {
     get_article_details: "Evidence",
     list_catalog_articles: "Catalog",
     create_research_plan: "Plan",
+    create_search_plan: "Search planner",
+    create_criteria_plan: "Criteria planner",
+    create_extraction_plan: "Extraction planner",
     research_execution_report: "Report",
   };
   return map[action.name] || "Tool";

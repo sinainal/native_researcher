@@ -12,6 +12,8 @@
 - Added report plots for branch coverage and score distribution, and tightened report layout for desktop and mobile popups.
 - Added `search_strategy`, `criteria_strategy`, `extraction_strategy`, and ordered `planner_stages` metadata to Research Agent plans.
 - Added a `/pdf/extract` endpoint that downloads PDF/XML artifacts, extracts text, and answers extraction questions from the downloaded full text.
+- Changed the first local Research Agent planning turn from one planner tool call to three visible stage calls: `create_search_plan`, `create_criteria_plan`, and `create_extraction_plan`, then backend merge into `create_research_plan`.
+- Added screening recovery when a local model returns JSON text instead of the `screen_research_candidates` tool call, and local deterministic fallback when no valid tool/JSON output is produced.
 
 ## Remaining Known Issues
 
@@ -21,7 +23,7 @@
 - Screening execution is still abstract/title-level. Full-text/PDF extraction now exists as a backend endpoint, but is not yet wired into the main research execution UI as an automatic next stage.
 - The Screening Agent currently scores one candidate per model call. This is reliable but slow for large runs.
 - Candidate pre-screening still limits the number of candidates sent to the LLM by recency per branch, which can miss older seminal papers.
-- The planner stages are now explicit in the normalized plan, but the existing chat flow still enters through one `create_research_plan` tool call. A deeper split into separate model calls should be done after the current execution/report path is stable.
+- The three-stage planner split is implemented for the first local Research Agent planning turn. Existing-plan edits still use the legacy single `create_research_plan` path until edit semantics are redesigned.
 
 ## Proposed Three-Agent Architecture
 
@@ -79,7 +81,7 @@ Backend responsibility:
 ## Suggested Next Implementation Order
 
 1. Persist `research_plan` into project state as a first-class object keyed by run/session.
-2. Split the existing `create_research_plan` tool into separate SearchPlannerAgent, CriteriaPlannerAgent, and ExtractionPlannerAgent model calls once the UI can show per-stage status/errors.
+2. Extend the three-stage planner split to plan edits/revisions once edit semantics are redesigned.
 3. Add database-specific query normalization in backend adapters.
 4. Add partial-failure warnings and retry/broaden controls in the Search Report.
 5. Add a user approval step before PDF downloads.

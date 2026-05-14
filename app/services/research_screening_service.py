@@ -181,31 +181,18 @@ class ResearchScreeningService:
             ensure_ascii=False,
         )
         if model_target.provider in {"ollama", "llamacpp"}:
-            try:
-                return await self._run_ollama_agent_batch_stream(
-                    model_name=model_target.model_name,
-                    provider=model_target.provider,
-                    messages=[
-                        {"role": "system", "content": system_instruction},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    tools=self._build_ollama_screening_toolset(),
-                    thinking_level=thinking_level,
-                    progress=progress,
-                    format_retries=1,
-                )
-            except RuntimeError as exc:
-                if not _screening_error_allows_local_fallback(str(exc)):
-                    raise
-                if progress is not None:
-                    await progress(
-                        {
-                            "stage": "screening_agent_local_fallback",
-                            "message": f"Screening agent failed to return a valid tool call; local scorer completed this batch. Error: {exc}",
-                            "model": model_target.model_name,
-                        }
-                    )
-                return _trace_items(self._screen_candidates_deterministic(candidates, plan))
+            return await self._run_ollama_agent_batch_stream(
+                model_name=model_target.model_name,
+                provider=model_target.provider,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_prompt},
+                ],
+                tools=self._build_ollama_screening_toolset(),
+                thinking_level=thinking_level,
+                progress=progress,
+                format_retries=2,
+            )
 
         if len((api_key or "").strip()) < 10:
             raise RuntimeError("Screening agent requires a Gemini API key for Gemini models.")
@@ -443,6 +430,38 @@ class ResearchScreeningService:
                 )
             raise RuntimeError(
                 "Screening agent returned prose/JSON text instead of calling `screen_research_candidates` after retry."
+            )
+        if format_retries > 0:
+            if progress is not None:
+                await progress(
+                    {
+                        "stage": "screening_agent_format_retry",
+                        "message": "Screening agent returned no valid tool call or parseable JSON. Sending error feedback and retrying the tool call.",
+                        "model": model_name,
+                    }
+                )
+            return await self._run_ollama_agent_batch_stream(
+                model_name=model_name,
+                provider=provider,
+                messages=[
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Error: your previous response did not call `screen_research_candidates` "
+                            "and did not contain parseable screening JSON. Retry now. "
+                            "Call `screen_research_candidates` with exactly this argument shape: "
+                            '{"items":[{"candidate_id":"cand_1","criterion_scores":{"criterion_id":0.0},'
+                            '"exclusion_scores":{"exclusion_1":0.0},"confidence":0.0,'
+                            '"evidence":["short evidence from the abstract"],"rationale":"short reason"}]}. '
+                            "Include exactly one item for the provided candidate_id. Do not answer in prose."
+                        ),
+                    },
+                ],
+                tools=tools,
+                thinking_level=thinking_level,
+                progress=progress,
+                format_retries=format_retries - 1,
             )
         raise RuntimeError("Screening agent did not call `screen_research_candidates`.")
 
@@ -828,32 +847,6 @@ def _parse_screening_text_items(raw_text: str) -> list[Any] | None:
         return _tool_call_screening_items({"items": items})
     except RuntimeError:
         return None
-
-
-def _screening_error_allows_local_fallback(message: str) -> bool:
-    return any(
-        fragment in message
-        for fragment in (
-            "did not call `screen_research_candidates`",
-            "returned prose/JSON text",
-            "finished without emitting",
-            "did not include a candidate score list",
-        )
-    )
-
-
-def _trace_items(traces: list[ResearchScreeningTrace]) -> list[dict[str, Any]]:
-    return [
-        {
-            "candidate_id": trace.candidate_id,
-            "criterion_scores": dict(trace.criterion_scores),
-            "exclusion_scores": dict(trace.exclusion_scores),
-            "confidence": trace.final_score,
-            "evidence": list(trace.evidence),
-            "rationale": trace.rationale,
-        }
-        for trace in traces
-    ]
 
 
 def _strip_code_fence(raw_text: str) -> str:

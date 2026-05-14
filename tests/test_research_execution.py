@@ -958,9 +958,13 @@ def test_screening_agent_retries_when_model_returns_text_instead_of_tool(monkeyp
     asyncio.run(runner())
 
 
-def test_screening_agent_falls_back_when_model_never_calls_tool(monkeypatch) -> None:
+def test_screening_agent_retries_then_fails_when_model_never_calls_tool(monkeypatch) -> None:
+    calls = {"count": 0}
+
     async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
-        _ = kwargs
+        calls["count"] += 1
+        if calls["count"] > 1:
+            assert "Error:" in kwargs["messages"][-1]["content"] or "returned text/JSON" in kwargs["messages"][-1]["content"]
         yield {"message": {"content": "I cannot use the function right now."}}
 
     monkeypatch.setattr("app.services.research_screening_service.ollama_chat_stream", fake_ollama_chat_stream)
@@ -1009,8 +1013,8 @@ def test_screening_agent_falls_back_when_model_never_calls_tool(monkeypatch) -> 
                     f"/app/projects/{project_id}/research-plan/execute",
                     json={"plan": plan, "screening_model": "ollama:test-screen-model"},
                 )
-                assert response.status_code == 200
-                trace = response.json()["run_trace"]["screening"][0]
-                assert trace["rationale"] == "Deterministic local scorer used for tests or explicit offline execution."
+                assert response.status_code == 502
+                assert calls["count"] == 3
+                assert "screen_research_candidates" in response.json()["detail"]
 
     asyncio.run(runner())

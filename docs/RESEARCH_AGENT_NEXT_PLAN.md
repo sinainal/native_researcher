@@ -13,7 +13,7 @@
 - Added `search_strategy`, `criteria_strategy`, `extraction_strategy`, and ordered `planner_stages` metadata to Research Agent plans.
 - Added a `/pdf/extract` endpoint that downloads PDF/XML artifacts, extracts text, and answers extraction questions from the downloaded full text.
 - Changed the first local Research Agent planning turn from one planner tool call to three visible stage calls: `create_search_plan`, `create_criteria_plan`, and `create_extraction_plan`, then backend merge into `create_research_plan`.
-- Added screening recovery when a local model returns JSON text instead of the `screen_research_candidates` tool call, and local deterministic fallback when no valid tool/JSON output is produced.
+- Added screening recovery when a local model returns valid JSON text instead of the `screen_research_candidates` tool call. If the model returns neither a valid tool call nor parseable JSON, the backend sends explicit retry feedback; after retries fail, execution stops with an error instead of silently using deterministic scoring.
 
 ## Remaining Known Issues
 
@@ -59,7 +59,7 @@ Outputs:
 Backend responsibility:
 - enforce required criteria
 - compute final score deterministically from returned criterion scores
-- keep fallback deterministic scoring for missing/invalid model outputs
+- stop with a visible error when the screening model cannot produce a valid tool call or parseable JSON after retry
 
 ### 3. Full-Text Extraction Agent
 

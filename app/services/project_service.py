@@ -266,7 +266,8 @@ class ProjectService:
                 query_detail_id,
                 downloadability_cache_json,
                 current_session_id,
-                assistant_sessions_json
+                assistant_sessions_json,
+                research_runs_json
             FROM project_state
             WHERE project_id = ?
             """,
@@ -294,6 +295,7 @@ class ProjectService:
             "downloadability_cache": self._loads_json(state_row["downloadability_cache_json"], default={}),
             "current_session_id": state_row["current_session_id"],
             "assistant_sessions": self._loads_json(state_row["assistant_sessions_json"], default=[]),
+            "research_runs": self._loads_json(state_row["research_runs_json"], default=[]),
             "query_history": [],
         }
         for row in query_rows:
@@ -320,9 +322,9 @@ class ProjectService:
                 INSERT INTO project_state (
                     project_id, active_query_id, selected_query_ids_json, selected_ids_json, detail_article_id,
                     sidebar_panel, query_detail_id, downloadability_cache_json, current_session_id,
-                    assistant_sessions_json, updated_at
+                    assistant_sessions_json, research_runs_json, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     active_query_id = excluded.active_query_id,
                     selected_query_ids_json = excluded.selected_query_ids_json,
@@ -333,6 +335,7 @@ class ProjectService:
                     downloadability_cache_json = excluded.downloadability_cache_json,
                     current_session_id = excluded.current_session_id,
                     assistant_sessions_json = excluded.assistant_sessions_json,
+                    research_runs_json = excluded.research_runs_json,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -346,6 +349,7 @@ class ProjectService:
                     json.dumps(payload.downloadability_cache, ensure_ascii=True),
                     payload.current_session_id,
                     json.dumps(payload.assistant_sessions, ensure_ascii=True),
+                    json.dumps(payload.research_runs, ensure_ascii=True),
                     timestamp,
                 ),
             )

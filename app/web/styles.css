@@ -6104,8 +6104,15 @@ body.is-document-viewer-open .native-document-viewer {
 
 .research-plan-edit-line {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
+  gap: 8px;
+}
+
+.research-plan-edit-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
@@ -7115,6 +7122,28 @@ body.is-document-viewer-open .native-document-viewer {
   grid-column: 1 / -1;
 }
 
+.native-model-settings-paths {
+  align-items: end;
+  gap: 12px;
+}
+
+.native-model-advanced {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.native-model-advanced summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.native-model-advanced .native-settings-field {
+  margin-top: 10px;
+}
+
 @media (min-width: 960px) {
   .native-model-popup-body {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -7123,6 +7152,12 @@ body.is-document-viewer-open .native-document-viewer {
 
   .native-model-settings-wide {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .native-model-settings-paths {
+    align-items: stretch;
   }
 }
 

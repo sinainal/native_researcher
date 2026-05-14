@@ -11,7 +11,13 @@ from typing import Any
 from uuid import uuid4
 
 from app.genai import create_genai_client, load_genai_sdk
-from app.llm import extract_ollama_tool_calls, ollama_chat, ollama_chat_stream, resolve_chat_model_target
+from app.llm import (
+    extract_ollama_tool_calls,
+    llamacpp_chat_stream,
+    ollama_chat,
+    ollama_chat_stream,
+    resolve_chat_model_target,
+)
 from app.schemas.helper import (
     HelperChatRequest,
     HelperChatResponse,
@@ -89,6 +95,17 @@ class NativeResearcherService:
     def _ollama_request_user_agent(self) -> str:
         return str(getattr(self.pubmed_service.settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1")
 
+    def _local_llm_base_url(self, provider: str) -> str:
+        if provider == "llamacpp":
+            return str(getattr(self.pubmed_service.settings, "llamacpp_base_url", "http://localhost:8098") or "http://localhost:8098")
+        return self._ollama_base_url()
+
+    async def _local_llm_chat_stream(self, *, provider: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        kwargs["base_url"] = self._local_llm_base_url(provider)
+        stream = llamacpp_chat_stream(**kwargs) if provider == "llamacpp" else ollama_chat_stream(**kwargs)
+        async for chunk in stream:
+            yield chunk
+
     @staticmethod
     def _ollama_assistant_message(
         *,
@@ -156,12 +173,13 @@ class NativeResearcherService:
             message=payload.message,
             thinking_level=payload.thinking_level,
         )
-        if model_target.provider == "ollama":
+        if model_target.provider in {"ollama", "llamacpp"}:
             async for event in self._chat_stream_with_ollama(
                 payload,
                 thread_id=thread_id,
                 thread_state=thread_state,
                 model_name=model_name,
+                provider=model_target.provider,
             ):
                 yield event
             return
@@ -187,7 +205,7 @@ class NativeResearcherService:
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "search"}
 
         remaining_tool_calls = MAX_NATIVE_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
 
         while True:
@@ -294,11 +312,11 @@ class NativeResearcherService:
             answer = "".join(answer_chunks).strip()
             if not answer and executed_actions:
                 finalizer_needed = True
-            answer = answer or "Yanit uretilemedi."
+            answer = answer or "No answer could be generated."
             break
 
         if finalizer_needed:
-            yield {"type": "status", "text": "Son yanıt hazırlanıyor."}
+            yield {"type": "status", "text": "Preparing the final answer."}
             final_contents = [
                 *contents,
                 types.Content(role="user", parts=[types.Part(text=NATIVE_FINALIZER_PROMPT)]),
@@ -361,6 +379,7 @@ class NativeResearcherService:
         thread_id: str,
         thread_state: NativeThreadState,
         model_name: str,
+        provider: str = "ollama",
     ) -> AsyncIterator[dict[str, Any]]:
         last_search_ids: list[int] = []
         executed_actions: list[HelperExecutedAction] = []
@@ -372,10 +391,10 @@ class NativeResearcherService:
         ]
 
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "search"}
-        yield {"type": "status", "text": "İstek analiz ediliyor."}
+        yield {"type": "status", "text": "Analyzing the request."}
 
         remaining_tool_calls = MAX_NATIVE_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
 
         while True:
@@ -384,8 +403,8 @@ class NativeResearcherService:
             tool_calls: list[Any] = []
             seen_tool_call_keys: set[tuple[str, str]] = set()
             tool_turn_active = False
-            async for chunk in ollama_chat_stream(
-                base_url=self._ollama_base_url(),
+            async for chunk in self._local_llm_chat_stream(
+                provider=provider,
                 model=model_name,
                 messages=messages,
                 tools=self._build_ollama_toolset() if remaining_tool_calls > 0 else None,
@@ -445,7 +464,7 @@ class NativeResearcherService:
                             "details": call.args,
                         },
                     }
-                    yield {"type": "status", "text": f"Araç çalıştırılıyor: {call.name}"}
+                    yield {"type": "status", "text": f"Running tool: {call.name}"}
                     result, action, last_search_ids = await self._execute_tool_call(
                         call.name,
                         call.args,
@@ -469,7 +488,7 @@ class NativeResearcherService:
                     remaining_tool_calls -= 1
                 continue
 
-            answer = answer_text or "Yanit uretilemedi."
+            answer = answer_text or "No answer could be generated."
             if answer_text:
                 messages.append(self._ollama_assistant_message(content=answer_text))
             if not answer_text and executed_actions:
@@ -477,10 +496,10 @@ class NativeResearcherService:
             break
 
         if finalizer_needed:
-            yield {"type": "status", "text": "Son yanıt hazırlanıyor."}
+            yield {"type": "status", "text": "Preparing the final answer."}
             answer_chunks: list[str] = []
-            async for chunk in ollama_chat_stream(
-                base_url=self._ollama_base_url(),
+            async for chunk in self._local_llm_chat_stream(
+                provider=provider,
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": NATIVE_FINALIZER_PROMPT}],
                 tools=None,

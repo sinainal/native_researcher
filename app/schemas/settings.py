@@ -49,3 +49,33 @@ class OllamaStatusResponse(BaseModel):
     warmup_error: str | None = None
     warming_up: bool = False
     warming_model: str | None = None
+
+
+class LlamaCppSettingsPayload(BaseModel):
+    llamacpp_base_url: str = Field(default="http://localhost:8098", max_length=1024)
+    llamacpp_model: str = Field(default="local", max_length=256)
+    llamacpp_executable: str = Field(default="", max_length=4096)
+    llamacpp_model_path: str = Field(default="", max_length=4096)
+    llamacpp_library_path: str = Field(default="", max_length=4096)
+    llamacpp_server_args: str = Field(default="", max_length=4096)
+    start: bool = False
+    warmup: bool = False
+
+
+class LlamaCppModelInfo(BaseModel):
+    id: str
+    object: str | None = None
+
+
+class LlamaCppStatusResponse(BaseModel):
+    llamacpp_base_url: str
+    llamacpp_model: str = "local"
+    llamacpp_executable: str = ""
+    llamacpp_model_path: str = ""
+    llamacpp_library_path: str = ""
+    llamacpp_server_args: str = ""
+    connected: bool
+    models: list[LlamaCppModelInfo] = Field(default_factory=list)
+    error: str | None = None
+    warmup_error: str | None = None
+    started: bool = False

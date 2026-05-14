@@ -106,6 +106,12 @@ class Settings:
     ollama_base_url_path: Path = _runtime_settings_file("ollama_base_url")
     ollama_model_path: Path = _runtime_settings_file("ollama_model")
     ollama_thinking_level_path: Path = _runtime_settings_file("ollama_thinking_level")
+    llamacpp_base_url_path: Path = _runtime_settings_file("llamacpp_base_url")
+    llamacpp_model_name_path: Path = _runtime_settings_file("llamacpp_model")
+    llamacpp_executable_path: Path = _runtime_settings_file("llamacpp_executable")
+    llamacpp_model_path_path: Path = _runtime_settings_file("llamacpp_model_path")
+    llamacpp_library_path_path: Path = _runtime_settings_file("llamacpp_library_path")
+    llamacpp_server_args_path: Path = _runtime_settings_file("llamacpp_server_args")
     pdf_unpaywall_fallback_enabled_path: Path = _runtime_settings_file("pdf_unpaywall_fallback_enabled")
     pdf_core_fallback_enabled_path: Path = _runtime_settings_file("pdf_core_fallback_enabled")
     pdf_arxiv_fallback_enabled_path: Path = _runtime_settings_file("pdf_arxiv_fallback_enabled")
@@ -118,6 +124,12 @@ class Settings:
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = ""
     ollama_thinking_level: str = "off"
+    llamacpp_base_url: str = "http://localhost:8098"
+    llamacpp_model: str = "local"
+    llamacpp_executable: str = ""
+    llamacpp_model_path: str = ""
+    llamacpp_library_path: str = ""
+    llamacpp_server_args: str = ""
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
     pubmed_default_batch_size: int = 250
     pubmed_max_batch_size: int = 250
@@ -161,6 +173,12 @@ class Settings:
         ollama_base_url_path = _settings_path("OLLAMA_BASE_URL_FILE", "ollama_base_url")
         ollama_model_path = _settings_path("OLLAMA_MODEL_FILE", "ollama_model")
         ollama_thinking_level_path = _settings_path("OLLAMA_THINKING_LEVEL_FILE", "ollama_thinking_level")
+        llamacpp_base_url_path = _settings_path("LLAMACPP_BASE_URL_FILE", "llamacpp_base_url")
+        llamacpp_model_name_path = _settings_path("LLAMACPP_MODEL_FILE", "llamacpp_model")
+        llamacpp_executable_path = _settings_path("LLAMACPP_EXECUTABLE_FILE", "llamacpp_executable")
+        llamacpp_model_path_path = _settings_path("LLAMACPP_MODEL_PATH_FILE", "llamacpp_model_path")
+        llamacpp_library_path_path = _settings_path("LLAMACPP_LIBRARY_PATH_FILE", "llamacpp_library_path")
+        llamacpp_server_args_path = _settings_path("LLAMACPP_SERVER_ARGS_FILE", "llamacpp_server_args")
         pdf_unpaywall_fallback_enabled_path = Path(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(_runtime_settings_file("pdf_unpaywall_fallback_enabled")))
         )
@@ -225,6 +243,18 @@ class Settings:
             or _read_first_secret_file(ollama_thinking_level_path, _legacy_settings_file("ollama_thinking_level")),
             "off",
         )
+        llamacpp_base_url = (
+            os.getenv("LLAMACPP_BASE_URL")
+            or _read_secret_file(llamacpp_base_url_path)
+            or "http://localhost:8098"
+        ).strip()
+        if llamacpp_base_url and "://" not in llamacpp_base_url:
+            llamacpp_base_url = f"http://{llamacpp_base_url}"
+        llamacpp_model = os.getenv("LLAMACPP_MODEL") or _read_secret_file(llamacpp_model_name_path) or "local"
+        llamacpp_executable = os.getenv("LLAMACPP_EXECUTABLE") or _read_secret_file(llamacpp_executable_path) or ""
+        llamacpp_model_file = os.getenv("LLAMACPP_MODEL_PATH") or _read_secret_file(llamacpp_model_path_path) or ""
+        llamacpp_library_path = os.getenv("LLAMACPP_LIBRARY_PATH") or _read_secret_file(llamacpp_library_path_path) or ""
+        llamacpp_server_args = os.getenv("LLAMACPP_SERVER_ARGS") or _read_secret_file(llamacpp_server_args_path) or ""
         pdf_unpaywall_fallback_enabled = _parse_bool(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED")
             or _read_first_secret_file(
@@ -278,6 +308,12 @@ class Settings:
             ollama_base_url_path=ollama_base_url_path,
             ollama_model_path=ollama_model_path,
             ollama_thinking_level_path=ollama_thinking_level_path,
+            llamacpp_base_url_path=llamacpp_base_url_path,
+            llamacpp_model_name_path=llamacpp_model_name_path,
+            llamacpp_executable_path=llamacpp_executable_path,
+            llamacpp_model_path_path=llamacpp_model_path_path,
+            llamacpp_library_path_path=llamacpp_library_path_path,
+            llamacpp_server_args_path=llamacpp_server_args_path,
             pdf_unpaywall_fallback_enabled_path=pdf_unpaywall_fallback_enabled_path,
             pdf_core_fallback_enabled_path=pdf_core_fallback_enabled_path,
             pdf_arxiv_fallback_enabled_path=pdf_arxiv_fallback_enabled_path,
@@ -290,6 +326,12 @@ class Settings:
             ollama_base_url=ollama_base_url.rstrip("/"),
             ollama_model=ollama_model.strip(),
             ollama_thinking_level=ollama_thinking_level,
+            llamacpp_base_url=llamacpp_base_url.rstrip("/"),
+            llamacpp_model=llamacpp_model.strip() or "local",
+            llamacpp_executable=llamacpp_executable.strip(),
+            llamacpp_model_path=llamacpp_model_file.strip(),
+            llamacpp_library_path=llamacpp_library_path.strip(),
+            llamacpp_server_args=llamacpp_server_args.strip(),
             request_user_agent=os.getenv(
                 "REQUEST_USER_AGENT",
                 "NativeResearcher/0.1 (FastAPI Searcher AI Service)",

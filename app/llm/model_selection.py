@@ -8,11 +8,12 @@ from typing import Any, Literal
 from app.genai.helper_models import DEFAULT_HELPER_MODEL, resolve_helper_model_name
 
 OLLAMA_MODEL_PREFIX = "ollama:"
+LLAMACPP_MODEL_PREFIX = "llamacpp:"
 
 
 @dataclass(frozen=True)
 class LLMTarget:
-    provider: Literal["gemini", "ollama"]
+    provider: Literal["gemini", "ollama", "llamacpp"]
     model_name: str
     display_name: str
 
@@ -29,17 +30,37 @@ def is_ollama_model_choice(model_name: str | None) -> bool:
     return normalized.startswith(OLLAMA_MODEL_PREFIX)
 
 
+def format_llamacpp_model_choice(model_name: str | None) -> str:
+    normalized = str(model_name or "").strip()
+    if not normalized:
+        return ""
+    return f"{LLAMACPP_MODEL_PREFIX}{normalized}"
+
+
+def is_llamacpp_model_choice(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return normalized.startswith(LLAMACPP_MODEL_PREFIX)
+
+
 def resolve_chat_model_target(requested_model: str | None, *, settings: Any | None = None) -> LLMTarget:
     normalized = str(requested_model or "").strip()
     if is_ollama_model_choice(normalized):
         configured_model = str(getattr(settings, "ollama_model", "") or "").strip()
         selected_model = normalized[len(OLLAMA_MODEL_PREFIX):].strip() or configured_model
         if not selected_model:
-            raise RuntimeError("Ollama modeli secili ama ayarlarda model tanimli degil.")
+            raise RuntimeError("Ollama model is selected, but no Ollama model is configured.")
         return LLMTarget(
             provider="ollama",
             model_name=selected_model,
             display_name=format_ollama_model_choice(selected_model),
+        )
+    if is_llamacpp_model_choice(normalized):
+        configured_model = str(getattr(settings, "llamacpp_model", "") or "").strip()
+        selected_model = normalized[len(LLAMACPP_MODEL_PREFIX):].strip() or configured_model or "local"
+        return LLMTarget(
+            provider="llamacpp",
+            model_name=selected_model,
+            display_name=format_llamacpp_model_choice(selected_model),
         )
     resolved = resolve_helper_model_name(normalized or None)
     return LLMTarget(

@@ -13,7 +13,14 @@ from typing import Any
 from uuid import uuid4
 
 from app.genai import create_genai_client, load_genai_sdk
-from app.llm import extract_ollama_tool_calls, ollama_chat, ollama_chat_stream, resolve_chat_model_target
+from app.llm import (
+    extract_ollama_tool_calls,
+    llamacpp_chat,
+    llamacpp_chat_stream,
+    ollama_chat,
+    ollama_chat_stream,
+    resolve_chat_model_target,
+)
 from app.schemas.article import Article
 from app.schemas.helper import (
     HelperArticle,
@@ -109,6 +116,24 @@ class HelperAIService:
         settings = self._runtime_settings()
         return str(getattr(settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1")
 
+    def _local_llm_base_url(self, provider: str) -> str:
+        settings = self._runtime_settings()
+        if provider == "llamacpp":
+            return str(getattr(settings, "llamacpp_base_url", "http://localhost:8098") or "http://localhost:8098")
+        return self._ollama_base_url()
+
+    async def _local_llm_chat(self, *, provider: str, **kwargs: Any) -> dict[str, Any]:
+        kwargs["base_url"] = self._local_llm_base_url(provider)
+        if provider == "llamacpp":
+            return await llamacpp_chat(**kwargs)
+        return await ollama_chat(**kwargs)
+
+    async def _local_llm_chat_stream(self, *, provider: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        kwargs["base_url"] = self._local_llm_base_url(provider)
+        stream = llamacpp_chat_stream(**kwargs) if provider == "llamacpp" else ollama_chat_stream(**kwargs)
+        async for chunk in stream:
+            yield chunk
+
     @staticmethod
     def _history_to_ollama_messages(history: list[dict[str, str]]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -181,8 +206,14 @@ class HelperAIService:
             article_count=len(payload.articles),
             thinking_level=payload.thinking_level,
         )
-        if model_target.provider == "ollama":
-            return await self._chat_with_ollama(payload, thread_id=thread_id, thread_state=thread_state, model_name=model_name)
+        if model_target.provider in {"ollama", "llamacpp"}:
+            return await self._chat_with_ollama(
+                payload,
+                thread_id=thread_id,
+                thread_state=thread_state,
+                model_name=model_name,
+                provider=model_target.provider,
+            )
 
         if payload.mode == RESEARCH_AGENT_MODE:
             return await self._chat_research_agent(
@@ -234,7 +265,7 @@ class HelperAIService:
         )
 
         remaining_tool_calls = MAX_FAST_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
         terminal_answer: str | None = None
         while True:
@@ -297,7 +328,7 @@ class HelperAIService:
             answer = self._extract_text_response(response).strip()
             if not answer and executed_actions:
                 finalizer_needed = True
-            answer = answer or "Yanit uretilemedi."
+            answer = answer or "No answer could be generated."
             break
 
         if finalizer_needed:
@@ -353,12 +384,13 @@ class HelperAIService:
             article_count=len(payload.articles),
             thinking_level=payload.thinking_level,
         )
-        if model_target.provider == "ollama":
+        if model_target.provider in {"ollama", "llamacpp"}:
             async for event in self._chat_stream_with_ollama(
                 payload,
                 thread_id=thread_id,
                 thread_state=thread_state,
                 model_name=model_name,
+                provider=model_target.provider,
             ):
                 yield event
             return
@@ -430,10 +462,10 @@ class HelperAIService:
             "model": model_name,
             "mode": "fast",
         }
-        yield {"type": "status", "text": "İstek analiz ediliyor."}
+        yield {"type": "status", "text": "Analyzing the request."}
 
         remaining_tool_calls = MAX_FAST_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
         terminal_answer: str | None = None
 
@@ -560,11 +592,11 @@ class HelperAIService:
             answer = "".join(answer_chunks).strip()
             if not answer and executed_actions:
                 finalizer_needed = True
-            answer = answer or "Yanit uretilemedi."
+            answer = answer or "No answer could be generated."
             break
 
         if finalizer_needed:
-            yield {"type": "status", "text": "Araç çıktıları birleştiriliyor."}
+            yield {"type": "status", "text": "Combining tool results."}
             final_contents = [
                 *contents,
                 types.Content(
@@ -647,6 +679,7 @@ class HelperAIService:
         thread_id: str,
         thread_state: HelperThreadState,
         model_name: str,
+        provider: str = "ollama",
     ) -> HelperChatResponse:
         if payload.mode == RESEARCH_AGENT_MODE:
             return await self._chat_research_agent_ollama(
@@ -654,6 +687,7 @@ class HelperAIService:
                 thread_id=thread_id,
                 thread_state=thread_state,
                 model_name=model_name,
+                provider=provider,
             )
 
         if payload.mode != "fast":
@@ -690,12 +724,12 @@ class HelperAIService:
             {"role": "user", "content": self._build_fast_prompt(payload, today_stamp=date.today().isoformat())},
         ]
         remaining_tool_calls = MAX_FAST_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
 
         while True:
-            response = await ollama_chat(
-                base_url=self._ollama_base_url(),
+            response = await self._local_llm_chat(
+                provider=provider,
                 model=model_name,
                 messages=messages,
                 tools=self._build_ollama_fast_toolset() if remaining_tool_calls > 0 else None,
@@ -772,14 +806,14 @@ class HelperAIService:
 
             if answer_text:
                 messages.append(self._ollama_assistant_message(content=answer_text))
-            answer = answer_text or "Yanit uretilemedi."
+            answer = answer_text or "No answer could be generated."
             if not answer_text and executed_actions:
                 finalizer_needed = True
             break
 
         if finalizer_needed:
-            final_response = await ollama_chat(
-                base_url=self._ollama_base_url(),
+            final_response = await self._local_llm_chat(
+                provider=provider,
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": HELPER_FINALIZER_PROMPT}],
                 tools=None,
@@ -830,6 +864,7 @@ class HelperAIService:
         thread_id: str,
         thread_state: HelperThreadState,
         model_name: str,
+        provider: str = "ollama",
     ) -> AsyncIterator[dict[str, Any]]:
         if payload.mode == RESEARCH_AGENT_MODE:
             async for event in self._chat_stream_research_agent_ollama(
@@ -837,6 +872,7 @@ class HelperAIService:
                 thread_id=thread_id,
                 thread_state=thread_state,
                 model_name=model_name,
+                provider=provider,
             ):
                 yield event
             return
@@ -872,7 +908,7 @@ class HelperAIService:
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": "fast"}
 
         remaining_tool_calls = MAX_FAST_TOOL_CALLS
-        answer = "Yanit uretilemedi."
+        answer = "No answer could be generated."
         finalizer_needed = False
 
         while True:
@@ -881,8 +917,8 @@ class HelperAIService:
             tool_calls: list[Any] = []
             seen_tool_call_keys: set[tuple[str, str]] = set()
             tool_turn_active = False
-            async for chunk in ollama_chat_stream(
-                base_url=self._ollama_base_url(),
+            async for chunk in self._local_llm_chat_stream(
+                provider=provider,
                 model=model_name,
                 messages=messages,
                 tools=self._build_ollama_fast_toolset() if remaining_tool_calls > 0 else None,
@@ -943,7 +979,7 @@ class HelperAIService:
                             "details": call.args,
                         },
                     }
-                    yield {"type": "status", "text": f"Araç çalıştırılıyor: {call.name}"}
+                    yield {"type": "status", "text": f"Running tool: {call.name}"}
                     result, action = await self._execute_tool_call(
                         call.name,
                         call.args,
@@ -999,7 +1035,7 @@ class HelperAIService:
                     remaining_tool_calls -= 1
                 continue
 
-            answer = answer_text or "Yanit uretilemedi."
+            answer = answer_text or "No answer could be generated."
             if answer_text:
                 messages.append(self._ollama_assistant_message(content=answer_text))
             if not answer_text and executed_actions:
@@ -1007,10 +1043,10 @@ class HelperAIService:
             break
 
         if finalizer_needed:
-            yield {"type": "status", "text": "Araç çıktıları birleştiriliyor."}
+            yield {"type": "status", "text": "Combining tool results."}
             answer_chunks: list[str] = []
-            async for chunk in ollama_chat_stream(
-                base_url=self._ollama_base_url(),
+            async for chunk in self._local_llm_chat_stream(
+                provider=provider,
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": HELPER_FINALIZER_PROMPT}],
                 tools=None,
@@ -1329,6 +1365,7 @@ class HelperAIService:
         thread_id: str,
         thread_state: HelperThreadState,
         model_name: str,
+        provider: str = "ollama",
     ) -> HelperChatResponse:
         messages = [
             {"role": "system", "content": build_research_agent_system_instruction()},
@@ -1342,8 +1379,8 @@ class HelperAIService:
                 ),
             },
         ]
-        response = await ollama_chat(
-            base_url=self._ollama_base_url(),
+        response = await self._local_llm_chat(
+            provider=provider,
             model=model_name,
             messages=messages,
             tools=self._build_ollama_research_toolset(),
@@ -1377,8 +1414,8 @@ class HelperAIService:
                         "content": self._ollama_tool_message_content(result),
                     }
                 )
-            final_response = await ollama_chat(
-                base_url=self._ollama_base_url(),
+            final_response = await self._local_llm_chat(
+                provider=provider,
                 model=model_name,
                 messages=[*messages, {"role": "user", "content": RESEARCH_PLAN_FINALIZER_PROMPT}],
                 tools=None,
@@ -1416,6 +1453,7 @@ class HelperAIService:
         thread_id: str,
         thread_state: HelperThreadState,
         model_name: str,
+        provider: str = "ollama",
     ) -> AsyncIterator[dict[str, Any]]:
         yield {"type": "start", "thread_id": thread_id, "model": model_name, "mode": RESEARCH_AGENT_MODE}
         yield {"type": "status", "text": "Research Agent is building the first planning tool call."}
@@ -1430,8 +1468,8 @@ class HelperAIService:
 
             async def produce_chunks() -> None:
                 try:
-                    async for chunk in ollama_chat_stream(
-                        base_url=self._ollama_base_url(),
+                    async for chunk in self._local_llm_chat_stream(
+                        provider=provider,
                         model=model_name,
                         messages=messages,
                         tools=tools,
@@ -2889,17 +2927,17 @@ class HelperAIService:
         if thinking_level == "off":
             return None
         lines = [
-            f"Katalog boyutu: {total_articles}",
-            f"Secili makale sayisi: {selected_count}",
+            f"Catalog size: {total_articles}",
+            f"Selected article count: {selected_count}",
         ]
         if steps:
             lines.extend(f"{index}. {step}" for index, step in enumerate(steps, start=1))
         if thinking_level == "max":
             lines.append(
-                "Not: Fast mode en fazla 3 tool cagrisi ile ve o anki katalog/arama sonucuna dayanarak calisti."
+                "Note: Fast mode ran with at most 3 tool calls and stayed grounded in the current catalog/search results."
             )
         if used_article_ids:
-            lines.append(f"Kullanilan ID'ler: {', '.join(map(str, used_article_ids))}")
+            lines.append(f"Used IDs: {', '.join(map(str, used_article_ids))}")
         return "\n".join(lines)
 
     @staticmethod
@@ -2912,7 +2950,7 @@ class HelperAIService:
     def _build_no_results_answer(action: HelperExecutedAction) -> str:
         source = action.details.get("meta", {}).get("primary_source") or "search"
         source_label = HelperAIService._source_label(source)
-        return f"Bu istek icin {source_label} kaynaginda ilgili makale bulamadim.\nKaynak ID:"
+        return f"I could not find relevant articles for this request in {source_label}.\nSource IDs:"
 
 
 def estimate_token_count(text: str) -> int:

@@ -535,7 +535,7 @@ def test_helper_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         )
         events = [event async for event in service.chat_stream(payload)]
         assert any(event["type"] == "tool_call" for event in events)
-        assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Araç çalıştırılıyor") for event in events)
+        assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Running tool") for event in events)
         assert any(event["type"] == "tool_result" for event in events)
         assert any(event["type"] == "answer_delta" and str(event.get("text") or "") == "Bir ilgili derleme buldum." for event in events)
         second_turn_messages = seen_messages[1]
@@ -599,7 +599,7 @@ def test_native_service_ollama_chat_stream_executes_tool_calls(monkeypatch) -> N
         )
         events = [event async for event in service.chat_stream(payload)]
         assert any(event["type"] == "tool_call" for event in events)
-        assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Araç çalıştırılıyor") for event in events)
+        assert any(event["type"] == "status" and str(event.get("text") or "").startswith("Running tool") for event in events)
         assert any(event["type"] == "tool_result" for event in events)
         assert any(event["type"] == "answer_delta" and str(event.get("text") or "") == "Arama tamamlandi." for event in events)
         second_turn_messages = seen_messages[1]

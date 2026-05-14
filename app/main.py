@@ -19,6 +19,7 @@ from app.api.routes.native import router as native_router
 from app.api.routes.pdfs import router as pdf_router
 from app.api.routes.projects import router as projects_router
 from app.api.routes.pubmed import router as pubmed_router
+from app.api.routes.research_execution import router as research_execution_router
 from app.clients.ncbi import NcbiClient
 from app.core.config import Settings, get_settings
 from app.services.app_event_log_service import AppEventLogService
@@ -30,6 +31,8 @@ from app.services.journal_metrics_service import JournalMetricsService
 from app.services.pdf_service import PDFService
 from app.services.project_service import ProjectService
 from app.services.pubmed_service import PubMedService
+from app.services.research_execution_service import ResearchExecutionService
+from app.services.research_screening_service import ResearchScreeningService
 from app.services.workspace_db import WorkspaceDatabase
 from app.utils.cache import TTLCache
 
@@ -75,6 +78,10 @@ def create_app(
         app.state.app_event_log_service = app_event_log_service
         app.state.project_service = project_service
         app.state.journal_metrics_service = journal_metrics_service
+        app.state.research_execution_service = ResearchExecutionService(
+            pubmed_service=pubmed_service,
+            screening_service=ResearchScreeningService(settings=resolved_settings),
+        )
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(
                 ttl_seconds=resolved_settings.helper_cache_ttl_seconds,
@@ -197,6 +204,20 @@ def create_app(
                         except Exception:
                             pass
                 app.state.ollama_process = None
+            llamacpp_process = getattr(app.state, "llamacpp_process", None)
+            if llamacpp_process is not None:
+                poll = getattr(llamacpp_process, "poll", None)
+                running = callable(poll) and poll() is None
+                if running:
+                    try:
+                        llamacpp_process.terminate()
+                        await asyncio.to_thread(llamacpp_process.wait, 10)
+                    except Exception:
+                        try:
+                            llamacpp_process.kill()
+                        except Exception:
+                            pass
+                app.state.llamacpp_process = None
 
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -227,6 +248,7 @@ def create_app(
     app.include_router(llm_router)
     app.include_router(native_router)
     app.include_router(pubmed_router)
+    app.include_router(research_execution_router)
     app.include_router(pdf_router)
     app.include_router(projects_router)
     return app

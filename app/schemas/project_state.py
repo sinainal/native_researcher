@@ -44,3 +44,4 @@ class ProjectStatePayload(BaseModel):
     query_history: list[ProjectQueryRecord] = Field(default_factory=list)
     current_session_id: str | None = Field(default=None, max_length=120)
     assistant_sessions: list[dict[str, Any]] = Field(default_factory=list)
+    research_runs: list[dict[str, Any]] = Field(default_factory=list)

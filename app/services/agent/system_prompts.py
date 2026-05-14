@@ -15,14 +15,14 @@ from app.services.agent.source_prompts import (
 
 NATIVE_FINALIZER_PROMPT = (
     "Tool use is complete. "
-    "Now write the final answer in Turkish using only the latest search results. "
+    "Now write the final answer in English using only the latest search results. "
     "If no useful articles were found, say so clearly. "
-    "End with a single `Kaynak ID:` line that contains only numeric article IDs from the latest search, or `-`."
+    "End with a single `Source IDs:` line that contains only numeric article IDs from the latest search, or `-`."
 )
 
 HELPER_FINALIZER_PROMPT = (
-    "Arac kullanimi tamamlandi. Artik yeni tool kullanmadan sadece final yanitini ver. "
-    "Cevabi Turkce yaz ve en sonda sadece article id degerleriyle Kaynak ID satiri ekle."
+    "Tool use is complete. Do not call another tool. Write only the final answer in English. "
+    "End with a single `Source IDs:` line that contains only article IDs."
 )
 
 RESEARCH_PLAN_FINALIZER_PROMPT = (
@@ -103,8 +103,8 @@ def build_helper_fast_mode_system_instruction(source: str) -> str:
         "Use at most 3 tool calls. "
         "You may use year range, article type, and minimum citation filters in the search tool only when they are helpful and justified by the request. "
         "If a search still returns zero articles, explicitly say that no relevant articles were found. "
-        "Always answer in Turkish. "
-        "End the answer with a single `Kaynak ID:` line that contains only numeric article IDs from the catalog or the latest search. "
+        "Always answer in English. "
+        "End the answer with a single `Source IDs:` line that contains only numeric article IDs from the catalog or the latest search. "
         "Do not write PMID or DOI in that line."
     )
 
@@ -163,16 +163,16 @@ def build_native_system_instruction(source: str) -> str:
         f"{recent_window_guidance()} "
         f"{agent_result_budget_guidance()} "
         "Do not invent article findings or metadata. "
-        "After tool results, answer briefly in Turkish and stay grounded in the retrieved articles only. "
-        "Always end with a single `Kaynak ID:` line that contains only numeric article IDs from the latest search, or `-` if none."
+        "After tool results, answer briefly in English and stay grounded in the retrieved articles only. "
+        "Always end with a single `Source IDs:` line that contains only numeric article IDs from the latest search, or `-` if none."
     )
 
 
 def build_native_prompt(message: str, *, today_stamp: str, source: str) -> str:
     return (
-        f"Bugünün tarihi: {today_stamp}\n"
-        f"Aktif arama kaynağı: {source_label(source)}\n"
-        "Kullanıcı isteği:\n"
+        f"Today's date: {today_stamp}\n"
+        f"Active search source: {source_label(source)}\n"
+        "User request:\n"
         f"{message.strip()}\n\n"
-        "Gerekirse yeni bir literatür araması yapmak için tool kullan."
+        "Use the search tool if a new literature search is needed."
     )

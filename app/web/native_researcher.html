@@ -694,6 +694,124 @@
         </div>
         <div id="ollamaStatus" class="native-settings-note">Ollama is not checked yet.</div>
       </div>
+      <div class="native-settings-card native-model-settings-section">
+        <div class="native-settings-row">
+          <div class="native-settings-copy">
+            <div class="native-settings-title">Connect llama.cpp</div>
+            <div class="native-settings-description">
+              Connects to a local llama-server OpenAI-compatible endpoint, or starts one from local runtime paths.
+            </div>
+          </div>
+          <label class="native-settings-field native-settings-field-wide" for="llamacppBaseUrlInput">
+            <span>Base URL</span>
+            <input id="llamacppBaseUrlInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="http://localhost:8098">
+          </label>
+        </div>
+        <div class="native-settings-row native-model-settings-paths">
+          <label class="native-settings-field native-settings-field-wide" for="llamacppExecutableInput">
+            <span>llama-server</span>
+            <input id="llamacppExecutableInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="/path/to/llama-server">
+          </label>
+          <label class="native-settings-field native-settings-field-wide" for="llamacppModelPathInput">
+            <span>Model Path</span>
+            <input id="llamacppModelPathInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="/path/to/model.gguf or Ollama blob">
+          </label>
+        </div>
+        <div class="native-settings-row native-model-settings-paths">
+          <label class="native-settings-field native-settings-field-wide" for="llamacppModelInput">
+            <span>Model Name</span>
+            <input id="llamacppModelInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="qwen3.6-35b-a3b-q4_K_M">
+          </label>
+          <label class="native-settings-field native-settings-field-wide" for="llamacppProfileInput">
+            <span>Profile</span>
+            <select id="llamacppProfileInput" class="native-settings-select">
+              <option value="qwen36-safe">Qwen 3.6 Safe</option>
+              <option value="qwen36-fast">Qwen 3.6 Fast</option>
+              <option value="balanced">Balanced</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+        </div>
+        <div class="native-settings-row native-model-settings-paths">
+          <label class="native-settings-field" for="llamacppContextInput">
+            <span>Context</span>
+            <select id="llamacppContextInput" class="native-settings-select">
+              <option value="16384">16K</option>
+              <option value="32768">32K</option>
+              <option value="65536">64K</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppBatchInput">
+            <span>Batch</span>
+            <select id="llamacppBatchInput" class="native-settings-select">
+              <option value="512">512</option>
+              <option value="1024">1024</option>
+              <option value="2048">2048</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppUbatchInput">
+            <span>uBatch</span>
+            <select id="llamacppUbatchInput" class="native-settings-select">
+              <option value="128">128</option>
+              <option value="256">256</option>
+              <option value="384">384</option>
+              <option value="512">512</option>
+            </select>
+          </label>
+        </div>
+        <div class="native-settings-row native-model-settings-paths">
+          <label class="native-settings-field" for="llamacppCpuMoeInput">
+            <span>CPU MoE</span>
+            <select id="llamacppCpuMoeInput" class="native-settings-select">
+              <option value="13">13</option>
+              <option value="14">14</option>
+              <option value="15">15</option>
+              <option value="16">16</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppCacheKInput">
+            <span>K Cache</span>
+            <select id="llamacppCacheKInput" class="native-settings-select">
+              <option value="turbo4">turbo4</option>
+              <option value="turbo3">turbo3</option>
+              <option value="q8_0">q8_0</option>
+              <option value="q4_0">q4_0</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppCacheVInput">
+            <span>V Cache</span>
+            <select id="llamacppCacheVInput" class="native-settings-select">
+              <option value="turbo3">turbo3</option>
+              <option value="turbo4">turbo4</option>
+              <option value="q8_0">q8_0</option>
+              <option value="q4_0">q4_0</option>
+            </select>
+          </label>
+        </div>
+        <details class="native-model-advanced">
+          <summary>Advanced startup paths</summary>
+          <label class="native-settings-field native-settings-field-wide" for="llamacppLibraryPathInput">
+            <span>Library Path</span>
+            <input id="llamacppLibraryPathInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="Optional LD_LIBRARY_PATH entries">
+          </label>
+          <label class="native-settings-field native-settings-field-wide" for="llamacppServerArgsInput">
+            <span>Server Args</span>
+            <input id="llamacppServerArgsInput" class="api-keys-input" type="text" autocomplete="off"
+              spellcheck="false" placeholder="-c 32768 -b 1024 -ub 256 -np 1 -ngl all --flash-attn on">
+          </label>
+        </details>
+        <div class="api-keys-actions native-ollama-actions">
+          <button id="llamacppConnectBtn" class="btn btn-secondary btn-sm native-ollama-connect-btn" type="button">Connect</button>
+          <button id="llamacppStartBtn" class="btn btn-secondary btn-sm native-ollama-connect-btn" type="button">Start</button>
+          <button id="llamacppSaveBtn" class="btn btn-primary btn-sm" type="button">Save</button>
+        </div>
+        <div id="llamacppStatus" class="native-settings-note">llama.cpp is not checked yet.</div>
+      </div>
       <div class="native-settings-card native-model-settings-section native-model-settings-wide">
         <div class="native-settings-row">
           <div class="native-settings-copy">

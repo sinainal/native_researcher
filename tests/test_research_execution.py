@@ -16,6 +16,8 @@ from app.schemas.helper import HelperChatResponse
 from app.schemas.llm import LLMProcessResponse
 from app.schemas.pdf import PDFAvailabilityResponse, PDFResolveResponse
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
+from app.schemas.research_execution import ResearchScreeningTrace
+from app.services.research_execution_service import ResearchExecutionService
 
 
 class FakePubMedService:
@@ -131,6 +133,83 @@ class FakeBatchLLMService:
             batches=[],
             processed_articles=[],
         )
+
+
+class FakeScreeningService:
+    async def screen_candidates(self, candidates, plan, **kwargs):  # noqa: ANN001
+        _ = plan, kwargs
+        traces = []
+        for candidate in candidates:
+            score = 1.0 if candidate.article.doi == "10.1000/shared" else 0.0
+            traces.append(
+                ResearchScreeningTrace(
+                    candidate_id=candidate.candidate_id,
+                    criterion_scores={"must_have": score, "nice_to_have": 1.0},
+                    exclusion_scores={},
+                    final_score=score,
+                    excluded=False,
+                    matched_branch_ids=[match.branch_id for match in candidate.matches if match.branch_id],
+                    evidence=["fake screening"],
+                    rationale="fake",
+                )
+            )
+        return traces
+
+
+def test_research_execution_enforces_required_screening_criteria() -> None:
+    async def runner() -> None:
+        service = ResearchExecutionService(
+            pubmed_service=FakePubMedService(),
+            screening_service=FakeScreeningService(),
+        )
+        response = await service.execute_plan_with_screening(
+            {
+                "topic": "required criteria",
+                "target_count_per_branch": 2,
+                "active_databases": ["PubMed", "OpenAlex"],
+                "candidate_budget": {"per_database": 2},
+                "search_branches": [{"id": "alpha", "label": "Alpha", "query": "alpha"}],
+                "screening_criteria": [
+                    {"id": "must_have", "label": "Must have", "required": True},
+                    {"id": "nice_to_have", "label": "Nice to have", "required": False},
+                ],
+                "exclusion_criteria": [],
+            }
+        )
+        selected_ids = response.run_trace.selected_candidate_ids
+        excluded_ids = response.run_trace.excluded_candidate_ids
+        assert selected_ids == ["cand_1"]
+        assert "cand_2" in excluded_ids
+
+    asyncio.run(runner())
+
+
+def test_research_execution_fails_when_all_queries_error() -> None:
+    class FailingPubMedService:
+        async def search(self, request):  # noqa: ANN001
+            _ = request
+            raise RuntimeError("source down")
+
+    async def runner() -> None:
+        service = ResearchExecutionService(
+            pubmed_service=FailingPubMedService(),
+            screening_service=FakeScreeningService(),
+        )
+        try:
+            await service.execute_plan_with_screening(
+                {
+                    "topic": "all fail",
+                    "active_databases": ["PubMed"],
+                    "search_branches": [{"id": "alpha", "label": "Alpha", "query": "alpha"}],
+                    "screening_criteria": [{"id": "must_have", "label": "Must have", "required": True}],
+                }
+            )
+        except RuntimeError as exc:
+            assert "All research plan queries failed" in str(exc)
+            return
+        raise AssertionError("Expected all-query failure to raise.")
+
+    asyncio.run(runner())
 
 
 def test_research_plan_execute_endpoint_dedupes_screens_and_persists_trace(monkeypatch) -> None:

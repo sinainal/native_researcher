@@ -48,8 +48,8 @@ def _persist_research_execution(project_service: ProjectService, project_id: str
                 updated_at=timestamp,
                 search_payload=ProjectSearchPayload(
                     query=query_title,
-                    year_start=None,
-                    year_end=None,
+                    year_start=response.run_trace.meta.get("year_start"),
+                    year_end=response.run_trace.meta.get("year_end"),
                     max_results=max(1, min(5000, len(full_articles))),
                     batch_size=None,
                     min_cite=None,

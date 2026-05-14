@@ -103,6 +103,10 @@ class ResearchExecutionService:
         if progress is not None:
             await progress({"stage": "normalize", "message": "Normalizing and deduplicating candidates."})
         candidates = normalize_research_candidates(query_results)
+        if raw_queries and not candidates and executed_queries:
+            failed_queries = [item for item in executed_queries if item.status == "error"]
+            if len(failed_queries) == len(executed_queries):
+                raise RuntimeError("All research plan queries failed before candidate screening.")
         candidate_articles = [
             self._article_with_research_meta(candidate)
             for candidate in candidates
@@ -242,6 +246,8 @@ class ResearchExecutionService:
                 "raw_query_count": len(raw_queries),
                 "normalized_query_count": len(raw_queries),
                 "normalized_queries": raw_queries,
+                "year_start": plan.get("year_start"),
+                "year_end": plan.get("year_end"),
                 "distribution": distribution,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "screening_model": screening_model or "",
@@ -404,6 +410,7 @@ class ResearchExecutionService:
         screening_by_id: dict[str, Any],
     ) -> list[ResearchSelectionTrace]:
         target_count = self._target_count(plan)
+        required_criterion_ids = self._required_criterion_ids(plan)
         selections: list[ResearchSelectionTrace] = []
         for branch in self._branches(plan):
             branch_id = branch["id"]
@@ -417,6 +424,7 @@ class ResearchExecutionService:
                 candidate
                 for candidate in branch_candidates
                 if not screening_by_id[candidate.candidate_id].excluded
+                and self._required_criteria_passed(screening_by_id[candidate.candidate_id], required_criterion_ids)
             ]
             eligible.sort(
                 key=lambda candidate: (
@@ -431,6 +439,7 @@ class ResearchExecutionService:
                 candidate
                 for candidate in branch_candidates
                 if screening_by_id[candidate.candidate_id].excluded
+                or not self._required_criteria_passed(screening_by_id[candidate.candidate_id], required_criterion_ids)
             ]
             selections.append(
                 ResearchSelectionTrace(
@@ -665,6 +674,25 @@ class ResearchExecutionService:
 
     def _year_end(self, plan: dict[str, Any]) -> int:
         return max(1000, min(9999, _int_value(plan.get("year_end"), datetime.now(UTC).year)))
+
+    @staticmethod
+    def _required_criterion_ids(plan: dict[str, Any]) -> set[str]:
+        required: set[str] = set()
+        for index, item in enumerate(plan.get("screening_criteria") or [], start=1):
+            if not isinstance(item, dict) or not item.get("required"):
+                continue
+            label = str(item.get("label") or item.get("id") or f"Criterion {index}").strip()
+            criterion_id = str(item.get("id") or _slug(label) or f"criterion_{index}").strip()
+            if criterion_id:
+                required.add(criterion_id)
+        return required
+
+    @staticmethod
+    def _required_criteria_passed(screening: Any, required_criterion_ids: set[str]) -> bool:
+        if not required_criterion_ids:
+            return True
+        scores = dict(getattr(screening, "criterion_scores", {}) or {})
+        return all(float(scores.get(criterion_id, 0.0) or 0.0) >= 0.5 for criterion_id in required_criterion_ids)
 
 
 def _ordered_unique(values: list[str]) -> list[str]:

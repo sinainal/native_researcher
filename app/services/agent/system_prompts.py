@@ -44,6 +44,7 @@ def build_research_agent_system_instruction() -> str:
         "Do not claim that searches, screening, PDF scans, or downloads have happened unless a later execution tool actually reports them. "
         "Do not invent article results, PMIDs, DOIs, authors, or titles. "
         "Default target selected papers is 20. "
+        "When the user asks for a date range, recent-only research, historical coverage, or a specific year span, include year_start and year_end in the plan. "
         "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
         "Build search_branches from explicit targets or comparable categories in the user request. "
         "Keep each branch query focused on target identity: official name, common alias, gene/protein symbol, and subtype name. "

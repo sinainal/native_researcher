@@ -47,6 +47,7 @@ const state = {
   assistantStreamAbort: null,
   assistantSessions: [],
   currentSessionId: null,
+  researchReportPopupResponse: null,
   ollamaBaseUrl: "http://localhost:11434",
   ollamaModel: "",
   ollamaThinkingLevel: "off",
@@ -1393,8 +1394,8 @@ function upsertResearchExecutionCandidateQuery(response, plan, options = {}) {
     updated_at: timestamp,
     search_payload: {
       query: queryTitle,
-      year_start: null,
-      year_end: null,
+      year_start: plan?.year_start || null,
+      year_end: plan?.year_end || null,
       max_results: Math.max(1, Math.min(5000, articles.length)),
       batch_size: null,
       min_cite: null,
@@ -4436,6 +4437,8 @@ function researchPlanRawSearchQueries(plan) {
   const branches = researchPlanSearchBranches(plan);
   const categoryQuery = concepts.map((concept) => concept.query).filter(Boolean).map((query) => `(${query})`).join(" OR ");
   const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
+  const yearStart = Number.parseInt(String(plan?.year_start || ""), 10);
+  const yearEnd = Number.parseInt(String(plan?.year_end || ""), 10);
   return databases.flatMap((database) => branches.map((branch) => {
     const rawQuery = branch.query || branch.label || "";
     const parts = [rawQuery, categoryQuery].filter(Boolean);
@@ -4452,6 +4455,8 @@ function researchPlanRawSearchQueries(plan) {
       extracted_query: extractedQuery,
       query: extractedQuery,
       candidate_limit: Math.max(1, perDatabase),
+      year_start: Number.isFinite(yearStart) ? yearStart : null,
+      year_end: Number.isFinite(yearEnd) ? yearEnd : null,
     };
   }));
 }
@@ -4535,9 +4540,18 @@ function formatResearchPlanDuration(seconds) {
 
 function recomputeResearchPlanEstimates(plan) {
   const targetCount = Math.max(1, Number.parseInt(String(plan.target_count || 20), 10) || 20);
+  const yearStart = Number.parseInt(String(plan.year_start || ""), 10);
+  const yearEnd = Number.parseInt(String(plan.year_end || ""), 10);
   if (!plan.candidate_budget || typeof plan.candidate_budget !== "object") plan.candidate_budget = {};
   plan.target_count = targetCount;
   plan.target_count_per_branch = targetCount;
+  plan.year_start = Number.isFinite(yearStart) ? Math.max(1000, Math.min(9999, yearStart)) : null;
+  plan.year_end = Number.isFinite(yearEnd) ? Math.max(1000, Math.min(9999, yearEnd)) : null;
+  if (plan.year_start && plan.year_end && plan.year_start > plan.year_end) {
+    const nextStart = plan.year_end;
+    plan.year_end = plan.year_start;
+    plan.year_start = nextStart;
+  }
   plan.active_databases = researchPlanDatabases(plan);
   plan.databases = plan.active_databases;
   plan.search_branches = researchPlanSearchBranches(plan);
@@ -4653,6 +4667,14 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
           <label>
             <span>Per database</span>
             <input type="number" min="1" max="500" value="${escapeHtml(plan.candidate_budget?.per_database || Number(plan.target_count || 20) * 2)}" data-plan-edit="per_database">
+          </label>
+          <label>
+            <span>Year start</span>
+            <input type="number" min="1000" max="9999" value="${escapeHtml(plan.year_start || "")}" data-plan-edit="year_start">
+          </label>
+          <label>
+            <span>Year end</span>
+            <input type="number" min="1000" max="9999" value="${escapeHtml(plan.year_end || "")}" data-plan-edit="year_end">
           </label>
         </div>
         <div class="research-plan-db-edit">
@@ -4781,6 +4803,7 @@ function openResearchPlanPopup(messageId, actionIndex) {
 }
 
 function openResearchExecutionReportPopup(response) {
+  state.researchReportPopupResponse = response;
   const trace = response?.run_trace || {};
   const meta = trace.meta || {};
   const distribution = meta.distribution || {};
@@ -4859,12 +4882,220 @@ function openResearchExecutionReportPopup(response) {
         </div>
       </section>
       <section class="research-plan-detail-section">
+        <h4>Candidate Review</h4>
+        ${researchExecutionReportFiltersMarkup(response)}
+        <div class="research-report-candidates" data-research-report-candidates></div>
+      </section>
+      <section class="research-plan-detail-section">
         <h4>Report JSON</h4>
         <pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre>
       </section>
     </div>
   `;
+  bindResearchExecutionReportEvents(els.detailPopupBody);
+  renderResearchExecutionReportCandidates(els.detailPopupBody, response);
   setDetailPopupOpen(true);
+}
+
+function researchExecutionReportPayloadFromAction(action) {
+  const details = action?.details || {};
+  if (details.response?.run_trace) return details.response;
+  const runId = details.run_id || "";
+  const queryId = details.query_id || (runId ? `research_${runId}` : "");
+  const trace = state.researchRuns.find((item) => item.id === runId) || details.run_trace || {};
+  const record = state.queryHistory.find((item) => item.id === queryId) || null;
+  const candidates = Array.isArray(record?.articles) ? cloneJson(record.articles) : [];
+  const selectedSet = new Set(trace.selected_candidate_ids || []);
+  const selected = candidates.filter((article) => selectedSet.has(article.research_meta?.candidate_id));
+  return {
+    meta: cloneJson(record?.meta || {}),
+    articles: selected,
+    candidate_articles: candidates,
+    run_trace: cloneJson(trace),
+  };
+}
+
+function researchExecutionReportFiltersMarkup(response) {
+  const trace = response?.run_trace || {};
+  const candidateArticles = Array.isArray(response?.candidate_articles) ? response.candidate_articles : [];
+  const branches = new Map();
+  const sources = new Set();
+  candidateArticles.forEach((article) => {
+    (article.research_meta?.branches || []).forEach((branch) => {
+      if (branch?.id || branch?.label) branches.set(branch.id || branch.label, branch.label || branch.id);
+    });
+    (article.research_meta?.sources || []).forEach((source) => sources.add(source));
+  });
+  return `
+    <div class="research-report-tools">
+      <label><span>Status</span>
+        <select data-report-filter="status">
+          <option value="all">All candidates</option>
+          <option value="selected">Selected</option>
+          <option value="backup">Backup</option>
+          <option value="excluded">Excluded</option>
+        </select>
+      </label>
+      <label><span>Branch</span>
+        <select data-report-filter="branch">
+          <option value="">All branches</option>
+          ${[...branches.entries()].map(([id, label]) => `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`).join("")}
+        </select>
+      </label>
+      <label><span>Source</span>
+        <select data-report-filter="source">
+          <option value="">All sources</option>
+          ${[...sources].sort().map((source) => `<option value="${escapeHtml(source)}">${escapeHtml(searchResourceLabel(source))}</option>`).join("")}
+        </select>
+      </label>
+      <label><span>Min score</span><input type="number" min="0" max="1" step="0.05" value="0" data-report-filter="min_score"></label>
+      <label><span>Text</span><input type="search" placeholder="title, abstract, DOI, PMID" data-report-filter="text"></label>
+      <label><span>New query name</span><input type="text" value="${escapeHtml((trace.topic || "Research report") + " · filtered")}" data-report-save-title></label>
+      <button class="btn btn-primary btn-sm" type="button" data-report-save-query>Save checked as query</button>
+    </div>
+  `;
+}
+
+function researchExecutionCandidateStatus(article, trace) {
+  const candidateId = article?.research_meta?.candidate_id || "";
+  if ((trace.selected_candidate_ids || []).includes(candidateId)) return "selected";
+  if ((trace.backup_candidate_ids || []).includes(candidateId)) return "backup";
+  if ((trace.excluded_candidate_ids || []).includes(candidateId) || article?.research_meta?.excluded) return "excluded";
+  return "candidate";
+}
+
+function researchExecutionReportFilteredArticles(root, response) {
+  const trace = response?.run_trace || {};
+  const status = root.querySelector("[data-report-filter='status']")?.value || "all";
+  const branch = root.querySelector("[data-report-filter='branch']")?.value || "";
+  const source = root.querySelector("[data-report-filter='source']")?.value || "";
+  const minScore = Number.parseFloat(root.querySelector("[data-report-filter='min_score']")?.value || "0");
+  const text = String(root.querySelector("[data-report-filter='text']")?.value || "").trim().toLowerCase();
+  return (Array.isArray(response?.candidate_articles) ? response.candidate_articles : []).filter((article) => {
+    const meta = article.research_meta || {};
+    const candidateStatus = researchExecutionCandidateStatus(article, trace);
+    const score = Number(meta.score || 0);
+    const branchIds = new Set([...(meta.matched_branch_ids || []), ...(meta.branches || []).map((item) => item.id || item.label)]);
+    const sourceNames = new Set(meta.sources || []);
+    const haystack = [article.title, article.abstract, article.doi, article.pmid, article.pmc_id, article.journal].join(" ").toLowerCase();
+    return (status === "all" || candidateStatus === status)
+      && (!branch || branchIds.has(branch))
+      && (!source || sourceNames.has(source))
+      && (!Number.isFinite(minScore) || score >= minScore)
+      && (!text || haystack.includes(text));
+  });
+}
+
+function renderResearchExecutionReportCandidates(root, response) {
+  const target = root.querySelector("[data-research-report-candidates]");
+  if (!target) return;
+  const trace = response?.run_trace || {};
+  const screeningById = new Map((trace.screening || []).map((item) => [item.candidate_id, item]));
+  const articles = researchExecutionReportFilteredArticles(root, response);
+  target.innerHTML = `
+    <div class="research-report-count">${escapeHtml(articles.length)} candidates visible</div>
+    <div class="research-report-list">
+      ${articles.map((article) => {
+        const meta = article.research_meta || {};
+        const candidateId = meta.candidate_id || "";
+        const status = researchExecutionCandidateStatus(article, trace);
+        const screening = screeningById.get(candidateId) || {};
+        const criterionScores = Object.entries(screening.criterion_scores || meta.criterion_scores || {});
+        const exclusionScores = Object.entries(screening.exclusion_scores || meta.exclusion_scores || {});
+        return `
+          <article class="research-report-row ${escapeHtml(status)}">
+            <label class="research-report-row-check">
+              <input type="checkbox" data-candidate-save="${escapeHtml(candidateId)}" ${status !== "excluded" ? "checked" : ""}>
+              <span>${escapeHtml(status)}</span>
+            </label>
+            <div>
+              <strong>${escapeHtml(article.title || "Untitled article")}</strong>
+              <p>${escapeHtml([article.year, article.journal, article.doi || article.pmid].filter(Boolean).join(" · ") || "No metadata")}</p>
+              <p>${escapeHtml((article.abstract || "").slice(0, 420))}${(article.abstract || "").length > 420 ? "..." : ""}</p>
+              <div class="research-report-scoreline">
+                <span>Score ${escapeHtml(Number(meta.score || screening.final_score || 0).toFixed(2))}</span>
+                ${(meta.branches || []).slice(0, 4).map((branch) => `<span>${escapeHtml(branch.label || branch.id || "Branch")}</span>`).join("")}
+                ${(meta.sources || []).slice(0, 4).map((source) => `<span>${escapeHtml(searchResourceLabel(source))}</span>`).join("")}
+              </div>
+              <div class="research-report-scoreline">
+                ${criterionScores.map(([key, value]) => `<span>${escapeHtml(key)} ${escapeHtml(Number(value || 0).toFixed(2))}</span>`).join("") || "<span>No criterion scores</span>"}
+                ${exclusionScores.filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `<span>${escapeHtml(key)} ${escapeHtml(Number(value || 0).toFixed(2))}</span>`).join("")}
+              </div>
+              ${screening.rationale || meta.rationale ? `<p>${escapeHtml(screening.rationale || meta.rationale)}</p>` : ""}
+            </div>
+          </article>
+        `;
+      }).join("") || "<p>No candidates match the current filters.</p>"}
+    </div>
+  `;
+}
+
+function saveResearchExecutionReportQuery(root) {
+  const response = state.researchReportPopupResponse;
+  if (!response) return;
+  const checkedIds = new Set([...root.querySelectorAll("[data-candidate-save]:checked")].map((node) => node.dataset.candidateSave));
+  const articles = (Array.isArray(response.candidate_articles) ? response.candidate_articles : [])
+    .filter((article) => checkedIds.has(article.research_meta?.candidate_id))
+    .map((article, index) => ({ ...cloneJson(article), id: index + 1 }));
+  if (!articles.length) {
+    alert("Select at least one candidate to save.");
+    return;
+  }
+  const title = root.querySelector("[data-report-save-title]")?.value.trim() || "Filtered research report";
+  const timestamp = new Date().toISOString();
+  const queryId = `research_filter_${Date.now().toString(36)}`;
+  state.queryHistory = state.queryHistory.filter((item) => item.id !== queryId);
+  const searchPayload = {
+    query: title,
+    year_start: response.run_trace?.meta?.year_start || null,
+    year_end: response.run_trace?.meta?.year_end || null,
+    max_results: Math.max(1, articles.length),
+    batch_size: null,
+    min_cite: null,
+    article_type: null,
+    use_cache: true,
+    preferred_source: "pubmed",
+  };
+  const meta = {
+    ...(cloneJson(response.meta || {})),
+    fetched_results: articles.length,
+    batch_size_used: articles.length,
+    primary_source: "research_report_filter",
+  };
+  state.queryHistory.unshift({
+    id: queryId,
+    title,
+    created_at: timestamp,
+    updated_at: timestamp,
+    search_payload: searchPayload,
+    meta,
+    articles,
+  });
+  state.queryHistory = state.queryHistory.slice(0, 30);
+  state.activeQueryId = queryId;
+  state.queryDetailId = queryId;
+  state.lastSearchPayload = cloneJson(searchPayload);
+  applyArticleDataset({ meta, articles }, { persist: false });
+  renderQueryHistory();
+  syncCurrentSession();
+  scheduleProjectStateSave();
+}
+
+function bindResearchExecutionReportEvents(root = document) {
+  root.querySelectorAll("[data-report-filter]").forEach((node) => {
+    if (node.dataset.boundReportFilter === "true") return;
+    node.dataset.boundReportFilter = "true";
+    node.addEventListener("input", () => renderResearchExecutionReportCandidates(root, state.researchReportPopupResponse));
+    node.addEventListener("change", () => renderResearchExecutionReportCandidates(root, state.researchReportPopupResponse));
+  });
+  root.querySelectorAll("[data-report-save-query]").forEach((node) => {
+    if (node.dataset.boundReportSave === "true") return;
+    node.dataset.boundReportSave = "true";
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      saveResearchExecutionReportQuery(root);
+    });
+  });
 }
 
 function saveResearchPlanManualEdits(messageId, actionIndex, root) {
@@ -4873,11 +5104,17 @@ function saveResearchPlanManualEdits(messageId, actionIndex, root) {
   const plan = cloneJson(action.details?.plan || {});
   const targetInput = root.querySelector("[data-plan-edit='target_count']");
   const perDatabaseInput = root.querySelector("[data-plan-edit='per_database']");
+  const yearStartInput = root.querySelector("[data-plan-edit='year_start']");
+  const yearEndInput = root.querySelector("[data-plan-edit='year_end']");
   const targetCount = Number.parseInt(String(targetInput?.value || ""), 10);
   const perDatabase = Number.parseInt(String(perDatabaseInput?.value || ""), 10);
+  const yearStart = Number.parseInt(String(yearStartInput?.value || ""), 10);
+  const yearEnd = Number.parseInt(String(yearEndInput?.value || ""), 10);
   if (Number.isFinite(targetCount)) plan.target_count = Math.min(100, Math.max(1, targetCount));
   if (!plan.candidate_budget || typeof plan.candidate_budget !== "object") plan.candidate_budget = {};
   if (Number.isFinite(perDatabase)) plan.candidate_budget.per_database = Math.min(500, Math.max(1, perDatabase));
+  plan.year_start = Number.isFinite(yearStart) ? Math.max(1000, Math.min(9999, yearStart)) : null;
+  plan.year_end = Number.isFinite(yearEnd) ? Math.max(1000, Math.min(9999, yearEnd)) : null;
   const activeDatabases = [...root.querySelectorAll("[data-plan-db-edit]:checked")]
     .map((node) => node.value)
     .filter(Boolean);
@@ -5093,8 +5330,8 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
             state.selectedQueryIds = new Set();
             state.lastSearchPayload = {
               query: plan.topic || plan.objective || "Research plan execution",
-              year_start: null,
-              year_end: null,
+              year_start: plan.year_start || null,
+              year_end: plan.year_end || null,
               max_results: Math.max(1, event.articles.length),
               batch_size: null,
               min_cite: null,
@@ -5132,14 +5369,14 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     state.selectedQueryIds = new Set();
     state.lastSearchPayload = {
       query: plan.topic || plan.objective || "Research plan execution",
-      year_start: 1900,
-      year_end: new Date().getFullYear(),
+      year_start: plan.year_start || null,
+      year_end: plan.year_end || null,
       max_results: Math.max(1, response.articles?.length || plan.target_count || 20),
       batch_size: null,
       min_cite: null,
       article_type: null,
       use_cache: true,
-      preferred_source: "openalex",
+      preferred_source: "pubmed",
     };
     applyArticleDataset(response, { persist: false });
     openResearchExecutionReportPopup(response);
@@ -5154,6 +5391,22 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     traceMessage.pending = false;
     traceMessage.text = `Research plan execution completed. ${response.articles?.length || 0} articles selected.`;
     traceMessage.meta = response.run_trace?.id || "";
+    traceMessage.actions = [
+      {
+        type: "tool_call",
+        name: "research_execution_report",
+        title: "Search report ready",
+        status: "success",
+        details: {
+          run_id: response.run_trace?.id || "",
+          query_id: finalQueryId || "",
+          topic: response.run_trace?.topic || plan.topic || plan.objective || "Research plan execution",
+          selected_count: response.articles?.length || 0,
+          candidate_count: response.run_trace?.meta?.candidate_article_count || response.run_trace?.meta?.candidate_count || response.candidate_articles?.length || 0,
+          query_count: response.run_trace?.meta?.normalized_query_count || response.run_trace?.meta?.raw_query_count || 0,
+        },
+      },
+    ];
     syncCurrentSession();
     scheduleAssistantMessageUpdate(traceMessage);
     renderAssistantMessages();
@@ -5191,6 +5444,29 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
 }
 
 function bindResearchPlanPreviewEvents(root = document) {
+  root.querySelectorAll("[data-research-report-action='open']").forEach((node) => {
+    if (node.dataset.boundResearchReportOpen === "true") return;
+    node.dataset.boundResearchReportOpen = "true";
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const container = node.closest(".research-report-preview");
+      const message = state.assistantMessages.find((item) => item.id === container?.dataset.messageId);
+      const action = message?.actions?.[Number(container?.dataset.actionIndex || 0)];
+      openResearchExecutionReportPopup(researchExecutionReportPayloadFromAction(action));
+    });
+  });
+  root.querySelectorAll(".research-report-preview[data-research-report-details]").forEach((node) => {
+    if (node.dataset.boundResearchReport === "true") return;
+    node.dataset.boundResearchReport = "true";
+    node.addEventListener("click", (event) => {
+      if (event.target.closest("[data-research-report-action='open']")) return;
+      event.preventDefault();
+      const message = state.assistantMessages.find((item) => item.id === node.dataset.messageId);
+      const action = message?.actions?.[Number(node.dataset.actionIndex || 0)];
+      openResearchExecutionReportPopup(researchExecutionReportPayloadFromAction(action));
+    });
+  });
   root.querySelectorAll("[data-research-plan-action='execute']").forEach((node) => {
     if (node.dataset.boundResearchPlanExecute === "true") return;
     node.dataset.boundResearchPlanExecute = "true";
@@ -5987,18 +6263,21 @@ function assistantActionLabel(action) {
     get_article_details: "Reading article details",
     list_catalog_articles: "Scanning catalog",
     create_research_plan: "Creating research plan",
+    research_execution_report: "Preparing report",
   };
   const success = {
     search_pubmed: `Searched ${sourceLabel}`,
     get_article_details: "Read article details",
     list_catalog_articles: "Scanned catalog",
     create_research_plan: "Created research plan",
+    research_execution_report: "Research report ready",
   };
   const error = {
     search_pubmed: `${sourceLabel} search failed`,
     get_article_details: "Article detail read failed",
     list_catalog_articles: "Catalog scan failed",
     create_research_plan: "Research plan failed",
+    research_execution_report: "Report failed",
   };
   if (action.status === "running") return running[action.name] || "Running tool";
   if (action.status === "error") return error[action.name] || "Tool failed";
@@ -6020,6 +6299,9 @@ function assistantActionDetail(action) {
   if (action.name === "create_research_plan") {
     return details.plan?.topic || "Structured plan";
   }
+  if (action.name === "research_execution_report") {
+    return `${details.selected_count || 0} selected · ${details.candidate_count || 0} candidates`;
+  }
   return action.name || "Tool";
 }
 
@@ -6029,6 +6311,7 @@ function assistantActionKindLabel(action) {
     get_article_details: "Evidence",
     list_catalog_articles: "Catalog",
     create_research_plan: "Plan",
+    research_execution_report: "Report",
   };
   return map[action.name] || "Tool";
 }
@@ -6079,6 +6362,7 @@ function researchPlanActionMarkup(action, messageId = "", actionIndex = 0) {
         <div><span>Branches</span><strong>${escapeHtml(branches.length || 0)}</strong></div>
         <div><span>Total queries</span><strong>${escapeHtml(totalQueries)}</strong></div>
         <div><span>Est. pull</span><strong>${escapeHtml(researchPlanEstimatedCandidates(plan))}</strong></div>
+        <div><span>Years</span><strong>${escapeHtml([plan.year_start, plan.year_end].filter(Boolean).join("-") || "all")}</strong></div>
       </div>
       <div class="research-plan-preview-section">
         <span>Sources</span>
@@ -6096,6 +6380,32 @@ function researchPlanActionMarkup(action, messageId = "", actionIndex = 0) {
         <button class="btn btn-secondary btn-sm research-plan-details-btn" type="button" data-research-plan-action="details">Details</button>
         <button class="btn btn-primary btn-sm research-plan-execute-btn" type="button" data-research-plan-action="execute">Execute</button>
         <span>Runs the generated queries, deduplicates candidates, then screens title and abstract against the plan.</span>
+      </div>
+    </div>
+  `;
+}
+
+function researchExecutionReportActionMarkup(action, messageId = "", actionIndex = 0) {
+  const details = action?.details || {};
+  return `
+    <div class="research-plan-preview research-report-preview" data-research-report-details="true" data-message-id="${escapeHtml(messageId)}" data-action-index="${escapeHtml(actionIndex)}" role="button" tabindex="0">
+      <div class="research-plan-preview-head">
+        <div>
+          <div class="research-plan-preview-kicker">Search Report</div>
+          <div class="research-plan-preview-title">${escapeHtml(details.topic || "Research execution")}</div>
+        </div>
+        <span class="research-plan-preview-state">ready</span>
+      </div>
+      <div class="research-plan-preview-objective">Candidate pull, screening scores, excluded papers, branch distribution, and filtered query export.</div>
+      <div class="research-plan-preview-grid">
+        <div><span>Selected</span><strong>${escapeHtml(details.selected_count || 0)}</strong></div>
+        <div><span>Candidates</span><strong>${escapeHtml(details.candidate_count || 0)}</strong></div>
+        <div><span>Queries</span><strong>${escapeHtml(details.query_count || 0)}</strong></div>
+        <div><span>Run</span><strong>${escapeHtml(details.run_id || "-")}</strong></div>
+      </div>
+      <div class="research-plan-preview-actions">
+        <button class="btn btn-primary btn-sm" type="button" data-research-report-action="open">Open report</button>
+        <span>Filter candidates and save checked papers as a new query.</span>
       </div>
     </div>
   `;
@@ -6162,16 +6472,22 @@ function assistantThinkingMarkup(item) {
 
 function assistantActionsMarkup(item) {
   return item.role !== "user" && item.actions?.length
-    ? `<div class="ai-action-list">${item.actions.map((act, actionIndex) => act.name === "create_research_plan" && act.status === "success"
-        ? researchPlanActionMarkup(act, item.id || "", actionIndex)
-        : `
+    ? `<div class="ai-action-list">${item.actions.map((act, actionIndex) => {
+      if (act.name === "create_research_plan" && act.status === "success") {
+        return researchPlanActionMarkup(act, item.id || "", actionIndex);
+      }
+      if (act.name === "research_execution_report" && act.status === "success") {
+        return researchExecutionReportActionMarkup(act, item.id || "", actionIndex);
+      }
+      return `
         <div class="ai-action-row ${act.status || "success"}">
           <span class="ai-action-row-status ${act.status || "success"}">${act.status === "error" ? "!" : act.status === "success" ? "✓" : ""}</span>
           <span class="ai-action-row-kind">${escapeHtml(assistantActionKindLabel(act))}</span>
           <span class="ai-action-row-text">${escapeHtml(assistantActionLabel(act))}</span>
           <span class="ai-action-row-sep">·</span>
           <span class="ai-action-row-detail" title="${escapeHtml(assistantActionDetail(act))}">${escapeHtml(assistantActionDetail(act))}</span>
-        </div>`).join("")}</div>`
+        </div>`;
+    }).join("")}</div>`
     : "";
 }
 

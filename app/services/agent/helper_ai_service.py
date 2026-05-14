@@ -1932,6 +1932,14 @@ class HelperAIService:
                     "type": "integer",
                     "description": "Desired number of final selected papers per search branch. Defaults to 20.",
                 },
+                "year_start": {
+                    "type": "integer",
+                    "description": "Optional lower publication year bound, for example 2019.",
+                },
+                "year_end": {
+                    "type": "integer",
+                    "description": "Optional upper publication year bound, for example 2026.",
+                },
                 "databases": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -2452,6 +2460,14 @@ class HelperAIService:
             maximum=100,
         )
         per_database = target_count * 2
+        year_start = parse_optional_int(args.get("year_start"))
+        year_end = parse_optional_int(args.get("year_end"))
+        if year_start is not None:
+            year_start = max(1000, min(9999, year_start))
+        if year_end is not None:
+            year_end = max(1000, min(9999, year_end))
+        if year_start is not None and year_end is not None and year_start > year_end:
+            year_start, year_end = year_end, year_start
         databases = self._as_string_list(
             args.get("active_databases") or args.get("databases"),
             fallback=["PubMed", "Europe PMC", "OpenAlex", "CORE", "arXiv"],
@@ -2535,6 +2551,8 @@ class HelperAIService:
             "objective": objective,
             "target_count": target_count,
             "target_count_per_branch": target_count,
+            "year_start": year_start,
+            "year_end": year_end,
             "databases": databases,
             "active_databases": databases,
             "search_branches": search_branches,

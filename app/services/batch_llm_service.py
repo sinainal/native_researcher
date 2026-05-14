@@ -13,11 +13,11 @@ from app.genai import create_genai_client, load_genai_sdk, resolve_helper_model_
 from app.schemas.llm import LLMBatchReport, LLMProcessRequest, LLMProcessResponse
 
 LEGACY_BATCH_SYSTEM_INSTRUCTION = (
-    "Sen Researcher_2 icin toplu abstract analiz motorusun. "
-    "Sana JSON listesi halinde makale girdileri verilecek. "
-    "Yanitin her zaman yalnizca gecerli bir JSON listesi olmali. "
-    "Her oge `id` icermeli ve sadece verilen girdilerdeki id'leri kullanmalisin. "
-    "Girdide olmayan makale uydurma, metin disi aciklama ekleme, markdown kullanma."
+    "You are the legacy batch abstract analysis engine for Researcher_2. "
+    "You receive article inputs as a JSON list. "
+    "Your response must always be only a valid JSON list. "
+    "Every item must include `id`, and you may only use IDs from the provided inputs. "
+    "Do not invent articles outside the input, add prose outside the JSON, or use markdown."
 )
 
 ANALYZER_BATCH_SYSTEM_INSTRUCTION = (
@@ -68,13 +68,13 @@ class PlannedBatch:
 class BatchLLMService:
     async def process(self, payload: LLMProcessRequest) -> LLMProcessResponse:
         if not payload.articles:
-            raise ValueError("LLM isleme icin makale bulunamadi.")
+            raise ValueError("No articles were provided for LLM processing.")
 
         model_name = resolve_helper_model_name(payload.model)
         source_articles = [article.model_dump() for article in payload.articles]
         articles = self._resolve_scope(source_articles, payload.selected_ids)
         if not articles:
-            raise ValueError("Secilen filtreye gore islenecek makale yok.")
+            raise ValueError("No articles match the selected processing scope.")
 
         analysis_mode = payload.analysis_mode
         prompt = self._resolve_prompt(payload)
@@ -101,11 +101,11 @@ class BatchLLMService:
         )
 
         logs.append(
-            "Batch analyzer plani hazirlandi: "
-            f"mode={analysis_mode}, {len(articles)} makale, {len(batches)} batch, "
-            f"batch boyutu hedefi {payload.llm_batch}, token butcesi {batch_token_budget}."
+            "Batch analyzer plan prepared: "
+            f"mode={analysis_mode}, {len(articles)} articles, {len(batches)} batches, "
+            f"target batch size {payload.llm_batch}, token budget {batch_token_budget}."
         )
-        logs.append("Abstract kirpma kapali: tam abstract metni kullaniliyor.")
+        logs.append("Abstract trimming is disabled: full abstract text is used.")
 
         merged_by_id = {int(article["id"]): dict(article) for article in articles}
         batch_reports: list[LLMBatchReport] = []
@@ -113,8 +113,8 @@ class BatchLLMService:
 
         for batch in batches:
             logs.append(
-                f"Batch {batch.number} basliyor: {len(batch.articles)} makale, "
-                f"tahmini {batch.estimated_tokens} token."
+                f"Batch {batch.number} starting: {len(batch.articles)} articles, "
+                f"estimated {batch.estimated_tokens} tokens."
             )
             try:
                 results, attempts = await self._run_batch_with_retries(
@@ -140,11 +140,11 @@ class BatchLLMService:
                     )
                 )
                 logs.append(
-                    f"Batch {batch.number} tamamlandi: {len(results)} cikti, "
-                    f"{merged_count} makale birlestirildi."
+                    f"Batch {batch.number} completed: {len(results)} outputs, "
+                    f"{merged_count} articles merged."
                 )
             except Exception as exc:
-                error_message = f"Batch {batch.number} basarisiz: {exc}"
+                error_message = f"Batch {batch.number} failed: {exc}"
                 errors.append(error_message)
                 batch_reports.append(
                     LLMBatchReport(

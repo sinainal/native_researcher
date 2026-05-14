@@ -59,7 +59,7 @@ class ResearchExecutionService:
             await progress(
                 {
                     "stage": "start",
-                    "message": f"Executing {len(raw_queries)} generated queries.",
+                    "message": f"Executing {len(raw_queries)} normalized agent queries.",
                     "total_queries": len(raw_queries),
                 }
             )
@@ -103,17 +103,54 @@ class ResearchExecutionService:
         if progress is not None:
             await progress({"stage": "normalize", "message": "Normalizing and deduplicating candidates."})
         candidates = normalize_research_candidates(query_results)
+        candidate_articles = [
+            self._article_with_research_meta(candidate)
+            for candidate in candidates
+        ]
+        for index, article in enumerate(candidate_articles, start=1):
+            article.id = index
+        if progress is not None:
+            await progress(
+                {
+                    "stage": "queries_complete",
+                    "message": (
+                        f"Database queries completed. Saved {len(candidate_articles)} normalized candidates "
+                        "before screening."
+                    ),
+                    "candidate_count": len(candidates),
+                    "articles": [article.model_dump(mode="json") for article in candidate_articles],
+                    "meta": PubMedSearchMeta(
+                        full_query=str(plan.get("topic") or plan.get("objective") or "Research plan execution"),
+                        total_results_found=sum(item.total_results_found for item in executed_queries),
+                        fetched_results=len(candidate_articles),
+                        batch_size_used=len(candidate_articles),
+                        request_count=sum(item.request_count for item in executed_queries),
+                        elapsed_ms=int((time.perf_counter() - started) * 1000),
+                        cache_hit=False,
+                        oa_only=False,
+                        primary_source="research_plan_candidates",
+                        sources_used=sorted({item.source for item in executed_queries if item.source}),
+                        fallback_used=False,
+                    ).model_dump(mode="json"),
+                    "normalized_queries": raw_queries,
+                }
+            )
+        screening_candidates = self._screening_candidates(candidates, plan)
         if progress is not None:
             await progress(
                 {
                     "stage": "screening_start",
-                    "message": f"Screening {len(candidates)} normalized candidates with {screening_model or 'default model'}.",
+                    "message": (
+                        f"Screening {len(screening_candidates)} of {len(candidates)} normalized candidates "
+                        f"with {screening_model or 'default model'}."
+                    ),
                     "candidate_count": len(candidates),
+                    "screened_candidate_count": len(screening_candidates),
                     "screening_model": screening_model or "",
                 }
             )
         screening = await self.screening_service.screen_candidates(
-            candidates,
+            screening_candidates,
             plan,
             model=screening_model,
             api_key=api_key,
@@ -123,6 +160,12 @@ class ResearchExecutionService:
         if progress is not None:
             await progress({"stage": "selection", "message": "Selecting final articles per branch."})
         screening_by_id = {item.candidate_id: item for item in screening}
+        candidate_articles = [
+            self._article_with_research_meta(candidate, screening_by_id=screening_by_id)
+            for candidate in candidates
+        ]
+        for index, article in enumerate(candidate_articles, start=1):
+            article.id = index
         selections = self._select_candidates(candidates, plan, screening_by_id)
         selected_ids = []
         backup_ids = []
@@ -135,14 +178,48 @@ class ResearchExecutionService:
         backup_ids = _ordered_unique(backup_ids)
         excluded_ids = _ordered_unique(excluded_ids)
 
-        selected_lookup = set(selected_ids)
-        selected_articles = [
-            candidate.article.model_copy(deep=True)
-            for candidate in candidates
-            if candidate.candidate_id in selected_lookup
-        ]
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        selected_articles: list[Article] = []
+        for selection in selections:
+            for candidate_id in selection.selected_candidate_ids:
+                candidate = candidate_by_id.get(candidate_id)
+                if candidate is None:
+                    continue
+                selected_articles.append(
+                    self._article_with_research_meta(
+                        candidate,
+                        screening_by_id=screening_by_id,
+                        selected_branch={
+                            "id": selection.branch_id,
+                            "label": selection.branch_label,
+                        },
+                    )
+                )
+        selected_articles.sort(
+            key=lambda article: (
+                float((article.research_meta or {}).get("score") or 0),
+                _year_sort(article.year),
+            ),
+            reverse=True,
+        )
         for index, article in enumerate(selected_articles, start=1):
             article.id = index
+        distribution = self._distribution_analysis(
+            candidates,
+            selections,
+            screening_by_id,
+            plan,
+            selected_articles,
+        )
+        if progress is not None:
+            await progress(
+                {
+                    "stage": "screening_complete",
+                    "message": f"Screening complete. Selected {len(selected_articles)} branch/article rows.",
+                    "selected_count": len(selected_articles),
+                    "distribution": distribution,
+                }
+            )
 
         trace = ResearchPlanRunTrace(
             id=f"research_run_{uuid4().hex[:12]}",
@@ -159,8 +236,13 @@ class ResearchExecutionService:
             excluded_candidate_ids=excluded_ids,
             meta={
                 "candidate_count": len(candidates),
+                "candidate_article_count": len(candidate_articles),
+                "screened_candidate_count": len(screening_candidates),
                 "selected_count": len(selected_articles),
                 "raw_query_count": len(raw_queries),
+                "normalized_query_count": len(raw_queries),
+                "normalized_queries": raw_queries,
+                "distribution": distribution,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "screening_model": screening_model or "",
             },
@@ -180,6 +262,7 @@ class ResearchExecutionService:
                 fallback_used=False,
             ),
             articles=selected_articles,
+            candidate_articles=candidate_articles,
             run_trace=trace,
         )
 
@@ -270,6 +353,7 @@ class ResearchExecutionService:
                 category_query = " OR ".join(f"({concept['query']})" for concept in concepts if concept.get("query"))
                 parts = [branch["query"] or branch["label"], category_query]
                 query = " AND ".join(f"({part})" for part in parts if part)
+                raw_query = branch["query"] or branch["label"]
                 raw_queries.append(
                     {
                         "database": database,
@@ -279,11 +363,39 @@ class ResearchExecutionService:
                         "category_labels": [concept["label"] for concept in concepts],
                         "category_id": "",
                         "category_label": "Combined categories" if concepts else "",
+                        "raw_query": raw_query,
+                        "extracted_query": query or branch["label"],
                         "query": query or branch["label"],
                         "candidate_limit": per_database,
                     }
                     )
         return raw_queries
+
+    def _screening_candidates(
+        self,
+        candidates: list[NormalizedResearchCandidate],
+        plan: dict[str, Any],
+    ) -> list[NormalizedResearchCandidate]:
+        target_count = self._target_count(plan)
+        target_per_branch = max(target_count * 2, target_count + 5)
+        selected: list[NormalizedResearchCandidate] = []
+        selected_ids: set[str] = set()
+        for branch in self._branches(plan):
+            branch_id = branch["id"]
+            branch_candidates = [
+                candidate
+                for candidate in candidates
+                if any(match.branch_id == branch_id for match in candidate.matches)
+            ]
+            branch_candidates.sort(key=lambda candidate: _year_sort(candidate.article.year), reverse=True)
+            for candidate in branch_candidates[:target_per_branch]:
+                if candidate.candidate_id in selected_ids:
+                    continue
+                selected_ids.add(candidate.candidate_id)
+                selected.append(candidate)
+        if selected:
+            return selected
+        return candidates[: max(1, target_count * 2)]
 
     def _select_candidates(
         self,
@@ -299,15 +411,16 @@ class ResearchExecutionService:
                 candidate
                 for candidate in candidates
                 if any(match.branch_id == branch_id for match in candidate.matches)
+                and candidate.candidate_id in screening_by_id
             ]
             eligible = [
                 candidate
                 for candidate in branch_candidates
-                if not screening_by_id.get(candidate.candidate_id).excluded
+                if not screening_by_id[candidate.candidate_id].excluded
             ]
             eligible.sort(
                 key=lambda candidate: (
-                    screening_by_id.get(candidate.candidate_id).final_score,
+                    screening_by_id[candidate.candidate_id].final_score,
                     _year_sort(candidate.article.year),
                 ),
                 reverse=True,
@@ -317,7 +430,7 @@ class ResearchExecutionService:
             excluded = [
                 candidate
                 for candidate in branch_candidates
-                if screening_by_id.get(candidate.candidate_id).excluded
+                if screening_by_id[candidate.candidate_id].excluded
             ]
             selections.append(
                 ResearchSelectionTrace(
@@ -351,6 +464,8 @@ class ResearchExecutionService:
             category_id=str(raw_query.get("category_id") or ""),
             category_label=str(raw_query.get("category_label") or ""),
             query=str(raw_query.get("query") or ""),
+            raw_query=str(raw_query.get("raw_query") or raw_query.get("branch_query") or ""),
+            extracted_query=str(raw_query.get("extracted_query") or raw_query.get("query") or ""),
             candidate_limit=candidate_limit,
             status=status,
             fetched_results=fetched_results,
@@ -359,6 +474,140 @@ class ResearchExecutionService:
             elapsed_ms=elapsed_ms,
             error=error,
         )
+
+    def _article_with_research_meta(
+        self,
+        candidate: NormalizedResearchCandidate,
+        *,
+        screening_by_id: dict[str, Any] | None = None,
+        selected_branch: dict[str, str] | None = None,
+    ) -> Article:
+        article = candidate.article.model_copy(deep=True)
+        screening = (screening_by_id or {}).get(candidate.candidate_id)
+        matches = [match.model_dump(mode="json") for match in candidate.matches]
+        branches = _unique_dicts(
+            {
+                "id": match.branch_id,
+                "label": match.branch_label or match.branch_id or "Branch",
+            }
+            for match in candidate.matches
+            if match.branch_id or match.branch_label
+        )
+        sources = _unique_dicts(
+            {
+                "source": match.source,
+                "database": match.database,
+                "branch_id": match.branch_id,
+                "branch_label": match.branch_label,
+                "raw_query": match.raw_query or "",
+                "extracted_query": match.extracted_query or match.query,
+            }
+            for match in candidate.matches
+        )
+        meta: dict[str, Any] = {
+            "candidate_id": candidate.candidate_id,
+            "branches": branches,
+            "matched_branch_ids": [item["id"] for item in branches if item.get("id")],
+            "sources": sorted(candidate.source_names),
+            "source_matches": sources,
+            "matches": matches,
+            "raw_queries": _ordered_unique([match.raw_query for match in candidate.matches if match.raw_query]),
+            "extracted_queries": _ordered_unique(
+                [match.extracted_query or match.query for match in candidate.matches if match.extracted_query or match.query]
+            ),
+        }
+        if selected_branch:
+            meta["selected_branch_id"] = selected_branch.get("id") or ""
+            meta["selected_branch_label"] = selected_branch.get("label") or ""
+        if screening is not None:
+            meta.update(
+                {
+                    "score": float(getattr(screening, "final_score", 0.0) or 0.0),
+                    "criterion_scores": dict(getattr(screening, "criterion_scores", {}) or {}),
+                    "exclusion_scores": dict(getattr(screening, "exclusion_scores", {}) or {}),
+                    "excluded": bool(getattr(screening, "excluded", False)),
+                    "evidence": list(getattr(screening, "evidence", []) or []),
+                    "rationale": str(getattr(screening, "rationale", "") or ""),
+                }
+            )
+        article.research_meta = meta
+        return article
+
+    def _distribution_analysis(
+        self,
+        candidates: list[NormalizedResearchCandidate],
+        selections: list[ResearchSelectionTrace],
+        screening_by_id: dict[str, Any],
+        plan: dict[str, Any],
+        selected_articles: list[Article],
+    ) -> dict[str, Any]:
+        target_count = self._target_count(plan)
+        selected_occurrences: list[dict[str, str]] = []
+        for selection in selections:
+            for candidate_id in selection.selected_candidate_ids:
+                selected_occurrences.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "branch_id": selection.branch_id,
+                        "branch_label": selection.branch_label,
+                    }
+                )
+        branch_rows = []
+        for branch in self._branches(plan):
+            branch_id = branch["id"]
+            branch_candidates = [
+                candidate
+                for candidate in candidates
+                if any(match.branch_id == branch_id for match in candidate.matches)
+            ]
+            selection = next((item for item in selections if item.branch_id == branch_id), None)
+            selected_count = len(selection.selected_candidate_ids) if selection else 0
+            branch_rows.append(
+                {
+                    "branch_id": branch_id,
+                    "branch_label": branch["label"],
+                    "candidate_count": len(branch_candidates),
+                    "screened_count": sum(1 for candidate in branch_candidates if candidate.candidate_id in screening_by_id),
+                    "selected_count": selected_count,
+                    "target_count": target_count,
+                    "target_met": selected_count >= target_count,
+                    "backup_count": len(selection.backup_candidate_ids) if selection else 0,
+                    "excluded_count": len(selection.excluded_candidate_ids) if selection else 0,
+                }
+            )
+        source_rows = []
+        source_counts: dict[tuple[str, str], int] = {}
+        for candidate in candidates:
+            for match in candidate.matches:
+                key = (match.source, match.database)
+                source_counts[key] = source_counts.get(key, 0) + 1
+        for (source, database), count in sorted(source_counts.items()):
+            source_rows.append({"source": source, "database": database, "candidate_matches": count})
+        duplicate_candidates = [
+            {
+                "candidate_id": candidate.candidate_id,
+                "title": candidate.article.title,
+                "branch_count": len({match.branch_id for match in candidate.matches if match.branch_id}),
+                "source_count": len(candidate.source_names),
+            }
+            for candidate in candidates
+            if len({match.branch_id for match in candidate.matches if match.branch_id}) > 1
+            or len(candidate.source_names) > 1
+        ]
+        return {
+            "target_count_per_branch": target_count,
+            "branch_distribution": branch_rows,
+            "source_distribution": source_rows,
+            "selected_occurrence_count": len(selected_articles),
+            "unique_selected_candidate_count": len({item["candidate_id"] for item in selected_occurrences}),
+            "selected_occurrences": selected_occurrences,
+            "duplicate_candidates": duplicate_candidates[:50],
+            "warnings": [
+                f"{row['branch_label']} selected {row['selected_count']} of target {row['target_count']}."
+                for row in branch_rows
+                if not row["target_met"]
+            ],
+        }
 
     def _databases(self, plan: dict[str, Any]) -> list[str]:
         databases = plan.get("active_databases") or plan.get("databases") or ["PubMed"]
@@ -389,14 +638,16 @@ class ResearchExecutionService:
             if isinstance(item, str):
                 query = item.strip()
                 label = f"Shared query {index}"
+                concept_id = _slug(label) or f"concept_{index}"
             elif isinstance(item, dict):
                 query = str(item.get("query") or item.get("label") or "").strip()
                 label = str(item.get("label") or f"Shared query {index}").strip()
+                concept_id = str(item.get("id") or _slug(label) or f"concept_{index}").strip()
             else:
                 continue
             if not query:
                 continue
-            concepts.append({"id": _slug(label) or f"concept_{index}", "label": label, "query": query})
+            concepts.append({"id": concept_id, "label": label, "query": query})
         return concepts
 
     def _target_count(self, plan: dict[str, Any]) -> int:
@@ -423,6 +674,20 @@ def _ordered_unique(values: list[str]) -> list[str]:
         if value in seen:
             continue
         seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _unique_dicts(values: Any) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        key = "|".join(str(value.get(part) or "") for part in sorted(value))
+        if key in seen:
+            continue
+        seen.add(key)
         ordered.append(value)
     return ordered
 

@@ -46,10 +46,10 @@ def build_research_agent_system_instruction() -> str:
         "Default target selected papers is 20. "
         "Use PubMed, PMC/Europe PMC, OpenAlex, CORE, and arXiv when relevant unless the user restricts sources. "
         "Build search_branches from explicit targets or comparable categories in the user request. "
-        "In each branch query, include only the branch target identity: names, aliases, abbreviations, gene/protein names, subtype names, and exact variants. "
-        "Use shared_query_concepts for distinct evidence categories that should be paired with every branch, such as structural, experimental, computational, or assay evidence. "
-        "Put methods, evidence terms, outcomes, features, and content terms in shared_query_concepts, not in branch queries. "
-        "Keep screening criteria tied to the user's stated objective. "
+        "Keep each branch query focused on target identity: official name, common alias, gene/protein symbol, and subtype name. "
+        "Put evidence/method terms in shared_query_concepts, not in every branch query. "
+        "Use at most 3 compact shared_query_concepts unless the user asks for more. "
+        "Keep screening criteria short and directly tied to the user's objective. "
         "Always write English prompts, plans, labels, and output text in this mode."
     )
 
@@ -71,8 +71,9 @@ def build_research_agent_prompt(
     else:
         plan_context = (
             "No structured plan exists yet. "
-            "You must call `create_research_plan` for this first Research Agent turn before the final answer. "
-            "Return the plan through the function call; do not provide a prose-only response."
+            "Call `create_research_plan` now. "
+            "Do not write analysis, prose, or a plan preview before the function call. "
+            "Keep reasoning brief: identify branches, shared concepts, and criteria, then call the tool."
         )
     return (
         "Research Agent mode is active.\n"

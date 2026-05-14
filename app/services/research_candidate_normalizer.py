@@ -92,6 +92,8 @@ def normalize_research_candidates(
                 category_id=str(query.get("category_id") or ""),
                 category_label=str(query.get("category_label") or ""),
                 query=str(query.get("query") or ""),
+                raw_query=str(query.get("raw_query") or query.get("branch_query") or ""),
+                extracted_query=str(query.get("extracted_query") or query.get("query") or ""),
             )
             if match not in current.matches:
                 current.matches.append(match)

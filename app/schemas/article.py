@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -33,6 +35,7 @@ class Article(BaseModel):
     journal_metric_year: int | None = None
     journal_sjr: float | None = None
     journal_metrics_source: str | None = None
+    research_meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArticleReference(BaseModel):

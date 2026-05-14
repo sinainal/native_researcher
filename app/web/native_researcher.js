@@ -165,6 +165,10 @@ const els = {
   llamacppCpuMoeInput: document.getElementById("llamacppCpuMoeInput"),
   llamacppCacheKInput: document.getElementById("llamacppCacheKInput"),
   llamacppCacheVInput: document.getElementById("llamacppCacheVInput"),
+  llamacppCacheRamInput: document.getElementById("llamacppCacheRamInput"),
+  llamacppReasoningInput: document.getElementById("llamacppReasoningInput"),
+  llamacppReasoningBudgetInput: document.getElementById("llamacppReasoningBudgetInput"),
+  llamacppFitTargetInput: document.getElementById("llamacppFitTargetInput"),
   llamacppExecutableInput: document.getElementById("llamacppExecutableInput"),
   llamacppModelPathInput: document.getElementById("llamacppModelPathInput"),
   llamacppLibraryPathInput: document.getElementById("llamacppLibraryPathInput"),
@@ -422,6 +426,10 @@ const llamaCppProfiles = {
     cpuMoe: "15",
     cacheK: "turbo4",
     cacheV: "turbo3",
+    cacheRam: "0",
+    reasoning: "auto",
+    reasoningBudget: "2048",
+    fitTarget: "1024",
   },
   "qwen36-fast": {
     context: "32768",
@@ -430,6 +438,10 @@ const llamaCppProfiles = {
     cpuMoe: "14",
     cacheK: "turbo4",
     cacheV: "turbo3",
+    cacheRam: "0",
+    reasoning: "auto",
+    reasoningBudget: "1024",
+    fitTarget: "1024",
   },
   balanced: {
     context: "16384",
@@ -438,6 +450,10 @@ const llamaCppProfiles = {
     cpuMoe: "16",
     cacheK: "q8_0",
     cacheV: "q8_0",
+    cacheRam: "2048",
+    reasoning: "auto",
+    reasoningBudget: "1024",
+    fitTarget: "1024",
   },
 };
 
@@ -457,7 +473,10 @@ function llamaCppProfileArgs(profile) {
     "--direct-io",
     "--no-warmup",
     "--no-webui",
-    "-fitt", "1024",
+    "-fitt", profile.fitTarget,
+    "--cache-ram", profile.cacheRam,
+    "--reasoning", profile.reasoning,
+    "--reasoning-budget", profile.reasoningBudget,
   ].join(" ");
 }
 
@@ -474,6 +493,10 @@ function parseLlamaCppArgs(args) {
     cpuMoe: valueAfter("--n-cpu-moe", "15"),
     cacheK: valueAfter("-ctk", valueAfter("--cache-type-k", "turbo4")),
     cacheV: valueAfter("-ctv", valueAfter("--cache-type-v", "turbo3")),
+    cacheRam: valueAfter("--cache-ram", valueAfter("-cram", "0")),
+    reasoning: valueAfter("--reasoning", valueAfter("-rea", "auto")),
+    reasoningBudget: valueAfter("--reasoning-budget", "-1"),
+    fitTarget: valueAfter("-fitt", valueAfter("--fit-target", "1024")),
   };
   const matched = Object.entries(llamaCppProfiles).find(([, profile]) => (
     profile.context === parsed.context
@@ -482,6 +505,10 @@ function parseLlamaCppArgs(args) {
     && profile.cpuMoe === parsed.cpuMoe
     && profile.cacheK === parsed.cacheK
     && profile.cacheV === parsed.cacheV
+    && profile.cacheRam === parsed.cacheRam
+    && profile.reasoning === parsed.reasoning
+    && profile.reasoningBudget === parsed.reasoningBudget
+    && profile.fitTarget === parsed.fitTarget
   ));
   return { ...parsed, profile: matched?.[0] || "custom" };
 }
@@ -494,6 +521,10 @@ function buildLlamaCppArgsFromControls() {
     cpuMoe: String(els.llamacppCpuMoeInput?.value || "15"),
     cacheK: String(els.llamacppCacheKInput?.value || "turbo4"),
     cacheV: String(els.llamacppCacheVInput?.value || "turbo3"),
+    cacheRam: String(els.llamacppCacheRamInput?.value || "0"),
+    reasoning: String(els.llamacppReasoningInput?.value || "auto"),
+    reasoningBudget: String(els.llamacppReasoningBudgetInput?.value || "-1"),
+    fitTarget: String(els.llamacppFitTargetInput?.value || "1024"),
   };
   return llamaCppProfileArgs(profile);
 }
@@ -1343,6 +1374,46 @@ function createQueryRecordFromDataset(response) {
   };
 }
 
+function upsertResearchExecutionCandidateQuery(response, plan, options = {}) {
+  const articles = Array.isArray(options.articles) && options.articles.length
+    ? options.articles
+    : Array.isArray(response?.candidate_articles) && response.candidate_articles.length
+      ? response.candidate_articles
+      : [];
+  const runTrace = response?.run_trace || {};
+  const queryTitle = plan?.topic || plan?.objective || runTrace.topic || "Research plan execution";
+  const queryId = options.id || (runTrace.id ? `research_${runTrace.id}` : `research_agent_${Date.now().toString(36)}`);
+  if (!articles.length || !queryId) return "";
+  const timestamp = new Date().toISOString();
+  state.queryHistory = state.queryHistory.filter((item) => item.id !== queryId);
+  state.queryHistory.unshift({
+    id: queryId,
+    title: options.title || `${queryTitle} · Agent Query`,
+    created_at: timestamp,
+    updated_at: timestamp,
+    search_payload: {
+      query: queryTitle,
+      year_start: null,
+      year_end: null,
+      max_results: Math.max(1, Math.min(5000, articles.length)),
+      batch_size: null,
+      min_cite: null,
+      article_type: null,
+      use_cache: true,
+      preferred_source: "pubmed",
+    },
+    meta: {
+      ...(cloneJson(options.meta || response.meta || {})),
+      fetched_results: articles.length,
+      batch_size_used: articles.length,
+      primary_source: "research_plan_candidates",
+    },
+    articles: cloneJson(articles),
+  });
+  state.queryHistory = state.queryHistory.slice(0, 30);
+  return queryId;
+}
+
 function upsertActiveQueryRecord() {
   if (state.articleDatasetMode !== "query") return;
   if (!state.lastSearchPayload?.query || !state.lastPubmedResponse?.articles?.length) return;
@@ -1695,6 +1766,10 @@ function renderSettingsPanel() {
   if (els.llamacppCpuMoeInput) els.llamacppCpuMoeInput.value = llamaArgs.cpuMoe;
   if (els.llamacppCacheKInput) els.llamacppCacheKInput.value = llamaArgs.cacheK;
   if (els.llamacppCacheVInput) els.llamacppCacheVInput.value = llamaArgs.cacheV;
+  if (els.llamacppCacheRamInput) els.llamacppCacheRamInput.value = llamaArgs.cacheRam;
+  if (els.llamacppReasoningInput) els.llamacppReasoningInput.value = llamaArgs.reasoning;
+  if (els.llamacppReasoningBudgetInput) els.llamacppReasoningBudgetInput.value = llamaArgs.reasoningBudget;
+  if (els.llamacppFitTargetInput) els.llamacppFitTargetInput.value = llamaArgs.fitTarget;
   if (els.llamacppStatus) {
     const parts = [];
     if (runtime.llamacppConnected) {
@@ -2891,10 +2966,58 @@ function detailFieldPresentation(field) {
 
 function articleTitleMeta(article) {
   const bits = [article.journal || "", article.publication_date || ""].filter(Boolean);
+  const branch = articleResearchBranchLabel(article);
+  const score = articleResearchScore(article);
+  if (branch) bits.push(`Branch ${branch}`);
+  if (score !== null) bits.push(`Score ${formatResearchScore(score)}`);
   const sourceId = sourceRecordLabel(article);
   if (sourceId) bits.push(sourceId);
   if (article.doi) bits.push(`DOI ${article.doi}`);
   return bits.slice(0, 4).join(" · ");
+}
+
+function articleResearchMeta(article) {
+  return article?.research_meta && typeof article.research_meta === "object" ? article.research_meta : {};
+}
+
+function articleResearchScore(article) {
+  const value = Number(articleResearchMeta(article).score);
+  return Number.isFinite(value) ? value : null;
+}
+
+function formatResearchScore(score) {
+  if (!Number.isFinite(Number(score))) return "-";
+  return Number(score).toFixed(2);
+}
+
+function articleResearchBranchLabel(article) {
+  const meta = articleResearchMeta(article);
+  const selected = String(meta.selected_branch_label || "").trim();
+  if (selected) return selected;
+  const branches = Array.isArray(meta.branches) ? meta.branches : [];
+  return branches.map((item) => item?.label || item?.id || "").filter(Boolean).join(", ");
+}
+
+function articleResearchSourcesLabel(article) {
+  const meta = articleResearchMeta(article);
+  const sources = Array.isArray(meta.sources) ? meta.sources : [];
+  if (sources.length) return sources.map((item) => searchResourceLabel(item)).join(", ");
+  return currentSearchSourcesUsed();
+}
+
+function articleResearchSourceDetails(article) {
+  const meta = articleResearchMeta(article);
+  const matches = Array.isArray(meta.source_matches) && meta.source_matches.length
+    ? meta.source_matches
+    : Array.isArray(meta.matches) ? meta.matches : [];
+  if (!matches.length) return `Sources: ${articleResearchSourcesLabel(article) || "-"}`;
+  return matches.map((match, index) => [
+    `Match ${index + 1}`,
+    `Source: ${searchResourceLabel(match.source || match.database || "")}`,
+    `Branch: ${match.branch_label || match.branch_id || "-"}`,
+    `Raw query: ${match.raw_query || "-"}`,
+    `Extracted query: ${match.extracted_query || match.query || "-"}`,
+  ].join("\n")).join("\n\n");
 }
 
 function sourceRecordLabel(article) {
@@ -4113,7 +4236,9 @@ function compactList(items, limit = 8) {
 
 function detailMetaMarkup(article) {
   const lines = [];
-  lines.push(`Source ${currentSearchSourceLabel()}`);
+  lines.push(`Source ${articleResearchSourcesLabel(article) || currentSearchSourceLabel()}`);
+  if (articleResearchBranchLabel(article)) lines.push(`Branch ${articleResearchBranchLabel(article)}`);
+  if (articleResearchScore(article) !== null) lines.push(`Score ${formatResearchScore(articleResearchScore(article))}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
   if (sourceRecordLabel(article)) lines.push(sourceRecordLabel(article));
@@ -4125,7 +4250,9 @@ function detailMetaMarkup(article) {
 function detailMetaText(article) {
   const lines = [];
   if (article.title) lines.push(article.title);
-  lines.push(`Source ${currentSearchSourceLabel()}`);
+  lines.push(`Source ${articleResearchSourcesLabel(article) || currentSearchSourceLabel()}`);
+  if (articleResearchBranchLabel(article)) lines.push(`Branch ${articleResearchBranchLabel(article)}`);
+  if (articleResearchScore(article) !== null) lines.push(`Score ${formatResearchScore(articleResearchScore(article))}`);
   if (article.year) lines.push(`Year ${article.year}`);
   if (article.pmid) lines.push(`PMID ${article.pmid}`);
   if (sourceRecordLabel(article)) lines.push(sourceRecordLabel(article));
@@ -4201,6 +4328,13 @@ function detailPopupPayload(article, field) {
         title: "Article Types",
         meta: detailMetaText(article),
         body: article.article_types?.length ? article.article_types.join(", ") : "Article type information not available.",
+      };
+    case "research_sources":
+      return {
+        eyebrow: "Research Trace",
+        title: "Branch, Score & Sources",
+        meta: detailMetaText(article),
+        body: articleResearchSourceDetails(article),
       };
     case "related_articles":
       {
@@ -4297,19 +4431,15 @@ function researchPlanSharedConcepts(plan) {
 }
 
 function researchPlanRawSearchQueries(plan) {
-  const existingQueries = Array.isArray(plan?.raw_search_queries) ? plan.raw_search_queries : [];
   const concepts = researchPlanSharedConcepts(plan).filter((item) => item.query);
-  const existingQueriesHaveCategories = !concepts.length
-    || existingQueries.some((item) => item.category_id || item.category_label);
-  if (existingQueries.length && existingQueriesHaveCategories) {
-    return plan.raw_search_queries;
-  }
   const databases = researchPlanDatabases(plan);
   const branches = researchPlanSearchBranches(plan);
   const categoryQuery = concepts.map((concept) => concept.query).filter(Boolean).map((query) => `(${query})`).join(" OR ");
   const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
   return databases.flatMap((database) => branches.map((branch) => {
-    const parts = [branch.query || branch.label, categoryQuery].filter(Boolean);
+    const rawQuery = branch.query || branch.label || "";
+    const parts = [rawQuery, categoryQuery].filter(Boolean);
+    const extractedQuery = parts.map((part) => `(${part})`).join(" AND ");
     return {
       database,
       branch_id: branch.id || "",
@@ -4318,7 +4448,9 @@ function researchPlanRawSearchQueries(plan) {
       category_labels: concepts.map((concept) => concept.label || "").filter(Boolean),
       category_id: "",
       category_label: concepts.length ? "Combined categories" : "",
-      query: parts.map((part) => `(${part})`).join(" AND "),
+      raw_query: rawQuery,
+      extracted_query: extractedQuery,
+      query: extractedQuery,
       candidate_limit: Math.max(1, perDatabase),
     };
   }));
@@ -4340,6 +4472,8 @@ function researchPlanGroupedSearchQueries(rawSearchQueries) {
       branch_label: item.branch_label || "Branch",
       category_id: item.category_id || "",
       category_label: item.category_label || "",
+      raw_query: item.raw_query || "",
+      extracted_query: item.extracted_query || item.query || "",
       query: item.query || "",
       candidate_limit: item.candidate_limit || "",
       databases: [],
@@ -4374,14 +4508,17 @@ function researchPlanDisplayPlan(plan, rawSearchQueries, totalQueries, estimated
 }
 
 function researchPlanTotalQueries(plan) {
+  const rawSearchQueries = researchPlanRawSearchQueries(plan);
+  if (rawSearchQueries.length) return rawSearchQueries.length;
   if (Number.isFinite(Number(plan?.total_queries))) return Number(plan.total_queries);
   return Math.max(1, researchPlanDatabases(plan).length) * Math.max(1, researchPlanSearchBranches(plan).length);
 }
 
 function researchPlanEstimatedCandidates(plan) {
+  const rawSearchQueries = researchPlanRawSearchQueries(plan);
   if (Number.isFinite(Number(plan?.estimated_candidates))) return Number(plan.estimated_candidates);
   const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count || 20) * 2));
-  return researchPlanTotalQueries(plan) * Math.max(1, perDatabase);
+  return Math.max(1, rawSearchQueries.length || researchPlanTotalQueries(plan)) * Math.max(1, perDatabase);
 }
 
 function researchPlanEstimatedSeconds(plan) {
@@ -4407,7 +4544,6 @@ function recomputeResearchPlanEstimates(plan) {
   plan.shared_query_concepts = researchPlanSharedConcepts(plan);
   plan.candidate_budget.target_count = targetCount;
   plan.candidate_budget.per_database = Math.max(1, Number.parseInt(String(plan.candidate_budget.per_database || targetCount * 2), 10) || targetCount * 2);
-  delete plan.raw_search_queries;
   plan.raw_search_queries = researchPlanRawSearchQueries(plan);
   plan.total_queries = plan.raw_search_queries.length || (Math.max(1, plan.search_branches.length) * Math.max(1, plan.active_databases.length));
   plan.estimated_candidates = plan.total_queries * plan.candidate_budget.per_database;
@@ -4484,8 +4620,9 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
   const sharedConcepts = researchPlanSharedConcepts(plan);
   const rawSearchQueries = researchPlanRawSearchQueries(plan);
   const groupedSearchQueries = researchPlanGroupedSearchQueries(rawSearchQueries);
-  const totalQueries = researchPlanTotalQueries(plan);
-  const estimatedCandidates = researchPlanEstimatedCandidates(plan);
+  const totalQueries = rawSearchQueries.length || researchPlanTotalQueries(plan);
+  const perDatabase = Number(plan?.candidate_budget?.per_database || (Number(plan?.target_count_per_branch || plan?.target_count || 20) * 2));
+  const estimatedCandidates = totalQueries * Math.max(1, perDatabase);
   const estimatedSeconds = researchPlanEstimatedSeconds(plan);
   const effectivePlan = researchPlanDisplayPlan(plan, rawSearchQueries, totalQueries, estimatedCandidates, estimatedSeconds);
   const rawJson = JSON.stringify(
@@ -4610,7 +4747,10 @@ function researchPlanDetailMarkup(action, messageId = "", actionIndex = 0) {
                 <div class="research-plan-query-databases">
                   ${item.databases.map((database) => `<span>${escapeHtml(database)}</span>`).join("")}
                 </div>
-                <code>${escapeHtml(item.query || "")}</code>
+                <span>Raw query</span>
+                <code>${escapeHtml(item.raw_query || item.branch_query || item.branch_label || "-")}</code>
+                <span>Extracted query</span>
+                <code>${escapeHtml(item.extracted_query || item.query || "")}</code>
               </div>
             `).join("")}
           </div>
@@ -4637,6 +4777,93 @@ function openResearchPlanPopup(messageId, actionIndex) {
   ].filter(Boolean).join(" • ");
   els.detailPopupBody.innerHTML = researchPlanDetailMarkup(action, messageId, actionIndex);
   bindResearchPlanManualEditEvents(els.detailPopupBody);
+  setDetailPopupOpen(true);
+}
+
+function openResearchExecutionReportPopup(response) {
+  const trace = response?.run_trace || {};
+  const meta = trace.meta || {};
+  const distribution = meta.distribution || {};
+  const selectedCount = Array.isArray(response?.articles) ? response.articles.length : 0;
+  const candidateCount = Number(meta.candidate_article_count || meta.candidate_count || 0);
+  const queryCount = Number(meta.normalized_query_count || meta.raw_query_count || 0);
+  const normalizedQueries = meta.normalized_queries || trace.executed_queries || [];
+  const report = {
+    summary: {
+      run_id: trace.id || "",
+      topic: trace.topic || "",
+      objective: trace.objective || "",
+      normalized_query_count: queryCount,
+      candidate_article_count: candidateCount,
+      selected_article_count: selectedCount,
+      sources_used: response?.meta?.sources_used || [],
+      elapsed_ms: response?.meta?.elapsed_ms || meta.elapsed_ms || 0,
+    },
+    distribution,
+    normalized_queries: normalizedQueries,
+    selected_candidate_ids: trace.selected_candidate_ids || [],
+    backup_candidate_ids: trace.backup_candidate_ids || [],
+    excluded_candidate_ids: trace.excluded_candidate_ids || [],
+    screening: trace.screening || [],
+    selections: trace.selections || [],
+  };
+  els.detailPopupEyebrow.textContent = "Report";
+  els.detailPopupTitle.textContent = trace.topic || "Research Execution Report";
+  els.detailPopupMeta.textContent = `${selectedCount} selected · ${candidateCount} candidates · ${queryCount} queries`;
+  els.detailPopupBody.innerHTML = `
+    <div class="research-plan-detail">
+      <section class="research-plan-detail-section">
+        <h4>Execution Summary</h4>
+        <div class="research-plan-detail-grid">
+          <div><span>Selected</span><strong>${escapeHtml(selectedCount)}</strong></div>
+          <div><span>Candidates</span><strong>${escapeHtml(candidateCount)}</strong></div>
+          <div><span>Queries</span><strong>${escapeHtml(queryCount)}</strong></div>
+          <div><span>Sources</span><strong>${escapeHtml((response?.meta?.sources_used || []).join(", ") || "-")}</strong></div>
+        </div>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Branch Distribution</h4>
+        <div class="research-plan-detail-grid">
+          ${(distribution.branch_distribution || []).map((row) => `
+            <div>
+              <span>${escapeHtml(row.branch_label || row.branch_id || "Branch")}</span>
+              <strong>${escapeHtml(row.selected_count || 0)}/${escapeHtml(row.target_count || 0)}</strong>
+              <small>${escapeHtml(row.candidate_count || 0)} candidates · ${escapeHtml(row.excluded_count || 0)} excluded</small>
+            </div>
+          `).join("") || "<p>No branch distribution available.</p>"}
+        </div>
+        ${(distribution.warnings || []).length ? `<p>${escapeHtml(distribution.warnings.join(" "))}</p>` : ""}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Query Mapping</h4>
+        ${(normalizedQueries || []).length ? `
+          <div class="research-plan-query-list">
+            ${normalizedQueries.map((query) => `
+              <div class="research-plan-query-item">
+                <strong>${escapeHtml(query.database || query.source || "Database")} · ${escapeHtml(query.branch_label || "Branch")}</strong>
+                <span>Raw query</span>
+                <code>${escapeHtml(query.raw_query || query.branch_query || "-")}</code>
+                <span>Extracted query</span>
+                <code>${escapeHtml(query.extracted_query || query.query || "-")}</code>
+              </div>
+            `).join("")}
+          </div>
+        ` : "<p>No query mapping available.</p>"}
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Source Distribution</h4>
+        <div class="research-plan-detail-grid">
+          ${(distribution.source_distribution || []).map((row) => `
+            <div><span>${escapeHtml(row.database || row.source || "Source")}</span><strong>${escapeHtml(row.candidate_matches || 0)}</strong></div>
+          `).join("") || "<p>No source distribution available.</p>"}
+        </div>
+      </section>
+      <section class="research-plan-detail-section">
+        <h4>Report JSON</h4>
+        <pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre>
+      </section>
+    </div>
+  `;
   setDetailPopupOpen(true);
 }
 
@@ -4814,6 +5041,13 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     traceMessage.liveThinking = `${traceMessage.liveThinking || ""}[${stamp}] ${text}\n`;
     scheduleAssistantMessageUpdate(traceMessage);
   };
+  const showLocalRequestLoading = isLocalAssistantModel(runtime.assistantModel);
+  const clearLocalRequestLoading = () => {
+    if (showLocalRequestLoading && runtime.assistantModelLoading) {
+      setAssistantModelLoading(false);
+      updateAssistantModelUI();
+    }
+  };
   try {
     let response = null;
     await streamJsonEvents(
@@ -4832,6 +5066,47 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
       (event) => {
         if (event.type === "trace") {
           appendTrace(event.message || event.stage || "Working...");
+          if (event.stage === "screening_agent_request" && showLocalRequestLoading) {
+            setAssistantModelLoading(true, runtime.assistantModel);
+          }
+          if ((event.stage === "screening_agent_first_token" || event.stage === "screening_agent_done" || event.stage === "screening_complete") && showLocalRequestLoading) {
+            clearLocalRequestLoading();
+          }
+          if (event.stage === "queries_complete" && Array.isArray(event.articles) && event.articles.length) {
+            const queryId = action.details?.agent_query_id || `research_agent_${Date.now().toString(36)}`;
+            action.details = {
+              ...(action.details || {}),
+              agent_query_id: queryId,
+            };
+            upsertResearchExecutionCandidateQuery(
+              { meta: event.meta || {}, candidate_articles: event.articles },
+              plan,
+              {
+                id: queryId,
+                title: `${plan.topic || plan.objective || "Research plan execution"} · Agent Query`,
+                articles: event.articles,
+                meta: event.meta || {},
+              },
+            );
+            state.activeQueryId = queryId;
+            state.queryDetailId = queryId;
+            state.selectedQueryIds = new Set();
+            state.lastSearchPayload = {
+              query: plan.topic || plan.objective || "Research plan execution",
+              year_start: null,
+              year_end: null,
+              max_results: Math.max(1, event.articles.length),
+              batch_size: null,
+              min_cite: null,
+              article_type: null,
+              use_cache: true,
+              preferred_source: "pubmed",
+            };
+            applyArticleDataset({ meta: event.meta || {}, articles: event.articles }, { persist: false });
+            renderQueryHistory();
+            syncCurrentSession();
+            scheduleProjectStateSave();
+          }
           return;
         }
         if (event.type === "error") {
@@ -4848,8 +5123,12 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     if (response.run_trace) {
       state.researchRuns = [response.run_trace, ...state.researchRuns.filter((item) => item.id !== response.run_trace.id)].slice(0, 20);
     }
-    state.activeQueryId = null;
-    state.queryDetailId = null;
+    const finalQueryId = upsertResearchExecutionCandidateQuery(response, plan, {
+      id: action.details?.agent_query_id || (response.run_trace?.id ? `research_${response.run_trace.id}` : ""),
+      title: `${plan.topic || plan.objective || "Research plan execution"} · Agent Query`,
+    });
+    state.activeQueryId = finalQueryId || null;
+    state.queryDetailId = finalQueryId || null;
     state.selectedQueryIds = new Set();
     state.lastSearchPayload = {
       query: plan.topic || plan.objective || "Research plan execution",
@@ -4862,7 +5141,8 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
       use_cache: true,
       preferred_source: "openalex",
     };
-    applyArticleDataset(response);
+    applyArticleDataset(response, { persist: false });
+    openResearchExecutionReportPopup(response);
     action.details = {
       ...(action.details || {}),
       plan,
@@ -4886,6 +5166,7 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     });
     void enrichCitationsInBackground();
   } catch (error) {
+    clearLocalRequestLoading();
     action.details = {
       ...(action.details || {}),
       execution_state: "error",
@@ -4901,6 +5182,7 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
     });
     alert(error.message || "Research plan execution failed.");
   } finally {
+    clearLocalRequestLoading();
     if (trigger) {
       trigger.disabled = false;
       trigger.textContent = previousLabel || "Execute";
@@ -4958,7 +5240,7 @@ function detailRowMarkup(article) {
   const link = bestArticleLink(article);
   return `
     <tr class="detail-row">
-      <td colspan="9">
+      <td colspan="11">
         <div class="inline-detail">
           <div class="inline-detail-top">
             <div>
@@ -4980,7 +5262,8 @@ function detailRowMarkup(article) {
             <div class="inline-abstract">${escapeHtml(article.abstract?.trim() || "Abstract not available.")}</div>
           </button>
           <div class="detail-grid">
-            ${detailBlockMarkup(article, "journal", "Database Source", currentSearchSourceLabel(), currentSearchSourcesUsed())}
+            ${detailBlockMarkup(article, "research_sources", "Research Branch", articleResearchBranchLabel(article) || "-", articleResearchScore(article) !== null ? `Score ${formatResearchScore(articleResearchScore(article))}` : "")}
+            ${detailBlockMarkup(article, "research_sources", "Database Sources", articleResearchSourcesLabel(article) || currentSearchSourceLabel(), currentSearchSourcesUsed())}
             ${detailBlockMarkup(article, "journal", "Journal & Publication", article.journal || "-", article.publication_date || "-")}
             ${detailBlockMarkup(article, "journal_metrics", "Q Rank", journalQuartileLabel(article), journalQuartileSubtext(article))}
             ${detailBlockMarkup(article, "authors", "Authors", compactList(article.authors, 10))}
@@ -5002,6 +5285,8 @@ function defaultSortDirection(key) {
     year: "desc",
     article_type: "asc",
     citation_count: "desc",
+    branch: "asc",
+    score: "desc",
   }[key] || "asc";
 }
 
@@ -5017,6 +5302,10 @@ function articleSortValue(article, sortKey) {
       return articleTypeLabel(article);
     case "citation_count":
       return Number.isInteger(article.citation_count) ? article.citation_count : null;
+    case "branch":
+      return articleResearchBranchLabel(article) || null;
+    case "score":
+      return articleResearchScore(article);
     default:
       return null;
   }
@@ -5378,6 +5667,10 @@ function applyArticleDataset(data, options = {}) {
   state.lastPubmedResponse = data;
   state.articleDatasetMode = mode;
   state.allArticles = Array.isArray(data.articles) ? data.articles : [];
+  if (data?.meta?.primary_source === "research_plan" && state.allArticles.some((article) => articleResearchScore(article) !== null)) {
+    state.sortKey = "score";
+    state.sortDirection = "desc";
+  }
   state.tableFilters = emptyTableFilters();
   state.downloadabilityRunId += 1;
   seedDownloadability(state.allArticles);
@@ -5400,7 +5693,7 @@ function renderResults() {
   if (!state.articles.length) {
     els.resultsBody.innerHTML = `
       <tr>
-        <td colspan="9" class="empty-cell">
+                  <td colspan="11" class="empty-cell">
           <div class="native-empty-state">
             <div class="native-empty-state-title">No search yet</div>
             <div class="native-empty-state-copy">Start with a topic in Searcher AI. Default search covers the most recent 5 years.</div>
@@ -5423,6 +5716,8 @@ function renderResults() {
           <td class="year-cell">${escapeHtml(article.year || "-")}</td>
           <td class="type-cell">${escapeHtml(articleTypeLabel(article))}</td>
           <td class="count-cell">${escapeHtml(citationLabel(article))}</td>
+          <td class="type-cell">${escapeHtml(articleResearchBranchLabel(article) || "-")}</td>
+          <td class="count-cell">${escapeHtml(formatResearchScore(articleResearchScore(article)))}</td>
           <td class="title-cell">
             <div class="table-title-main">${escapeHtml(article.title || "-")}</div>
             <div class="table-title-sub">${escapeHtml(articleTitleMeta(article) || currentSearchSourceLabel())}</div>
@@ -6586,6 +6881,16 @@ function bindEvents() {
     runtime.llamacppServerArgs = String(els.llamacppServerArgsInput?.value || "").trim();
     const parsed = parseLlamaCppArgs(runtime.llamacppServerArgs);
     if (els.llamacppProfileInput) els.llamacppProfileInput.value = parsed.profile;
+    if (els.llamacppContextInput) els.llamacppContextInput.value = parsed.context;
+    if (els.llamacppBatchInput) els.llamacppBatchInput.value = parsed.batch;
+    if (els.llamacppUbatchInput) els.llamacppUbatchInput.value = parsed.ubatch;
+    if (els.llamacppCpuMoeInput) els.llamacppCpuMoeInput.value = parsed.cpuMoe;
+    if (els.llamacppCacheKInput) els.llamacppCacheKInput.value = parsed.cacheK;
+    if (els.llamacppCacheVInput) els.llamacppCacheVInput.value = parsed.cacheV;
+    if (els.llamacppCacheRamInput) els.llamacppCacheRamInput.value = parsed.cacheRam;
+    if (els.llamacppReasoningInput) els.llamacppReasoningInput.value = parsed.reasoning;
+    if (els.llamacppReasoningBudgetInput) els.llamacppReasoningBudgetInput.value = parsed.reasoningBudget;
+    if (els.llamacppFitTargetInput) els.llamacppFitTargetInput.value = parsed.fitTarget;
   });
   els.llamacppProfileInput?.addEventListener("change", () => {
     const profile = llamaCppProfiles[els.llamacppProfileInput?.value || ""];
@@ -6596,6 +6901,10 @@ function bindEvents() {
       if (els.llamacppCpuMoeInput) els.llamacppCpuMoeInput.value = profile.cpuMoe;
       if (els.llamacppCacheKInput) els.llamacppCacheKInput.value = profile.cacheK;
       if (els.llamacppCacheVInput) els.llamacppCacheVInput.value = profile.cacheV;
+      if (els.llamacppCacheRamInput) els.llamacppCacheRamInput.value = profile.cacheRam;
+      if (els.llamacppReasoningInput) els.llamacppReasoningInput.value = profile.reasoning;
+      if (els.llamacppReasoningBudgetInput) els.llamacppReasoningBudgetInput.value = profile.reasoningBudget;
+      if (els.llamacppFitTargetInput) els.llamacppFitTargetInput.value = profile.fitTarget;
     }
     syncLlamaCppInputs();
     renderSettingsPanel();
@@ -6607,6 +6916,10 @@ function bindEvents() {
     els.llamacppCpuMoeInput,
     els.llamacppCacheKInput,
     els.llamacppCacheVInput,
+    els.llamacppCacheRamInput,
+    els.llamacppReasoningInput,
+    els.llamacppReasoningBudgetInput,
+    els.llamacppFitTargetInput,
   ].forEach((input) => {
     input?.addEventListener("change", () => {
       syncLlamaCppInputs();

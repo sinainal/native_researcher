@@ -347,6 +347,8 @@
                 <col style="width: 72px;">
                 <col style="width: 150px;">
                 <col style="width: 92px;">
+                <col style="width: 150px;">
+                <col style="width: 84px;">
                 <col>
                 <col style="width: 80px;">
                 <col style="width: 128px;">
@@ -379,6 +381,16 @@
                       <span>Citations</span><span class="table-sort-indicator" aria-hidden="true"></span>
                     </button>
                   </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="branch">
+                      <span>Branch</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th>
+                    <button class="table-sort-btn" type="button" data-sort-key="score">
+                      <span>Score</span><span class="table-sort-indicator" aria-hidden="true"></span>
+                    </button>
+                  </th>
                   <th>Title</th>
                   <th>Link</th>
                   <th>Download</th>
@@ -386,7 +398,7 @@
               </thead>
               <tbody id="resultsBody">
                 <tr>
-                  <td colspan="9" class="empty-cell">
+                  <td colspan="11" class="empty-cell">
                     <div class="native-empty-state">
                       <div class="native-empty-state-title">No search yet</div>
                       <div class="native-empty-state-copy">Start with a topic. Default search covers the most recent 5
@@ -581,7 +593,7 @@
         <h3 id="detailPopupTitle" class="detail-popup-title"></h3>
         <div id="detailPopupMeta" class="detail-popup-meta"></div>
       </div>
-      <button id="detailPopupClose" class="detail-popup-close" type="button" aria-label="Kapat" title="Kapat">
+      <button id="detailPopupClose" class="detail-popup-close" type="button" aria-label="Close" title="Close">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
           stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18" />
@@ -789,6 +801,47 @@
               <option value="turbo4">turbo4</option>
               <option value="q8_0">q8_0</option>
               <option value="q4_0">q4_0</option>
+            </select>
+          </label>
+        </div>
+        <div class="native-settings-row native-model-settings-paths">
+          <label class="native-settings-field" for="llamacppCacheRamInput">
+            <span>Prompt Cache</span>
+            <select id="llamacppCacheRamInput" class="native-settings-select">
+              <option value="0">Disabled</option>
+              <option value="2048">2 GB</option>
+              <option value="4096">4 GB</option>
+              <option value="8192">8 GB</option>
+              <option value="-1">Unlimited</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppReasoningInput">
+            <span>Reasoning</span>
+            <select id="llamacppReasoningInput" class="native-settings-select">
+              <option value="auto">Auto</option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppReasoningBudgetInput">
+            <span>Reasoning Budget</span>
+            <select id="llamacppReasoningBudgetInput" class="native-settings-select">
+              <option value="-1">Unlimited</option>
+              <option value="0">Immediate answer</option>
+              <option value="256">256 tokens</option>
+              <option value="512">512 tokens</option>
+              <option value="1024">1024 tokens</option>
+              <option value="1536">1536 tokens</option>
+              <option value="2048">2048 tokens</option>
+            </select>
+          </label>
+          <label class="native-settings-field" for="llamacppFitTargetInput">
+            <span>VRAM Reserve</span>
+            <select id="llamacppFitTargetInput" class="native-settings-select">
+              <option value="512">512 MB</option>
+              <option value="1024">1 GB</option>
+              <option value="1536">1.5 GB</option>
+              <option value="2048">2 GB</option>
             </select>
           </label>
         </div>

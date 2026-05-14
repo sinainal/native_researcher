@@ -713,7 +713,7 @@ class NativeResearcherService:
         args: dict[str, Any],
     ) -> tuple[dict[str, Any], HelperExecutedAction, list[int]]:
         if name != "search_pubmed":
-            raise ValueError(f"Bilinmeyen tool cagrisi: {name}")
+            raise ValueError(f"Unknown tool call: {name}")
         return await self._tool_search_pubmed(args)
 
     async def _tool_search_pubmed(

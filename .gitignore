@@ -1,6 +1,7 @@
 .venv/
 .pytest_cache/
 .playwright-cli/
+.playwright/live-browser/
 output/
 logs/
 workspace/

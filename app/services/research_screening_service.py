@@ -150,19 +150,18 @@ class ResearchScreeningService:
         progress: ProgressCallback | None,
     ) -> list[Any]:
         system_instruction = (
-            "You are the screening subagent for a literature research pipeline. "
-            "Use only the provided title, abstract, metadata, plan criteria, and exclusion criteria. "
-            "Call the `screen_research_candidates` function exactly once. "
-            "Do not answer in prose. Do not invent article facts."
+            "screening subagent: screen one literature candidate. "
+            "Use only the provided candidate and criteria. "
+            "Call `screen_research_candidates` exactly once. "
+            "No prose."
         )
         user_prompt = json.dumps(
             {
-                "task": (
-                    "Score the single provided candidate for the research plan. "
-                    "criterion_scores values must be 0.0 to 1.0. "
-                    "exclusion_scores values must be 1.0 when the exclusion is clearly present, otherwise 0.0. "
-                    "Call the function with an items list containing exactly one object for the provided candidate_id."
-                ),
+                "task": "Score this candidate. Return exactly one item for the provided candidate_id.",
+                "score_rules": {
+                    "criterion_scores": "0.0 absent, 0.5 partial, 1.0 explicit",
+                    "exclusion_scores": "1.0 clearly excluded, otherwise 0.0",
+                },
                 "plan": {
                     "topic": plan.get("topic") or "",
                     "objective": plan.get("objective") or "",
@@ -239,6 +238,16 @@ class ResearchScreeningService:
             messages=messages,
             tools=tools,
             thinking_level=thinking_level,
+            **(
+                {
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "screen_research_candidates"},
+                    }
+                }
+                if provider == "llamacpp"
+                else {}
+            ),
             timeout_seconds=600.0,
             request_user_agent=self._request_user_agent(),
         ).__aiter__()
@@ -346,6 +355,7 @@ class ResearchScreeningService:
                 )
             return await self._run_ollama_agent_batch_stream(
                 model_name=model_name,
+                provider=provider,
                 messages=[
                     *messages,
                     {
@@ -380,6 +390,7 @@ class ResearchScreeningService:
                     )
                 return await self._run_ollama_agent_batch_stream(
                     model_name=model_name,
+                    provider=provider,
                     messages=[
                         *messages,
                         {

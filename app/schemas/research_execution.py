@@ -25,6 +25,8 @@ class ResearchQueryTrace(BaseModel):
     category_id: str = ""
     category_label: str = ""
     query: str
+    raw_query: str = ""
+    extracted_query: str = ""
     candidate_limit: int
     status: str = "success"
     fetched_results: int = 0
@@ -42,6 +44,8 @@ class ResearchCandidateMatch(BaseModel):
     category_id: str = ""
     category_label: str = ""
     query: str = ""
+    raw_query: str = ""
+    extracted_query: str = ""
 
 
 class ResearchCandidateTrace(BaseModel):
@@ -94,4 +98,5 @@ class ResearchPlanRunTrace(BaseModel):
 class ResearchPlanExecuteResponse(BaseModel):
     meta: PubMedSearchMeta
     articles: list[Article]
+    candidate_articles: list[Article] = Field(default_factory=list)
     run_trace: ResearchPlanRunTrace

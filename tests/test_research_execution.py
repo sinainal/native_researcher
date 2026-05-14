@@ -337,10 +337,125 @@ def test_research_plan_stream_executes_two_branches_two_categories_with_small_li
                 assert len(fake_pubmed.calls) == 4
                 assert {call.max_results for call in fake_pubmed.calls} == {2}
                 assert final["run_trace"]["meta"]["raw_query_count"] == 4
+                assert final["run_trace"]["meta"]["candidate_article_count"] == len(final["candidate_articles"])
                 assert all("category one" in call.query and "category two" in call.query for call in fake_pubmed.calls)
                 assert any(event.get("stage") == "query_start" for event in events)
+                query_complete_index = next(index for index, event in enumerate(events) if event.get("stage") == "queries_complete")
+                screening_start_index = next(index for index, event in enumerate(events) if event.get("stage") == "screening_start")
+                assert query_complete_index < screening_start_index
+                assert events[query_complete_index]["articles"]
+                assert events[query_complete_index]["meta"]["primary_source"] == "research_plan_candidates"
                 assert any(event.get("stage") == "screening_batch" for event in events)
                 assert any(event.get("stage") == "screening_agent_first_token" for event in events)
+                state = await client.get(f"/app/projects/{project_id}/state")
+                assert state.status_code == 200
+                saved_queries = state.json()["query_history"]
+                assert saved_queries[0]["id"] == f"research_{final['run_trace']['id']}"
+                assert saved_queries[0]["title"] == "small backend test · Agent Query"
+                assert saved_queries[0]["meta"]["primary_source"] == "research_plan_candidates"
+                assert len(saved_queries[0]["articles"]) == len(final["candidate_articles"])
+
+    asyncio.run(runner())
+
+
+def test_research_plan_stream_uses_combined_shared_query_not_agent_split_queries(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
+        candidates = json.loads(kwargs["messages"][1]["content"])["candidates"]
+        yield {"message": {"tool_calls": [{"function": {"id": "screen_call", "name": "screen_research_candidates", "arguments": {"items":
+            [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "criterion_scores": {"topic_match": 1.0},
+                    "exclusion_scores": {},
+                    "confidence": 0.9,
+                    "evidence": ["matched"],
+                    "rationale": "Relevant.",
+                }
+                for item in candidates
+            ]
+        }}}]}}
+
+    monkeypatch.setattr("app.services.research_screening_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = Settings(
+                download_root=root / "downloads",
+                workspace_root=root / "workspace",
+                helper_log_path=root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=root / "assistant_api_key.txt",
+                ncbi_api_key_path=root / "ncbi_api",
+                unpaywall_email_path=root / "unpaywall_email",
+                openalex_api_key_path=root / "openalex_api_key",
+                core_api_key_path=root / "core_api_key",
+                pubmed_oa_only_path=root / "pubmed_oa_only",
+                ai_primary_search_resource_path=root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=root / "pdf_arxiv_fallback_enabled",
+            )
+            fake_pubmed = FakePubMedService()
+            app = create_app(
+                settings=settings,
+                pubmed_service=fake_pubmed,
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                project = await client.post("/app/projects", json={"name": "Combined Query Test", "description": ""})
+                project_id = project.json()["id"]
+                plan = {
+                    "topic": "combined query test",
+                    "target_count_per_branch": 2,
+                    "active_databases": ["PubMed", "OpenAlex"],
+                    "candidate_budget": {},
+                    "search_branches": [{"id": "d1", "label": "D1", "query": "D1"}],
+                    "shared_query_concepts": [
+                        {"id": "binding", "label": "Binding residues", "query": "binding pocket residues"},
+                        {"id": "structure", "label": "Structure", "query": "crystal structure OR cryo-EM"},
+                    ],
+                    "raw_search_queries": [
+                        {
+                            "database": "PubMed",
+                            "branch_id": "d1",
+                            "branch_label": "D1",
+                            "category_id": "binding",
+                            "category_label": "Binding residues",
+                            "query": "(DRD1) AND (binding pocket residues)",
+                            "candidate_limit": 3,
+                        },
+                        {
+                            "database": "OpenAlex",
+                            "branch_id": "d1",
+                            "branch_label": "D1",
+                            "category_id": "structure",
+                            "category_label": "Structure",
+                            "query": "(DRD1) AND (crystal structure OR cryo-EM)",
+                            "candidate_limit": 3,
+                        },
+                    ],
+                    "screening_criteria": [{"id": "topic_match", "label": "Topic match"}],
+                    "exclusion_criteria": [],
+                }
+                response = await client.post(
+                    f"/app/projects/{project_id}/research-plan/execute/stream",
+                    json={"plan": plan, "screening_model": "ollama:test-screen-model"},
+                )
+                assert response.status_code == 200
+                final = next(event for event in _sse_events(response.text) if event["type"] == "final")["response"]
+                assert [call.query for call in fake_pubmed.calls] == [
+                    "(D1) AND ((binding pocket residues) OR (crystal structure OR cryo-EM))",
+                    "(D1) AND ((binding pocket residues) OR (crystal structure OR cryo-EM))",
+                ]
+                assert {call.max_results for call in fake_pubmed.calls} == {4}
+                assert final["run_trace"]["meta"]["normalized_queries"][0]["category_id"] == ""
+                assert final["run_trace"]["meta"]["normalized_queries"][0]["category_ids"] == ["binding", "structure"]
+                assert final["run_trace"]["meta"]["normalized_queries"][0]["query"] == "(D1) AND ((binding pocket residues) OR (crystal structure OR cryo-EM))"
 
     asyncio.run(runner())
 

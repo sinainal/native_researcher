@@ -58,6 +58,7 @@ def _chat_payload(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     stream: bool,
+    tool_choice: Any | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model or "local",
@@ -70,7 +71,7 @@ def _chat_payload(
     openai_tools = _openai_tools(tools)
     if openai_tools:
         payload["tools"] = openai_tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
     return payload
 
 
@@ -81,6 +82,7 @@ async def llamacpp_chat(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     thinking_level: str = "off",
+    tool_choice: Any | None = None,
     keep_alive: str | int | float | None = None,
     timeout_seconds: float = 120.0,
     request_user_agent: str = "NativeResearcher/0.1",
@@ -96,7 +98,7 @@ async def llamacpp_chat(
     ) as client:
         response = await client.post(
             "/v1/chat/completions",
-            json=_chat_payload(model=model, messages=messages, tools=tools, stream=False),
+            json=_chat_payload(model=model, messages=messages, tools=tools, stream=False, tool_choice=tool_choice),
         )
         response.raise_for_status()
         data = response.json()
@@ -130,6 +132,7 @@ async def llamacpp_chat_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     thinking_level: str = "off",
+    tool_choice: Any | None = None,
     keep_alive: str | int | float | None = None,
     timeout_seconds: float = 120.0,
     request_user_agent: str = "NativeResearcher/0.1",
@@ -147,7 +150,7 @@ async def llamacpp_chat_stream(
         async with client.stream(
             "POST",
             "/v1/chat/completions",
-            json=_chat_payload(model=model, messages=messages, tools=tools, stream=True),
+            json=_chat_payload(model=model, messages=messages, tools=tools, stream=True, tool_choice=tool_choice),
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():

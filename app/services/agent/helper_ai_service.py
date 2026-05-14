@@ -1463,6 +1463,7 @@ class HelperAIService:
             heartbeat_text: str,
             messages: list[dict[str, Any]],
             tools: list[dict[str, Any]] | None,
+            force_tool_name: str | None = None,
         ) -> AsyncIterator[dict[str, Any]]:
             queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -1474,6 +1475,16 @@ class HelperAIService:
                         messages=messages,
                         tools=tools,
                         thinking_level=payload.thinking_level,
+                        **(
+                            {
+                                "tool_choice": {
+                                    "type": "function",
+                                    "function": {"name": force_tool_name},
+                                }
+                            }
+                            if provider == "llamacpp" and force_tool_name
+                            else {}
+                        ),
                         keep_alive="10m",
                         timeout_seconds=900.0,
                         request_user_agent=self._ollama_request_user_agent(),
@@ -1507,7 +1518,11 @@ class HelperAIService:
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_research_agent_system_instruction()},
-            *self._history_to_ollama_messages(thread_state.history),
+            *(
+                self._history_to_ollama_messages(thread_state.history)
+                if thread_state.research_plan
+                else []
+            ),
             {
                 "role": "user",
                 "content": build_research_agent_prompt(
@@ -1530,6 +1545,7 @@ class HelperAIService:
             heartbeat_text="Research Agent is still waiting for the local model to emit the planning call.",
             messages=messages,
             tools=self._build_ollama_research_toolset(),
+            force_tool_name="create_research_plan" if provider == "llamacpp" and not thread_state.research_plan else None,
         ):
             if stream_event["type"] == "status":
                 yield stream_event
@@ -1579,6 +1595,7 @@ class HelperAIService:
                 heartbeat_text="Research Agent is still waiting for the required planning call.",
                 messages=messages,
                 tools=self._build_ollama_research_toolset(),
+                force_tool_name="create_research_plan" if provider == "llamacpp" else None,
             ):
                 if stream_event["type"] == "status":
                     yield stream_event
@@ -1654,29 +1671,33 @@ class HelperAIService:
                     "content": self._ollama_tool_message_content(result),
                 }
             )
-            yield {"type": "status", "text": "Research Agent is writing the plan preview."}
-            final_chunks: list[str] = []
-            async for stream_event in stream_ollama_with_heartbeat(
-                heartbeat_text="Research Agent is still writing the plan preview.",
-                messages=[*messages, {"role": "user", "content": RESEARCH_PLAN_FINALIZER_PROMPT}],
-                tools=None,
-            ):
-                if stream_event["type"] == "status":
-                    yield stream_event
-                    continue
-                final_message = stream_event["chunk"].get("message") or {}
-                final_thinking = str(final_message.get("thinking") or "")
-                if final_thinking:
-                    streamed_thoughts.append(final_thinking)
-                    yield {"type": "thinking_delta", "text": final_thinking}
-                final_text = str(final_message.get("content") or "")
-                if final_text:
-                    final_chunks.append(final_text)
-                    yield {"type": "answer_delta", "text": final_text}
-            answer = "".join(final_chunks).strip()
-            if not answer and executed_actions:
+            if provider == "llamacpp":
                 answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
                 yield {"type": "answer_delta", "text": answer}
+            else:
+                yield {"type": "status", "text": "Research Agent is writing the plan preview."}
+                final_chunks: list[str] = []
+                async for stream_event in stream_ollama_with_heartbeat(
+                    heartbeat_text="Research Agent is still writing the plan preview.",
+                    messages=[*messages, {"role": "user", "content": RESEARCH_PLAN_FINALIZER_PROMPT}],
+                    tools=None,
+                ):
+                    if stream_event["type"] == "status":
+                        yield stream_event
+                        continue
+                    final_message = stream_event["chunk"].get("message") or {}
+                    final_thinking = str(final_message.get("thinking") or "")
+                    if final_thinking:
+                        streamed_thoughts.append(final_thinking)
+                        yield {"type": "thinking_delta", "text": final_thinking}
+                    final_text = str(final_message.get("content") or "")
+                    if final_text:
+                        final_chunks.append(final_text)
+                        yield {"type": "answer_delta", "text": final_text}
+                answer = "".join(final_chunks).strip()
+                if not answer and executed_actions:
+                    answer = self._research_plan_preview_text(executed_actions[0].details["plan"])
+                    yield {"type": "answer_delta", "text": answer}
         else:
             if raw_answer and thread_state.research_plan:
                 answer = raw_answer
@@ -1948,8 +1969,9 @@ class HelperAIService:
                         "required": ["query"],
                     },
                     "description": (
-                        "Literature/evidence category query blocks paired with every search branch. "
-                        "Provide at least 3 distinct categories with category labels and detailed query strings."
+                        "Shared evidence query blocks paired with every search branch. "
+                        "During execution these blocks are combined into one OR evidence block. "
+                        "Use short residue/binding/method synonyms. Prefer 1-3 compact blocks."
                     ),
                 },
                 "exclusion_criteria": {
@@ -1977,7 +1999,13 @@ class HelperAIService:
                     "type": "object",
                     "properties": {
                         "target_count": {"type": "integer"},
-                        "per_database": {"type": "integer"},
+                        "per_database": {
+                            "type": "integer",
+                            "description": (
+                                "Optional explicit override. Omit unless the user requests a specific fetch size; "
+                                "the backend default is target_count_per_branch * 2."
+                            ),
+                        },
                         "rule": {"type": "string"},
                     },
                 },
@@ -2067,9 +2095,9 @@ class HelperAIService:
     @staticmethod
     def _tool_pending_title(name: str) -> str:
         titles = {
-            "list_catalog_articles": "Katalog taramasi yapiliyor",
-            "search_pubmed": "Literatur aramasi yapiliyor",
-            "get_article_details": "Makale detaylari okunuyor",
+            "list_catalog_articles": "Scanning article catalog",
+            "search_pubmed": "Searching literature",
+            "get_article_details": "Reading article details",
             "create_research_plan": "Creating research plan",
         }
         return titles.get(name, name)
@@ -2392,25 +2420,26 @@ class HelperAIService:
             for item in shared_query_concepts
             if str(item.get("query") or "").strip()
         ]
+        combined_concept_query = " OR ".join(f"({item['query']})" for item in shared_queries)
         raw_queries: list[dict[str, Any]] = []
         for database in databases:
             for branch in search_branches:
                 branch_query = str(branch.get("query") or branch.get("label") or "").strip()
-                concept_queries = shared_queries or [{"id": "", "label": "", "query": ""}]
-                for concept in concept_queries:
-                    query_parts = [branch_query, concept["query"]]
-                    query = " AND ".join(f"({part})" for part in query_parts if part)
-                    raw_queries.append(
-                        {
-                            "database": database,
-                            "branch_id": branch.get("id") or "",
-                            "branch_label": branch.get("label") or "",
-                            "category_id": concept["id"],
-                            "category_label": concept["label"],
-                            "query": query,
-                            "candidate_limit": candidate_limit,
-                        }
-                    )
+                query_parts = [branch_query, combined_concept_query]
+                query = " AND ".join(f"({part})" for part in query_parts if part)
+                raw_queries.append(
+                    {
+                        "database": database,
+                        "branch_id": branch.get("id") or "",
+                        "branch_label": branch.get("label") or "",
+                        "category_ids": [item["id"] for item in shared_queries if item["id"]],
+                        "category_labels": [item["label"] for item in shared_queries if item["label"]],
+                        "category_id": "",
+                        "category_label": "Combined categories" if shared_queries else "",
+                        "query": query,
+                        "candidate_limit": candidate_limit,
+                    }
+                )
         return raw_queries
 
     def _normalize_research_plan(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2477,9 +2506,10 @@ class HelperAIService:
                 },
             ]
         candidate_budget = args.get("candidate_budget") if isinstance(args.get("candidate_budget"), dict) else {}
+        budget_per_database = candidate_budget.get("per_database") if "per_database" in candidate_budget else per_database
         normalized_budget = {
-            "target_count": parse_bounded_int(candidate_budget.get("target_count"), default=target_count, minimum=1, maximum=100),
-            "per_database": parse_bounded_int(candidate_budget.get("per_database"), default=per_database, minimum=1, maximum=500),
+            "target_count": target_count,
+            "per_database": parse_bounded_int(budget_per_database, default=per_database, minimum=1, maximum=500),
             "rule": str(candidate_budget.get("rule") or "Fetch target_count * 2 candidates per enabled database in the first pass.").strip(),
         }
         raw_search_queries = self._compose_raw_search_queries(
@@ -2584,7 +2614,7 @@ class HelperAIService:
                 last_search_index=last_search_index,
                 used_article_ids=used_article_ids,
             )
-        raise ValueError(f"Bilinmeyen tool cagrisi: {name}")
+        raise ValueError(f"Unknown tool call: {name}")
 
     def _tool_list_catalog_articles(
         self,
@@ -2634,7 +2664,7 @@ class HelperAIService:
         action = HelperExecutedAction(
             type="tool_call",
             name="list_catalog_articles",
-            title="Katalog tarandi",
+            title="Catalog scanned",
             status="success",
             details={
                 "query": query or None,
@@ -2711,7 +2741,7 @@ class HelperAIService:
         action = HelperExecutedAction(
             type="tool_call",
             name="search_pubmed",
-            title=f"{self._source_label(response.meta.primary_source or preferred_source)} aramasi yapildi",
+            title=f"Searched {self._source_label(response.meta.primary_source or preferred_source)}",
             status="success",
             details={
                 "query": query,
@@ -2899,13 +2929,13 @@ class HelperAIService:
     def _step_note_from_action(action: HelperExecutedAction) -> str:
         if action.name == "list_catalog_articles":
             ids = action.details.get("returned_ids") or []
-            return f"Katalog taramasi yapildi, eslesen ID'ler: {', '.join(map(str, ids)) or '-'}."
+            return f"Catalog scan completed; matching IDs: {', '.join(map(str, ids)) or '-'}."
         if action.name == "search_pubmed":
             source = action.details.get("meta", {}).get("primary_source") or "search"
             source_label = HelperAIService._source_label(source)
             query = action.details.get("query") or "-"
             article_count = len(action.details.get("articles") or [])
-            return f"{source_label} aramasi yapildi, sorgu `{query}`, donen makale sayisi: {article_count}."
+            return f"{source_label} search completed for `{query}`; returned article count: {article_count}."
         if action.name == "get_article_details":
             ids = action.details.get("returned_ids") or []
             source = action.details.get("source") or "loaded"

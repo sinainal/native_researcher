@@ -13,6 +13,7 @@ from app.schemas.pubmed import PubMedSearchMeta
 class ResearchPlanExecuteRequest(BaseModel):
     plan: dict[str, Any] = Field(default_factory=dict)
     screening_model: str | None = Field(default=None, max_length=200)
+    criteria_enabled: bool = True
     api_key: str = Field(default="", max_length=500)
     thinking_level: str = Field(default="off", max_length=32)
 

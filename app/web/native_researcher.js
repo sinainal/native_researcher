@@ -112,6 +112,11 @@ const els = {
   sortButtons: document.querySelectorAll(".table-sort-btn"),
   assistantPanel: document.getElementById("assistantPanel"),
   assistantHeaderTitle: document.getElementById("assistantHeaderTitle"),
+  agentSettingsWrap: document.getElementById("agentSettingsWrap"),
+  agentSettingsBtn: document.getElementById("agentSettingsBtn"),
+  agentSettingsMenu: document.getElementById("agentSettingsMenu"),
+  agentScreeningModelInput: document.getElementById("agentScreeningModelInput"),
+  agentCriteriaEnabledInput: document.getElementById("agentCriteriaEnabledInput"),
   assistantHistoryToggleBtn: document.getElementById("assistantHistoryToggleBtn"),
   assistantHistoryPanel: document.getElementById("assistantHistoryPanel"),
   assistantThreadShell: document.getElementById("assistantThreadShell"),
@@ -265,6 +270,8 @@ const pubmedOaOnlyStorageKey = "native_researcher_pubmed_oa_only";
 const downloadWorkersStorageKey = "native_researcher_download_workers";
 const searchResourceStorageKey = "native_researcher_search_resource";
 const researchPlannerModeStorageKey = "native_researcher_research_planner_mode";
+const agentScreeningModelStorageKey = "native_researcher_agent_screening_model";
+const agentCriteriaEnabledStorageKey = "native_researcher_agent_criteria_enabled";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
@@ -323,6 +330,8 @@ const runtime = {
   aiPrimarySearchResource: "pubmed",
   pdfDownloaderMode: "pdf_xml",
   researchPlannerMode: localStorage.getItem(researchPlannerModeStorageKey) === "legacy" ? "legacy" : "staged",
+  agentScreeningModel: localStorage.getItem(agentScreeningModelStorageKey) || "",
+  agentCriteriaEnabled: localStorage.getItem(agentCriteriaEnabledStorageKey) !== "false",
   assistantModel: stateModel,
   assistantModelVisibility: loadAssistantModelVisibility(),
   assistantModelLoading: false,
@@ -1813,6 +1822,28 @@ function renderSettingsPanel() {
   if (els.sidebarQuickSearchResource) {
     els.sidebarQuickSearchResource.value = normalizeSearchResource(runtime.searchResource, "pubmed");
   }
+}
+
+function renderAgentSettingsMenu() {
+  if (els.agentScreeningModelInput) {
+    const options = assistantModelOptions();
+    const selected = runtime.agentScreeningModel || runtime.assistantModel;
+    els.agentScreeningModelInput.innerHTML = options.map((item) => `
+      <option value="${escapeHtml(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>
+    `).join("");
+    els.agentScreeningModelInput.value = selected;
+  }
+  if (els.agentCriteriaEnabledInput) {
+    els.agentCriteriaEnabledInput.checked = Boolean(runtime.agentCriteriaEnabled);
+  }
+}
+
+function setAgentSettingsMenuOpen(next) {
+  if (!els.agentSettingsMenu || !els.agentSettingsBtn) return;
+  const open = Boolean(next);
+  renderAgentSettingsMenu();
+  els.agentSettingsMenu.hidden = !open;
+  els.agentSettingsBtn.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function setApiKeysDialogOpen(next) {
@@ -5459,8 +5490,9 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
         responseTimeoutMs: 30000,
         body: JSON.stringify({
           plan,
-          screening_model: runtime.assistantModel,
-          api_key: isLocalAssistantModel(runtime.assistantModel) ? "" : runtime.apiKey,
+          screening_model: runtime.agentScreeningModel || runtime.assistantModel,
+          criteria_enabled: Boolean(runtime.agentCriteriaEnabled),
+          api_key: isLocalAssistantModel(runtime.agentScreeningModel || runtime.assistantModel) ? "" : runtime.apiKey,
           thinking_level: state.thinkingLevel || "off",
         }),
       },
@@ -6355,6 +6387,7 @@ function updateAssistantModelUI() {
   document.querySelectorAll(".assistant-model-item").forEach((item) => {
     item.classList.toggle("is-selected", item.dataset.model === runtime.assistantModel);
   });
+  renderAgentSettingsMenu();
   updateThinkingControlsUI();
   updateOllamaThinkingControlUI();
 }
@@ -6912,6 +6945,7 @@ async function sendAssistantMessage(options = {}) {
           model: runtime.assistantModel,
           mode: state.assistantMode === "research_agent" ? "research_agent" : "fast",
           research_planner_mode: runtime.researchPlannerMode,
+          research_criteria_enabled: Boolean(runtime.agentCriteriaEnabled),
           thread_id: state.assistantThreadId,
           thinking_level: assistantThinkingLevelForRequest(),
           articles: helperArticlePayload(),
@@ -7181,6 +7215,25 @@ function bindEvents() {
   });
   els.modelSettingsClose?.addEventListener("click", () => {
     setModelSettingsDialogOpen(false);
+  });
+  els.agentSettingsBtn?.addEventListener("click", () => {
+    setAgentSettingsMenuOpen(els.agentSettingsMenu?.hidden);
+  });
+  els.agentScreeningModelInput?.addEventListener("change", () => {
+    runtime.agentScreeningModel = normalizeAssistantModel(els.agentScreeningModelInput?.value || runtime.assistantModel);
+    localStorage.setItem(agentScreeningModelStorageKey, runtime.agentScreeningModel);
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_screening_model_updated", "Agent screening model updated.", {
+      screening_model: runtime.agentScreeningModel,
+    });
+  });
+  els.agentCriteriaEnabledInput?.addEventListener("change", () => {
+    runtime.agentCriteriaEnabled = Boolean(els.agentCriteriaEnabledInput?.checked);
+    localStorage.setItem(agentCriteriaEnabledStorageKey, runtime.agentCriteriaEnabled ? "true" : "false");
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_criteria_setting_updated", "Agent criteria setting updated.", {
+      criteria_enabled: runtime.agentCriteriaEnabled,
+    });
   });
   els.assistantDraftBtn?.addEventListener("click", () => {
     setAssistantModeMenuOpen(els.assistantModeMenu?.hidden);
@@ -7620,6 +7673,9 @@ function bindEvents() {
     if (!event.target.closest("#assistantModelWrap")) {
       els.assistantModelMenu.hidden = true;
       els.assistantModelBtn.setAttribute("aria-expanded", "false");
+    }
+    if (!event.target.closest("#agentSettingsWrap")) {
+      setAgentSettingsMenuOpen(false);
     }
     if (!event.target.closest("#assistantDraftBtn") && !event.target.closest("#assistantModeMenu")) {
       setAssistantModeMenuOpen(false);

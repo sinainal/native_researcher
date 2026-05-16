@@ -28,6 +28,7 @@ class HelperChatRequest(BaseModel):
     mode: str = Field(default="fast", max_length=20)
     thinking_level: str = Field(default="off", max_length=20)
     research_planner_mode: str = Field(default="staged", max_length=20)
+    research_criteria_enabled: bool = True
     selected_ids: list[int] = Field(default_factory=list)
     articles: list[HelperArticle] = Field(default_factory=list)
 

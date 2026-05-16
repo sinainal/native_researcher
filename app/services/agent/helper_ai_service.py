@@ -170,6 +170,15 @@ class HelperAIService:
         except TypeError:
             return str(result)
 
+    @staticmethod
+    def _apply_criteria_enabled(args: dict[str, Any], enabled: bool) -> dict[str, Any]:
+        next_args = dict(args)
+        if not enabled:
+            next_args["criteria_mode"] = "disabled"
+            next_args["screening_criteria"] = []
+            next_args["exclusion_criteria"] = []
+        return next_args
+
     async def _ollama_chat_with_heartbeat(
         self,
         *,
@@ -1239,7 +1248,10 @@ class HelperAIService:
             response_parts: list[Any] = []
             for function_call in function_calls[:1]:
                 call_id = getattr(function_call, "id", None) or f"call_{uuid4().hex[:8]}"
-                args = dict(function_call.args or {})
+                args = self._apply_criteria_enabled(
+                    dict(function_call.args or {}),
+                    bool(getattr(payload, "research_criteria_enabled", True)),
+                )
                 self._log(
                     "assistant_tool_call",
                     thread_id=thread_id,
@@ -1393,9 +1405,13 @@ class HelperAIService:
         thinking_text = str(message.get("thinking") or "").strip()
         if tool_calls:
             for call in tool_calls[:1]:
+                args = self._apply_criteria_enabled(
+                    call.args,
+                    bool(getattr(payload, "research_criteria_enabled", True)),
+                )
                 result, action = await self._execute_research_tool_call(
                     call.name,
-                    call.args,
+                    args,
                     previous_plan=thread_state.research_plan,
                 )
                 executed_actions.append(action)
@@ -1503,6 +1519,8 @@ class HelperAIService:
                 ),
             },
         ]
+        if not bool(getattr(payload, "research_criteria_enabled", True)):
+            stages = [stage for stage in stages if stage["stage"] != "criteria"]
 
         for stage in stages:
             yield {"type": "status", "text": stage["status"]}
@@ -1526,6 +1544,7 @@ class HelperAIService:
                 "user_request": payload.message.strip(),
                 "loaded_article_count": len(payload.articles),
                 "selected_article_ids": payload.selected_ids,
+                "criteria_enabled": bool(getattr(payload, "research_criteria_enabled", True)),
                 "search_plan": stage_outputs.get("search"),
                 "criteria_plan": stage_outputs.get("criteria"),
             }
@@ -1629,6 +1648,10 @@ class HelperAIService:
         merged_args: dict[str, Any] = {}
         for stage_name in ("search", "criteria", "extraction"):
             merged_args.update(stage_outputs.get(stage_name) or {})
+        if not bool(getattr(payload, "research_criteria_enabled", True)):
+            merged_args["criteria_mode"] = "disabled"
+            merged_args["screening_criteria"] = []
+            merged_args["exclusion_criteria"] = []
         plan = self._normalize_research_plan(merged_args)
         thread_state.research_plan = plan
         plan_action = HelperExecutedAction(
@@ -1882,7 +1905,10 @@ class HelperAIService:
             yield {"type": "status", "text": "Research Agent is normalizing the plan."}
             result, action = await self._execute_research_tool_call(
                 call.name,
-                call.args,
+                self._apply_criteria_enabled(
+                    call.args,
+                    bool(getattr(payload, "research_criteria_enabled", True)),
+                ),
                 previous_plan=thread_state.research_plan,
             )
             executed_actions.append(action)
@@ -2865,6 +2891,9 @@ class HelperAIService:
                 "Exclude papers with no abstract or evidence-bearing metadata during abstract screening.",
             ],
         )
+        criteria_disabled = str(args.get("criteria_mode") or "").strip().lower() in {"disabled", "off", "none", "false"}
+        if criteria_disabled:
+            exclusion = []
         raw_screening = self._as_dict_list(args.get("screening_criteria"))
         screening_criteria: list[dict[str, Any]] = []
         for index, item in enumerate(raw_screening, start=1):
@@ -2883,7 +2912,7 @@ class HelperAIService:
                     ).strip(),
                 }
             )
-        if not screening_criteria:
+        if not screening_criteria and not criteria_disabled:
             screening_criteria = [
                 {
                     "id": "topic_match",
@@ -2997,7 +3026,7 @@ class HelperAIService:
             ),
         }
         criteria_strategy = {
-            "criteria_mode": str(args.get("criteria_mode") or "llm").strip() or "llm",
+            "criteria_mode": "disabled" if criteria_disabled else (str(args.get("criteria_mode") or "llm").strip() or "llm"),
             "screening_criteria": screening_criteria,
             "exclusion_criteria": exclusion,
             "screening_json_schema": screening_json_schema,

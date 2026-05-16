@@ -84,8 +84,13 @@ async def execute_research_plan(
 
     execution_service = get_research_execution_service(request)
     try:
+        plan = dict(payload.plan)
+        if not payload.criteria_enabled:
+            plan["criteria_mode"] = "disabled"
+            plan["screening_criteria"] = []
+            plan["exclusion_criteria"] = []
         response = await execution_service.execute_plan_with_screening(
-            payload.plan,
+            plan,
             screening_model=payload.screening_model,
             api_key=payload.api_key,
             thinking_level=payload.thinking_level,
@@ -129,8 +134,13 @@ async def execute_research_plan_stream(
 
         async def run_execution() -> None:
             try:
+                plan = dict(payload.plan)
+                if not payload.criteria_enabled:
+                    plan["criteria_mode"] = "disabled"
+                    plan["screening_criteria"] = []
+                    plan["exclusion_criteria"] = []
                 response = await execution_service.execute_plan_with_screening(
-                    payload.plan,
+                    plan,
                     screening_model=payload.screening_model,
                     api_key=payload.api_key,
                     thinking_level=payload.thinking_level,

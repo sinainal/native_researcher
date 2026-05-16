@@ -518,6 +518,77 @@ def test_research_agent_ollama_legacy_planner_mode_uses_single_tool(monkeypatch)
     asyncio.run(runner())
 
 
+def test_research_agent_ollama_can_disable_criteria_stage(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):
+        fake_ollama_chat_stream.calls += 1
+        if fake_ollama_chat_stream.calls == 1:
+            assert kwargs["tools"][0]["function"]["name"] == "create_search_plan"
+            yield {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "id": "search_plan_call",
+                                "name": "create_search_plan",
+                                "arguments": {
+                                    "topic": "dopamine receptor residues",
+                                    "objective": "Find residue evidence.",
+                                    "search_branches": [{"label": "D1", "query": "D1 receptor residue"}],
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+            return
+        assert fake_ollama_chat_stream.calls == 2
+        assert kwargs["tools"][0]["function"]["name"] == "create_extraction_plan"
+        yield {
+            "message": {
+                "tool_calls": [
+                    {
+                        "function": {
+                            "id": "extraction_plan_call",
+                            "name": "create_extraction_plan",
+                            "arguments": {
+                                "extraction_questions": ["Return the exact sentence naming dopamine-contact residues."]
+                            },
+                        }
+                    }
+                ]
+            }
+        }
+
+    fake_ollama_chat_stream.calls = 0
+    monkeypatch.setattr("app.services.agent.helper_ai_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        service = HelperAIService(
+            thread_cache=TTLCache(ttl_seconds=60, max_entries=4),
+            pubmed_service=FakePubMedService(),
+        )
+        payload = HelperChatRequest(
+            api_key="",
+            message="Plan dopamine residue extraction",
+            model="ollama:gemma4:e2b",
+            mode="research_agent",
+            research_criteria_enabled=False,
+        )
+        events = [event async for event in service.chat_stream(payload)]
+        tool_results = [event for event in events if event["type"] == "tool_result"]
+        assert [event["action"]["name"] for event in tool_results] == [
+            "create_search_plan",
+            "create_extraction_plan",
+            "create_research_plan",
+        ]
+        plan = tool_results[-1]["action"]["details"]["plan"]
+        assert plan["criteria_strategy"]["criteria_mode"] == "disabled"
+        assert plan["screening_criteria"] == []
+        assert plan["exclusion_criteria"] == []
+
+    asyncio.run(runner())
+
+
 def test_research_agent_ollama_followup_answers_from_existing_plan(monkeypatch) -> None:
     seen_messages: list[list[dict[str, object]]] = []
 

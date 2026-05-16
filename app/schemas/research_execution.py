@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,9 @@ class ResearchPlanExecuteRequest(BaseModel):
     plan: dict[str, Any] = Field(default_factory=dict)
     screening_model: str | None = Field(default=None, max_length=200)
     criteria_enabled: bool = True
+    pdf_extractor_enabled: bool = True
+    pdf_scope: Literal["selected", "selected_backup", "all"] = "selected_backup"
+    full_text_model: str | None = Field(default=None, max_length=200)
     api_key: str = Field(default="", max_length=500)
     thinking_level: str = Field(default="off", max_length=32)
 

@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from app.llm.tool_calls import normalized_tool_calls_from_message, tool_calls_from_text
+
 LLAMACPP_DEFAULT_TEMPERATURE = 0.7
 LLAMACPP_DEFAULT_TOP_P = 0.9
 LLAMACPP_DEFAULT_MAX_TOKENS = 4096
@@ -16,6 +18,11 @@ LLAMACPP_DEFAULT_MAX_TOKENS = 4096
 def _normalize_openai_message(message: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(message)
     normalized["content"] = str(normalized.get("content") or "")
+    parsed_tool_calls = normalized_tool_calls_from_message(normalized)
+    if parsed_tool_calls:
+        normalized["tool_calls"] = parsed_tool_calls
+        if tool_calls_from_text(normalized["content"]):
+            normalized["content"] = ""
     reasoning = str(normalized.get("reasoning_content") or "").strip()
     if reasoning and not str(normalized.get("thinking") or "").strip():
         normalized["thinking"] = reasoning
@@ -141,6 +148,7 @@ async def llamacpp_chat_stream(
     headers = {"User-Agent": request_user_agent}
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     collected_tool_calls: dict[int, dict[str, Any]] = {}
+    collected_content: list[str] = []
     async with httpx.AsyncClient(
         base_url=base_url.rstrip("/"),
         timeout=timeout,
@@ -174,7 +182,13 @@ async def llamacpp_chat_stream(
                 if reasoning:
                     yield {"model": data.get("model") or model, "message": {"role": "assistant", "thinking": reasoning, "content": ""}}
                 if content:
+                    collected_content.append(content)
+                    if "<tool_call" in "".join(collected_content).lower():
+                        continue
                     yield {"model": data.get("model") or model, "message": {"role": "assistant", "content": content}}
+    parsed_content_tool_calls = tool_calls_from_text("".join(collected_content)) if not collected_tool_calls else []
+    for index, parsed_call in enumerate(parsed_content_tool_calls):
+        collected_tool_calls[index] = parsed_call
     if collected_tool_calls:
         yield {
             "model": model,

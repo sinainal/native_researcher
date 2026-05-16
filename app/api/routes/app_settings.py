@@ -28,6 +28,21 @@ from app.llm.llamacpp import llamacpp_chat
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
 
+DEFAULT_GEMMA4_LLAMA_MODEL = "gemma-4-26B-A4B-it-UD-IQ4_NL"
+DEFAULT_GEMMA4_LLAMA_MODEL_PATH = Path("/home/sina/Downloads/LLMs/LLm test/models/gemma4-unsloth/gemma-4-26B-A4B-it-UD-IQ4_NL.gguf")
+DEFAULT_GEMMA4_LLAMA_EXECUTABLE = Path("/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-cuda130/bin/llama-server")
+DEFAULT_GEMMA4_LLAMA_LIBRARY_PATHS = [
+    Path("/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-cuda130/bin"),
+    Path("/home/sina/Downloads/LLMs/cuda130/lib"),
+    Path("/usr/local/lib/ollama/cuda_v13"),
+    Path("/usr/local/lib/ollama"),
+]
+DEFAULT_GEMMA4_LLAMA_SERVER_ARGS = (
+    "-c 65536 -ngl 999 -fa on -b 1024 -ub 256 --threads 10 --threads-batch 16 "
+    "--parallel 1 -np 1 --no-cont-batching --no-warmup --reasoning off --direct-io "
+    "--cache-ram 0 --alias gemma-4-26B-A4B-it-UD-IQ4_NL"
+)
+
 
 def _read_value(path: Path) -> str:
     try:
@@ -60,6 +75,14 @@ def _read_bool_value(path: Path, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _existing_path(path: Path) -> str:
+    return str(path) if path.exists() else ""
+
+
+def _default_gemma4_library_path() -> str:
+    return ":".join(str(path) for path in DEFAULT_GEMMA4_LLAMA_LIBRARY_PATHS if path.exists())
 
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
@@ -411,20 +434,29 @@ def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
 
 def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
     settings = request.app.state.settings
+    default_model_path = _existing_path(DEFAULT_GEMMA4_LLAMA_MODEL_PATH)
+    default_executable = _existing_path(DEFAULT_GEMMA4_LLAMA_EXECUTABLE)
+    default_library_path = _default_gemma4_library_path()
     return LlamaCppSettingsPayload(
         llamacpp_base_url=_normalize_llamacpp_base_url(
             _read_value(settings.llamacpp_base_url_path),
             str(getattr(settings, "llamacpp_base_url", "http://localhost:8098")),
         ),
-        llamacpp_model=_read_value(settings.llamacpp_model_name_path) or str(getattr(settings, "llamacpp_model", "local") or "local"),
+        llamacpp_model=_read_value(settings.llamacpp_model_name_path)
+        or str(getattr(settings, "llamacpp_model", "") or "")
+        or (DEFAULT_GEMMA4_LLAMA_MODEL if default_model_path else "local"),
         llamacpp_executable=_read_value(settings.llamacpp_executable_path)
-        or str(getattr(settings, "llamacpp_executable", "") or ""),
+        or str(getattr(settings, "llamacpp_executable", "") or "")
+        or default_executable,
         llamacpp_model_path=_read_value(settings.llamacpp_model_path_path)
-        or str(getattr(settings, "llamacpp_model_path", "") or ""),
+        or str(getattr(settings, "llamacpp_model_path", "") or "")
+        or default_model_path,
         llamacpp_library_path=_read_value(settings.llamacpp_library_path_path)
-        or str(getattr(settings, "llamacpp_library_path", "") or ""),
+        or str(getattr(settings, "llamacpp_library_path", "") or "")
+        or default_library_path,
         llamacpp_server_args=_read_value(settings.llamacpp_server_args_path)
-        or str(getattr(settings, "llamacpp_server_args", "") or ""),
+        or str(getattr(settings, "llamacpp_server_args", "") or "")
+        or (DEFAULT_GEMMA4_LLAMA_SERVER_ARGS if default_model_path and default_executable else ""),
     )
 
 

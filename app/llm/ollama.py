@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from app.llm.tool_calls import normalized_tool_calls_from_message
+
 OLLAMA_DEFAULT_NUM_CTX = 16_384
 OLLAMA_DEFAULT_NUM_PREDICT = 4_096
 OLLAMA_DEFAULT_REPEAT_LAST_N = 256
@@ -310,7 +312,7 @@ async def ollama_warmup(
 
 def extract_ollama_tool_calls(message: dict[str, Any]) -> list[OllamaToolCall]:
     extracted: list[OllamaToolCall] = []
-    for index, item in enumerate(message.get("tool_calls") or []):
+    for index, item in enumerate(normalized_tool_calls_from_message(message)):
         if not isinstance(item, dict):
             continue
         function_payload = item.get("function") or {}
@@ -331,7 +333,7 @@ def extract_ollama_tool_calls(message: dict[str, Any]) -> list[OllamaToolCall]:
             parsed_args = {}
         extracted.append(
             OllamaToolCall(
-                call_id=str(function_payload.get("id") or f"call_{index + 1}"),
+                call_id=str(item.get("id") or function_payload.get("id") or f"call_{index + 1}"),
                 name=name,
                 args=dict(parsed_args),
                 raw=item,

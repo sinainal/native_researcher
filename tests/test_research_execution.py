@@ -391,7 +391,14 @@ def test_research_plan_execute_endpoint_dedupes_screens_and_persists_trace(monke
                 }
                 response = await client.post(
                     f"/app/projects/{project_id}/research-plan/execute",
-                    json={"plan": plan, "screening_model": "ollama:test-screen-model", "thinking_level": "off"},
+                    json={
+                        "plan": plan,
+                        "screening_model": "ollama:test-screen-model",
+                        "thinking_level": "off",
+                        "pdf_extractor_enabled": True,
+                        "pdf_scope": "selected_backup",
+                        "full_text_model": "llamacpp:qwen3.6-35b-a3b-q4_K_M",
+                    },
                 )
                 assert response.status_code == 200
                 payload = response.json()
@@ -400,10 +407,119 @@ def test_research_plan_execute_endpoint_dedupes_screens_and_persists_trace(monke
                 assert len(payload["run_trace"]["candidates"]) == 2
                 assert payload["run_trace"]["selected_candidate_ids"] == ["cand_1"]
                 assert payload["run_trace"]["excluded_candidate_ids"] == ["cand_2"]
+                assert payload["run_trace"]["meta"]["full_text_settings"] == {
+                    "pdf_extractor_enabled": True,
+                    "pdf_scope": "selected_backup",
+                    "full_text_model": "llamacpp:qwen3.6-35b-a3b-q4_K_M",
+                }
 
                 state = await client.get(f"/app/projects/{project_id}/state")
                 assert state.status_code == 200
                 assert state.json()["research_runs"][0]["id"] == payload["run_trace"]["id"]
+
+    asyncio.run(runner())
+
+
+def test_research_plan_execute_runs_pdf_screening_through_existing_download_service(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
+        candidates = json.loads(kwargs["messages"][1]["content"])["candidates"]
+        candidate_id = candidates[0]["candidate_id"]
+        excluded = candidate_id != "cand_1"
+        yield {"message": {"tool_calls": [{"function": {"id": "screen_call", "name": "screen_research_candidates", "arguments": {"items": [
+            {
+                "candidate_id": candidate_id,
+                "criterion_scores": {"residue_evidence": 1.0 if not excluded else 0.1},
+                "exclusion_scores": {"exclusion_1": 1.0 if excluded else 0.0},
+                "confidence": 0.9,
+                "evidence": ["screened"],
+                "rationale": "screened",
+            }
+        ]}}}]}}
+
+    monkeypatch.setattr("app.services.research_screening_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = Settings(
+                download_root=root / "downloads",
+                workspace_root=root / "workspace",
+                helper_log_path=root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=root / "assistant_api_key.txt",
+                ncbi_api_key_path=root / "ncbi_api",
+                unpaywall_email_path=root / "unpaywall_email",
+                openalex_api_key_path=root / "openalex_api_key",
+                core_api_key_path=root / "core_api_key",
+                pubmed_oa_only_path=root / "pubmed_oa_only",
+                ai_primary_search_resource_path=root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=root / "pdf_arxiv_fallback_enabled",
+            )
+
+            class XMLDownloadPDFService(FakePDFService):
+                async def download_articles(self, payload):  # noqa: ANN001
+                    assert payload.downloader_mode == "pdf_xml"
+                    assert len(payload.articles) == 1
+                    xml_path = root / "paper.xml"
+                    xml_path.write_text(
+                        "<article><body><p>Residue Alpha123 contacts dopamine in the D1 receptor.</p></body></article>",
+                        encoding="utf-8",
+                    )
+                    return PDFDownloadResponse(
+                        total=1,
+                        success_count=1,
+                        failed_count=0,
+                        results=[
+                            PDFDownloadResult(
+                                article=payload.articles[0],
+                                success=True,
+                                file_path=str(xml_path),
+                                content_kind="xml_fulltext",
+                            )
+                        ],
+                    )
+
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=XMLDownloadPDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                project = await client.post("/app/projects", json={"name": "PDF Screen Test", "description": ""})
+                project_id = project.json()["id"]
+                plan = {
+                    "topic": "Receptor binding residues",
+                    "objective": "Find papers with specific interacting residues.",
+                    "target_count_per_branch": 1,
+                    "active_databases": ["PubMed"],
+                    "candidate_budget": {"per_database": 2},
+                    "search_branches": [{"id": "alpha", "label": "Receptor alpha", "query": "receptor alpha"}],
+                    "screening_criteria": [{"id": "residue_evidence", "label": "Residue evidence", "weight": 1}],
+                    "exclusion_criteria": ["review"],
+                    "extraction_questions": ["Which residue contacts dopamine?"],
+                    "extraction_fields": ["residue", "evidence_quote"],
+                }
+                response = await client.post(
+                    f"/app/projects/{project_id}/research-plan/execute",
+                    json={
+                        "plan": plan,
+                        "screening_model": "ollama:test-screen-model",
+                        "pdf_extractor_enabled": True,
+                        "pdf_scope": "selected",
+                        "full_text_model": "",
+                        "thinking_level": "off",
+                    },
+                )
+                assert response.status_code == 200
+                pdf_screening = response.json()["run_trace"]["meta"]["pdf_screening"]
+                assert pdf_screening["success_count"] == 1
+                assert "Alpha123" in pdf_screening["results"][0]["answers"][0]["answer"]
 
     asyncio.run(runner())
 

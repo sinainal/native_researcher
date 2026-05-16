@@ -486,6 +486,23 @@
               <input id="agentCriteriaEnabledInput" type="checkbox" checked>
               <span>Use criteria planning</span>
             </label>
+            <div class="native-agent-settings-title native-agent-settings-subtitle">PDF Agent</div>
+            <label class="native-agent-settings-check">
+              <input id="agentPdfExtractorEnabledInput" type="checkbox" checked>
+              <span>Use extracted PDFs only</span>
+            </label>
+            <label>
+              <span>Full-text model</span>
+              <select id="agentFullTextModelInput"></select>
+            </label>
+            <label>
+              <span>PDF scope</span>
+              <select id="agentPdfScopeInput">
+                <option value="selected">Selected papers</option>
+                <option value="selected_backup">Selected + backup</option>
+                <option value="all">All downloaded papers</option>
+              </select>
+            </label>
           </div>
         </div>
       </div>

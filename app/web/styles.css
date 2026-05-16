@@ -5778,6 +5778,12 @@ body.is-document-viewer-open .native-document-viewer {
   font-weight: 900;
 }
 
+.native-agent-settings-subtitle {
+  margin-top: 4px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(226, 232, 240, .95);
+}
+
 .native-agent-settings-menu label {
   display: grid;
   gap: 5px;

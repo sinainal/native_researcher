@@ -19,7 +19,9 @@ from app.llm.ollama import (
     _normalize_ollama_message,
     _ollama_runtime_options,
     _ollama_thinking_budget,
+    extract_ollama_tool_calls,
 )
+from app.llm.llamacpp import _normalize_openai_message
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.services.agent.helper_ai_service import HelperAIService, HelperThreadState
@@ -86,6 +88,32 @@ def test_normalize_ollama_message_strips_gemma_tool_artifacts() -> None:
 
     assert normalized["content"] == "The temperature in Paris is 15°C."
     assert normalized["tool_calls"] == message["tool_calls"]
+
+
+def test_extract_tool_calls_from_gemma4_text_tool_block() -> None:
+    message = {
+        "role": "assistant",
+        "content": '<tool_call>{"name":"search_articles","arguments":{"query":"dopamine D1 receptor","max_results":4}}</tool_call>',
+    }
+
+    calls = extract_ollama_tool_calls(message)
+
+    assert len(calls) == 1
+    assert calls[0].name == "search_articles"
+    assert calls[0].args == {"query": "dopamine D1 receptor", "max_results": 4}
+
+
+def test_llamacpp_normalizes_gemma4_text_tool_block_to_openai_tool_calls() -> None:
+    normalized = _normalize_openai_message(
+        {
+            "role": "assistant",
+            "content": '<|tool_call|>{"name":"create_search_plan","arguments":{"topic":"dopamine residues"}}</tool_call>',
+        }
+    )
+
+    assert normalized["content"] == ""
+    assert normalized["tool_calls"][0]["function"]["name"] == "create_search_plan"
+    assert json.loads(normalized["tool_calls"][0]["function"]["arguments"]) == {"topic": "dopamine residues"}
 
 
 def test_ollama_stream_parser_splits_think_and_preserves_spacing() -> None:

@@ -117,6 +117,9 @@ const els = {
   agentSettingsMenu: document.getElementById("agentSettingsMenu"),
   agentScreeningModelInput: document.getElementById("agentScreeningModelInput"),
   agentCriteriaEnabledInput: document.getElementById("agentCriteriaEnabledInput"),
+  agentPdfExtractorEnabledInput: document.getElementById("agentPdfExtractorEnabledInput"),
+  agentFullTextModelInput: document.getElementById("agentFullTextModelInput"),
+  agentPdfScopeInput: document.getElementById("agentPdfScopeInput"),
   assistantHistoryToggleBtn: document.getElementById("assistantHistoryToggleBtn"),
   assistantHistoryPanel: document.getElementById("assistantHistoryPanel"),
   assistantThreadShell: document.getElementById("assistantThreadShell"),
@@ -272,6 +275,9 @@ const searchResourceStorageKey = "native_researcher_search_resource";
 const researchPlannerModeStorageKey = "native_researcher_research_planner_mode";
 const agentScreeningModelStorageKey = "native_researcher_agent_screening_model";
 const agentCriteriaEnabledStorageKey = "native_researcher_agent_criteria_enabled";
+const agentPdfExtractorEnabledStorageKey = "native_researcher_agent_pdf_extractor_enabled";
+const agentFullTextModelStorageKey = "native_researcher_agent_full_text_model";
+const agentPdfScopeStorageKey = "native_researcher_agent_pdf_scope";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
 let assistantMessageUpdateFrame = null;
 const assistantMessageUpdateQueue = new Set();
@@ -315,7 +321,7 @@ const runtime = {
   ollamaWarmupPending: false,
   ollamaWarmupModel: "",
   llamacppBaseUrl: "http://localhost:8098",
-  llamacppModel: "qwen3.6-35b-a3b-q4_K_M",
+  llamacppModel: "gemma-4-26B-A4B-it-UD-IQ4_NL",
   llamacppExecutable: "",
   llamacppModelPath: "",
   llamacppLibraryPath: "",
@@ -332,6 +338,9 @@ const runtime = {
   researchPlannerMode: localStorage.getItem(researchPlannerModeStorageKey) === "legacy" ? "legacy" : "staged",
   agentScreeningModel: localStorage.getItem(agentScreeningModelStorageKey) || "",
   agentCriteriaEnabled: localStorage.getItem(agentCriteriaEnabledStorageKey) !== "false",
+  agentPdfExtractorEnabled: localStorage.getItem(agentPdfExtractorEnabledStorageKey) !== "false",
+  agentFullTextModel: localStorage.getItem(agentFullTextModelStorageKey) || "",
+  agentPdfScope: normalizePdfAgentScope(localStorage.getItem(agentPdfScopeStorageKey), "selected_backup"),
   assistantModel: stateModel,
   assistantModelVisibility: loadAssistantModelVisibility(),
   assistantModelLoading: false,
@@ -373,6 +382,12 @@ function normalizePdfDownloaderMode(value, fallback = "pdf_xml") {
     }
     return normalized;
   }
+  return fallback;
+}
+
+function normalizePdfAgentScope(value, fallback = "selected_backup") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["selected", "selected_backup", "all"].includes(normalized)) return normalized;
   return fallback;
 }
 
@@ -1825,8 +1840,8 @@ function renderSettingsPanel() {
 }
 
 function renderAgentSettingsMenu() {
+  const options = assistantModelOptions();
   if (els.agentScreeningModelInput) {
-    const options = assistantModelOptions();
     const selected = runtime.agentScreeningModel || runtime.assistantModel;
     els.agentScreeningModelInput.innerHTML = options.map((item) => `
       <option value="${escapeHtml(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>
@@ -1835,6 +1850,19 @@ function renderAgentSettingsMenu() {
   }
   if (els.agentCriteriaEnabledInput) {
     els.agentCriteriaEnabledInput.checked = Boolean(runtime.agentCriteriaEnabled);
+  }
+  if (els.agentPdfExtractorEnabledInput) {
+    els.agentPdfExtractorEnabledInput.checked = Boolean(runtime.agentPdfExtractorEnabled);
+  }
+  if (els.agentFullTextModelInput) {
+    const selected = runtime.agentFullTextModel || runtime.agentScreeningModel || runtime.assistantModel;
+    els.agentFullTextModelInput.innerHTML = options.map((item) => `
+      <option value="${escapeHtml(item.value)}" ${item.value === selected ? "selected" : ""}>${escapeHtml(item.label)}</option>
+    `).join("");
+    els.agentFullTextModelInput.value = selected;
+  }
+  if (els.agentPdfScopeInput) {
+    els.agentPdfScopeInput.value = normalizePdfAgentScope(runtime.agentPdfScope, "selected_backup");
   }
 }
 
@@ -5492,6 +5520,9 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
           plan,
           screening_model: runtime.agentScreeningModel || runtime.assistantModel,
           criteria_enabled: Boolean(runtime.agentCriteriaEnabled),
+          pdf_extractor_enabled: Boolean(runtime.agentPdfExtractorEnabled),
+          pdf_scope: normalizePdfAgentScope(runtime.agentPdfScope, "selected_backup"),
+          full_text_model: runtime.agentFullTextModel || runtime.agentScreeningModel || runtime.assistantModel,
           api_key: isLocalAssistantModel(runtime.agentScreeningModel || runtime.assistantModel) ? "" : runtime.apiKey,
           thinking_level: state.thinkingLevel || "off",
         }),
@@ -7233,6 +7264,30 @@ function bindEvents() {
     renderAgentSettingsMenu();
     trackAppEvent("info", "agent_criteria_setting_updated", "Agent criteria setting updated.", {
       criteria_enabled: runtime.agentCriteriaEnabled,
+    });
+  });
+  els.agentPdfExtractorEnabledInput?.addEventListener("change", () => {
+    runtime.agentPdfExtractorEnabled = Boolean(els.agentPdfExtractorEnabledInput?.checked);
+    localStorage.setItem(agentPdfExtractorEnabledStorageKey, runtime.agentPdfExtractorEnabled ? "true" : "false");
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_pdf_extractor_setting_updated", "Agent PDF extractor setting updated.", {
+      pdf_extractor_enabled: runtime.agentPdfExtractorEnabled,
+    });
+  });
+  els.agentFullTextModelInput?.addEventListener("change", () => {
+    runtime.agentFullTextModel = normalizeAssistantModel(els.agentFullTextModelInput?.value || runtime.agentScreeningModel || runtime.assistantModel);
+    localStorage.setItem(agentFullTextModelStorageKey, runtime.agentFullTextModel);
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_full_text_model_updated", "Agent full-text model updated.", {
+      full_text_model: runtime.agentFullTextModel,
+    });
+  });
+  els.agentPdfScopeInput?.addEventListener("change", () => {
+    runtime.agentPdfScope = normalizePdfAgentScope(els.agentPdfScopeInput?.value, "selected_backup");
+    localStorage.setItem(agentPdfScopeStorageKey, runtime.agentPdfScope);
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_pdf_scope_updated", "Agent PDF scope updated.", {
+      pdf_scope: runtime.agentPdfScope,
     });
   });
   els.assistantDraftBtn?.addEventListener("click", () => {

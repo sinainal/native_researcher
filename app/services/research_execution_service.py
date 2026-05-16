@@ -55,6 +55,7 @@ class ResearchExecutionService:
         started = time.perf_counter()
         timestamp = datetime.now(UTC).replace(microsecond=0).isoformat()
         raw_queries = self._raw_search_queries(plan)[:MAX_RAW_QUERIES]
+        full_text_settings = plan.get("full_text_settings") if isinstance(plan.get("full_text_settings"), dict) else {}
         if progress is not None:
             await progress(
                 {
@@ -251,6 +252,7 @@ class ResearchExecutionService:
                 "distribution": distribution,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "screening_model": screening_model or "",
+                "full_text_settings": full_text_settings,
             },
         )
         return ResearchPlanExecuteResponse(

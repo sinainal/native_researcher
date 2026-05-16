@@ -21,7 +21,7 @@ from app.schemas.pdf_extraction import (
     PDFExtractionResult,
 )
 
-MAX_FULL_TEXT_CHARS = 45_000
+MAX_FULL_TEXT_CHARS = 180_000
 
 
 class PDFExtractionService:
@@ -116,7 +116,10 @@ class PDFExtractionService:
         model_target = resolve_chat_model_target(model, settings=self.settings)
         prompt = json.dumps(
             {
-                "task": "Answer the questions using only the provided full text. Return JSON list.",
+                "task": (
+                    "Answer the questions using only the provided full text. Return JSON list only. "
+                    "Keep each answer under 80 words and include at most 3 evidence items per question."
+                ),
                 "required_shape": {
                     "question": "string",
                     "answer": "string",

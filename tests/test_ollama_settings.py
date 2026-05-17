@@ -9,7 +9,7 @@ import httpx
 
 from app.core.config import Settings
 from app.main import create_app
-from app.schemas.settings import OllamaModelInfo
+from app.schemas.settings import LlamaCppModelInfo, OllamaModelInfo
 
 
 class FakePubMedService:
@@ -71,10 +71,21 @@ def _build_settings(temp_root: Path) -> Settings:
         ollama_base_url_path=temp_root / "ollama_base_url",
         ollama_model_path=temp_root / "ollama_model",
         ollama_thinking_level_path=temp_root / "ollama_thinking_level",
+        llamacpp_base_url_path=temp_root / "llamacpp_base_url",
+        llamacpp_model_name_path=temp_root / "llamacpp_model",
+        llamacpp_executable_path=temp_root / "llamacpp_executable",
+        llamacpp_model_path_path=temp_root / "llamacpp_model_path",
+        llamacpp_library_path_path=temp_root / "llamacpp_library_path",
+        llamacpp_server_args_path=temp_root / "llamacpp_server_args",
         pdf_unpaywall_fallback_enabled_path=temp_root / "pdf_unpaywall_fallback_enabled",
         pdf_core_fallback_enabled_path=temp_root / "pdf_core_fallback_enabled",
         pdf_arxiv_fallback_enabled_path=temp_root / "pdf_arxiv_fallback_enabled",
     )
+
+
+async def _fake_llamacpp_probe_success(base_url: str, *, request_user_agent: str):
+    _ = base_url, request_user_agent
+    return True, [LlamaCppModelInfo(id="qwen3.6-q4km")], None
 
 
 def test_ollama_settings_detects_running_service(monkeypatch) -> None:
@@ -116,6 +127,44 @@ def test_ollama_settings_detects_running_service(monkeypatch) -> None:
                 assert (settings.ollama_base_url_path.read_text(encoding="utf-8")).strip() == "http://localhost:11434"
                 assert (settings.ollama_model_path.read_text(encoding="utf-8")).strip() == "llama3.1:8b"
                 assert (settings.ollama_thinking_level_path.read_text(encoding="utf-8")).strip() == "on"
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_llamacpp_settings_accepts_named_qwen_profile(monkeypatch) -> None:
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            settings = _build_settings(temp_root)
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            monkeypatch.setattr("app.api.routes.app_settings._probe_llamacpp", _fake_llamacpp_probe_success)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.put(
+                    "/app/llamacpp",
+                    json={
+                        "llamacpp_base_url": "127.0.0.1:8098",
+                        "llamacpp_model": "qwen3.6-q4km",
+                        "llamacpp_profile": "qwen36-q4km-safe",
+                    },
+                )
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["llamacpp_profile"] == "qwen36-q4km-safe"
+                assert "--n-cpu-moe 15" in payload["llamacpp_server_args"]
+                assert "-ctk turbo4" in payload["llamacpp_server_args"]
+                assert "-ctv turbo3" in payload["llamacpp_server_args"]
+                assert "--direct-io" in payload["llamacpp_server_args"]
+                assert "--alias qwen3.6-q4km" in payload["llamacpp_server_args"]
+                assert payload["profiles"]
 
     import asyncio
 

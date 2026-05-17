@@ -797,9 +797,11 @@
           <label class="native-settings-field native-settings-field-wide" for="llamacppProfileInput">
             <span>Profile</span>
             <select id="llamacppProfileInput" class="native-settings-select">
-              <option value="qwen36-safe">Qwen 3.6 Safe</option>
-              <option value="qwen36-fast">Qwen 3.6 Fast</option>
-              <option value="balanced">Balanced</option>
+              <option value="qwen36-q4km-safe">Qwen 3.6 Q4_K_M Safe</option>
+              <option value="qwen36-q4km-fast-risky">Qwen 3.6 Q4_K_M Fast</option>
+              <option value="qwen36-q4km-64k-safe">Qwen 3.6 Q4_K_M 64K</option>
+              <option value="qwen36-iq4nl-safe">Qwen 3.6 IQ4_NL Safe</option>
+              <option value="gemma4-iq4nl-safe">Gemma 4 IQ4_NL Safe</option>
               <option value="custom">Custom</option>
             </select>
           </label>
@@ -835,6 +837,7 @@
           <label class="native-settings-field" for="llamacppCpuMoeInput">
             <span>CPU MoE</span>
             <select id="llamacppCpuMoeInput" class="native-settings-select">
+              <option value="">Off</option>
               <option value="13">13</option>
               <option value="14">14</option>
               <option value="15">15</option>
@@ -844,6 +847,7 @@
           <label class="native-settings-field" for="llamacppCacheKInput">
             <span>K Cache</span>
             <select id="llamacppCacheKInput" class="native-settings-select">
+              <option value="f16">f16</option>
               <option value="turbo4">turbo4</option>
               <option value="turbo3">turbo3</option>
               <option value="q8_0">q8_0</option>
@@ -853,6 +857,7 @@
           <label class="native-settings-field" for="llamacppCacheVInput">
             <span>V Cache</span>
             <select id="llamacppCacheVInput" class="native-settings-select">
+              <option value="f16">f16</option>
               <option value="turbo3">turbo3</option>
               <option value="turbo4">turbo4</option>
               <option value="q8_0">q8_0</option>
@@ -894,6 +899,7 @@
           <label class="native-settings-field" for="llamacppFitTargetInput">
             <span>VRAM Reserve</span>
             <select id="llamacppFitTargetInput" class="native-settings-select">
+              <option value="">Off</option>
               <option value="512">512 MB</option>
               <option value="1024">1 GB</option>
               <option value="1536">1.5 GB</option>

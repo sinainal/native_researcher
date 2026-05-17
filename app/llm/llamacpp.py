@@ -59,6 +59,12 @@ def _openai_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | 
     return converted
 
 
+def _llamacpp_tool_choice(tool_choice: Any | None) -> Any | None:
+    if isinstance(tool_choice, dict):
+        return None
+    return tool_choice
+
+
 def _chat_payload(
     *,
     model: str,
@@ -78,7 +84,7 @@ def _chat_payload(
     openai_tools = _openai_tools(tools)
     if openai_tools:
         payload["tools"] = openai_tools
-        payload["tool_choice"] = tool_choice or "auto"
+        payload["tool_choice"] = _llamacpp_tool_choice(tool_choice) or "auto"
     return payload
 
 

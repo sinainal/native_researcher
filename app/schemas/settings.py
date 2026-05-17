@@ -58,6 +58,7 @@ class LlamaCppSettingsPayload(BaseModel):
     llamacpp_model_path: str = Field(default="", max_length=4096)
     llamacpp_library_path: str = Field(default="", max_length=4096)
     llamacpp_server_args: str = Field(default="", max_length=4096)
+    llamacpp_profile: str = Field(default="custom", max_length=128)
     start: bool = False
     warmup: bool = False
 
@@ -67,6 +68,12 @@ class LlamaCppModelInfo(BaseModel):
     object: str | None = None
 
 
+class LlamaCppProfileInfo(BaseModel):
+    id: str
+    label: str
+    description: str = ""
+
+
 class LlamaCppStatusResponse(BaseModel):
     llamacpp_base_url: str
     llamacpp_model: str = "local"
@@ -74,6 +81,8 @@ class LlamaCppStatusResponse(BaseModel):
     llamacpp_model_path: str = ""
     llamacpp_library_path: str = ""
     llamacpp_server_args: str = ""
+    llamacpp_profile: str = "custom"
+    profiles: list[LlamaCppProfileInfo] = Field(default_factory=list)
     connected: bool
     models: list[LlamaCppModelInfo] = Field(default_factory=list)
     error: str | None = None

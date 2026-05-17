@@ -21,7 +21,7 @@ from app.llm.ollama import (
     _ollama_thinking_budget,
     extract_ollama_tool_calls,
 )
-from app.llm.llamacpp import _normalize_openai_message
+from app.llm.llamacpp import _chat_payload, _normalize_openai_message
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.services.agent.helper_ai_service import HelperAIService, HelperThreadState
@@ -114,6 +114,18 @@ def test_llamacpp_normalizes_gemma4_text_tool_block_to_openai_tool_calls() -> No
     assert normalized["content"] == ""
     assert normalized["tool_calls"][0]["function"]["name"] == "create_search_plan"
     assert json.loads(normalized["tool_calls"][0]["function"]["arguments"]) == {"topic": "dopamine residues"}
+
+
+def test_llamacpp_payload_uses_auto_for_forced_tool_choice_object() -> None:
+    payload = _chat_payload(
+        model="gemma",
+        messages=[{"role": "user", "content": "plan"}],
+        tools=[{"type": "function", "function": {"name": "create_search_plan", "parameters": {"type": "object"}}}],
+        stream=True,
+        tool_choice={"type": "function", "function": {"name": "create_search_plan"}},
+    )
+
+    assert payload["tool_choice"] == "auto"
 
 
 def test_ollama_stream_parser_splits_think_and_preserves_spacing() -> None:

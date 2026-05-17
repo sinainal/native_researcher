@@ -326,6 +326,7 @@ const runtime = {
   llamacppModelPath: "",
   llamacppLibraryPath: "",
   llamacppServerArgs: "",
+  llamacppProfile: "custom",
   llamacppModels: [],
   llamacppConnected: false,
   llamacppStarted: false,
@@ -448,7 +449,7 @@ function ollamaThinkingLevelLabel(value) {
 }
 
 const llamaCppProfiles = {
-  "qwen36-safe": {
+  "qwen36-q4km-safe": {
     context: "32768",
     batch: "1024",
     ubatch: "256",
@@ -456,11 +457,12 @@ const llamaCppProfiles = {
     cacheK: "turbo4",
     cacheV: "turbo3",
     cacheRam: "0",
-    reasoning: "auto",
-    reasoningBudget: "2048",
+    reasoning: "off",
+    reasoningBudget: "-1",
     fitTarget: "1024",
+    noContBatching: false,
   },
-  "qwen36-fast": {
+  "qwen36-q4km-fast-risky": {
     context: "32768",
     batch: "1024",
     ubatch: "128",
@@ -468,21 +470,49 @@ const llamaCppProfiles = {
     cacheK: "turbo4",
     cacheV: "turbo3",
     cacheRam: "0",
-    reasoning: "auto",
-    reasoningBudget: "1024",
+    reasoning: "off",
+    reasoningBudget: "-1",
     fitTarget: "1024",
+    noContBatching: false,
   },
-  balanced: {
-    context: "16384",
+  "qwen36-q4km-64k-safe": {
+    context: "65536",
     batch: "1024",
     ubatch: "256",
-    cpuMoe: "16",
-    cacheK: "q8_0",
-    cacheV: "q8_0",
-    cacheRam: "2048",
-    reasoning: "auto",
-    reasoningBudget: "1024",
+    cpuMoe: "15",
+    cacheK: "turbo4",
+    cacheV: "turbo3",
+    cacheRam: "0",
+    reasoning: "off",
+    reasoningBudget: "-1",
     fitTarget: "1024",
+    noContBatching: false,
+  },
+  "qwen36-iq4nl-safe": {
+    context: "65536",
+    batch: "512",
+    ubatch: "128",
+    cpuMoe: "",
+    cacheK: "f16",
+    cacheV: "f16",
+    cacheRam: "0",
+    reasoning: "off",
+    reasoningBudget: "-1",
+    fitTarget: "",
+    noContBatching: true,
+  },
+  "gemma4-iq4nl-safe": {
+    context: "65536",
+    batch: "1024",
+    ubatch: "256",
+    cpuMoe: "",
+    cacheK: "f16",
+    cacheV: "f16",
+    cacheRam: "0",
+    reasoning: "off",
+    reasoningBudget: "-1",
+    fitTarget: "",
+    noContBatching: true,
   },
 };
 
@@ -493,20 +523,22 @@ function llamaCppProfileArgs(profile) {
     "-ub", profile.ubatch,
     "-np", "1",
     "-ngl", "all",
-    "--n-cpu-moe", profile.cpuMoe,
     "--flash-attn", "on",
-    "-ctk", profile.cacheK,
-    "-ctv", profile.cacheV,
     "--threads", "10",
     "--threads-batch", "16",
     "--direct-io",
     "--no-warmup",
     "--no-webui",
-    "-fitt", profile.fitTarget,
     "--cache-ram", profile.cacheRam,
     "--reasoning", profile.reasoning,
-    "--reasoning-budget", profile.reasoningBudget,
-  ].join(" ");
+  ];
+  if (profile.cpuMoe) args.push("--n-cpu-moe", profile.cpuMoe);
+  if (profile.cacheK && profile.cacheK !== "f16") args.push("-ctk", profile.cacheK);
+  if (profile.cacheV && profile.cacheV !== "f16") args.push("-ctv", profile.cacheV);
+  if (profile.fitTarget) args.push("-fitt", profile.fitTarget);
+  if (profile.reasoningBudget && profile.reasoningBudget !== "-1") args.push("--reasoning-budget", profile.reasoningBudget);
+  if (profile.noContBatching) args.push("--no-cont-batching");
+  return args.join(" ");
 }
 
 function parseLlamaCppArgs(args) {
@@ -519,13 +551,13 @@ function parseLlamaCppArgs(args) {
     context: valueAfter("-c", valueAfter("--ctx-size", "32768")),
     batch: valueAfter("-b", "1024"),
     ubatch: valueAfter("-ub", "256"),
-    cpuMoe: valueAfter("--n-cpu-moe", "15"),
-    cacheK: valueAfter("-ctk", valueAfter("--cache-type-k", "turbo4")),
-    cacheV: valueAfter("-ctv", valueAfter("--cache-type-v", "turbo3")),
+    cpuMoe: valueAfter("--n-cpu-moe", ""),
+    cacheK: valueAfter("-ctk", valueAfter("--cache-type-k", "f16")),
+    cacheV: valueAfter("-ctv", valueAfter("--cache-type-v", "f16")),
     cacheRam: valueAfter("--cache-ram", valueAfter("-cram", "0")),
     reasoning: valueAfter("--reasoning", valueAfter("-rea", "auto")),
     reasoningBudget: valueAfter("--reasoning-budget", "-1"),
-    fitTarget: valueAfter("-fitt", valueAfter("--fit-target", "1024")),
+    fitTarget: valueAfter("-fitt", valueAfter("--fit-target", "")),
   };
   const matched = Object.entries(llamaCppProfiles).find(([, profile]) => (
     profile.context === parsed.context
@@ -543,17 +575,18 @@ function parseLlamaCppArgs(args) {
 }
 
 function buildLlamaCppArgsFromControls() {
+  const controlValue = (input, fallback = "") => (input ? String(input.value ?? fallback) : fallback);
   const profile = {
-    context: String(els.llamacppContextInput?.value || "32768"),
-    batch: String(els.llamacppBatchInput?.value || "1024"),
-    ubatch: String(els.llamacppUbatchInput?.value || "256"),
-    cpuMoe: String(els.llamacppCpuMoeInput?.value || "15"),
-    cacheK: String(els.llamacppCacheKInput?.value || "turbo4"),
-    cacheV: String(els.llamacppCacheVInput?.value || "turbo3"),
-    cacheRam: String(els.llamacppCacheRamInput?.value || "0"),
-    reasoning: String(els.llamacppReasoningInput?.value || "auto"),
-    reasoningBudget: String(els.llamacppReasoningBudgetInput?.value || "-1"),
-    fitTarget: String(els.llamacppFitTargetInput?.value || "1024"),
+    context: controlValue(els.llamacppContextInput, "32768") || "32768",
+    batch: controlValue(els.llamacppBatchInput, "1024") || "1024",
+    ubatch: controlValue(els.llamacppUbatchInput, "256") || "256",
+    cpuMoe: controlValue(els.llamacppCpuMoeInput, ""),
+    cacheK: controlValue(els.llamacppCacheKInput, "f16") || "f16",
+    cacheV: controlValue(els.llamacppCacheVInput, "f16") || "f16",
+    cacheRam: controlValue(els.llamacppCacheRamInput, "0") || "0",
+    reasoning: controlValue(els.llamacppReasoningInput, "off") || "off",
+    reasoningBudget: controlValue(els.llamacppReasoningBudgetInput, "-1") || "-1",
+    fitTarget: controlValue(els.llamacppFitTargetInput, ""),
   };
   return llamaCppProfileArgs(profile);
 }
@@ -2037,6 +2070,7 @@ function applyLlamaCppValues(payload = {}) {
   runtime.llamacppModelPath = String(payload.llamacpp_model_path || "").trim();
   runtime.llamacppLibraryPath = String(payload.llamacpp_library_path || "").trim();
   runtime.llamacppServerArgs = String(payload.llamacpp_server_args || "").trim();
+  runtime.llamacppProfile = String(payload.llamacpp_profile || parseLlamaCppArgs(runtime.llamacppServerArgs).profile || "custom").trim();
   runtime.llamacppConnected = Boolean(payload.connected);
   runtime.llamacppStarted = Boolean(payload.started);
   runtime.llamacppModels = Array.isArray(payload.models) ? payload.models : [];
@@ -2163,6 +2197,7 @@ async function submitLlamaCppSettings(overrides = {}) {
       llamacpp_model_path: runtime.llamacppModelPath,
       llamacpp_library_path: runtime.llamacppLibraryPath,
       llamacpp_server_args: runtime.llamacppServerArgs,
+      llamacpp_profile: runtime.llamacppProfile || parseLlamaCppArgs(runtime.llamacppServerArgs).profile || "custom",
       ...overrides,
     }),
   });
@@ -7470,6 +7505,7 @@ function bindEvents() {
     runtime.llamacppModelPath = String(els.llamacppModelPathInput?.value || "").trim();
     runtime.llamacppLibraryPath = String(els.llamacppLibraryPathInput?.value || "").trim();
     runtime.llamacppServerArgs = buildLlamaCppArgsFromControls();
+    runtime.llamacppProfile = parseLlamaCppArgs(runtime.llamacppServerArgs).profile;
     if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs;
   };
   [
@@ -7484,6 +7520,7 @@ function bindEvents() {
   els.llamacppServerArgsInput?.addEventListener("input", () => {
     runtime.llamacppServerArgs = String(els.llamacppServerArgsInput?.value || "").trim();
     const parsed = parseLlamaCppArgs(runtime.llamacppServerArgs);
+    runtime.llamacppProfile = parsed.profile;
     if (els.llamacppProfileInput) els.llamacppProfileInput.value = parsed.profile;
     if (els.llamacppContextInput) els.llamacppContextInput.value = parsed.context;
     if (els.llamacppBatchInput) els.llamacppBatchInput.value = parsed.batch;

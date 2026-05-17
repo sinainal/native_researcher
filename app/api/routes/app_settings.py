@@ -25,6 +25,12 @@ from app.schemas.settings import (
 from app.utils.rate_limit import AsyncRateLimiter
 from app.llm.ollama import ollama_warmup
 from app.llm.llamacpp import llamacpp_chat
+from app.llm.llamacpp_profiles import (
+    LLAMACPP_SERVER_PROFILES,
+    build_llamacpp_server_args,
+    detect_llamacpp_profile,
+    llama_cpp_profile_choices,
+)
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
 
@@ -38,9 +44,7 @@ DEFAULT_GEMMA4_LLAMA_LIBRARY_PATHS = [
     Path("/usr/local/lib/ollama"),
 ]
 DEFAULT_GEMMA4_LLAMA_SERVER_ARGS = (
-    "-c 65536 -ngl 999 -fa on -b 1024 -ub 256 --threads 10 --threads-batch 16 "
-    "--parallel 1 -np 1 --no-cont-batching --no-warmup --reasoning off --direct-io "
-    "--cache-ram 0 --alias gemma-4-26B-A4B-it-UD-IQ4_NL"
+    build_llamacpp_server_args("gemma4-iq4nl-safe", alias=DEFAULT_GEMMA4_LLAMA_MODEL)
 )
 
 
@@ -437,6 +441,11 @@ def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
     default_model_path = _existing_path(DEFAULT_GEMMA4_LLAMA_MODEL_PATH)
     default_executable = _existing_path(DEFAULT_GEMMA4_LLAMA_EXECUTABLE)
     default_library_path = _default_gemma4_library_path()
+    server_args = (
+        _read_value(settings.llamacpp_server_args_path)
+        or str(getattr(settings, "llamacpp_server_args", "") or "")
+        or (DEFAULT_GEMMA4_LLAMA_SERVER_ARGS if default_model_path and default_executable else "")
+    )
     return LlamaCppSettingsPayload(
         llamacpp_base_url=_normalize_llamacpp_base_url(
             _read_value(settings.llamacpp_base_url_path),
@@ -454,9 +463,8 @@ def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
         llamacpp_library_path=_read_value(settings.llamacpp_library_path_path)
         or str(getattr(settings, "llamacpp_library_path", "") or "")
         or default_library_path,
-        llamacpp_server_args=_read_value(settings.llamacpp_server_args_path)
-        or str(getattr(settings, "llamacpp_server_args", "") or "")
-        or (DEFAULT_GEMMA4_LLAMA_SERVER_ARGS if default_model_path and default_executable else ""),
+        llamacpp_server_args=server_args,
+        llamacpp_profile=detect_llamacpp_profile(server_args),
     )
 
 
@@ -799,6 +807,8 @@ async def get_llamacpp_settings(request: Request) -> LlamaCppStatusResponse:
         llamacpp_model_path=payload.llamacpp_model_path,
         llamacpp_library_path=payload.llamacpp_library_path,
         llamacpp_server_args=payload.llamacpp_server_args,
+        llamacpp_profile=payload.llamacpp_profile,
+        profiles=llama_cpp_profile_choices(),
         connected=connected,
         models=models,
         error=error,
@@ -809,6 +819,13 @@ async def get_llamacpp_settings(request: Request) -> LlamaCppStatusResponse:
 @router.put("/llamacpp", response_model=LlamaCppStatusResponse)
 async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Request) -> LlamaCppStatusResponse:
     settings = request.app.state.settings
+    requested_profile = payload.llamacpp_profile.strip()
+    server_args = payload.llamacpp_server_args.strip()
+    if requested_profile and requested_profile != "custom" and requested_profile in LLAMACPP_SERVER_PROFILES:
+        server_args = build_llamacpp_server_args(
+            requested_profile,
+            alias=payload.llamacpp_model.strip() or "local",
+        )
     normalized_payload = LlamaCppSettingsPayload(
         llamacpp_base_url=_normalize_llamacpp_base_url(
             payload.llamacpp_base_url,
@@ -818,7 +835,8 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         llamacpp_executable=payload.llamacpp_executable.strip(),
         llamacpp_model_path=payload.llamacpp_model_path.strip(),
         llamacpp_library_path=payload.llamacpp_library_path.strip(),
-        llamacpp_server_args=payload.llamacpp_server_args.strip(),
+        llamacpp_server_args=server_args,
+        llamacpp_profile=detect_llamacpp_profile(server_args),
         start=payload.start,
         warmup=payload.warmup,
     )
@@ -877,6 +895,8 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         llamacpp_model_path=normalized_payload.llamacpp_model_path,
         llamacpp_library_path=normalized_payload.llamacpp_library_path,
         llamacpp_server_args=normalized_payload.llamacpp_server_args,
+        llamacpp_profile=normalized_payload.llamacpp_profile,
+        profiles=llama_cpp_profile_choices(),
         connected=connected,
         models=models,
         error=error,

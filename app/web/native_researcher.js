@@ -182,6 +182,7 @@ const els = {
   llamacppModelPathInput: document.getElementById("llamacppModelPathInput"),
   llamacppLibraryPathInput: document.getElementById("llamacppLibraryPathInput"),
   llamacppServerArgsInput: document.getElementById("llamacppServerArgsInput"),
+  llamacppAutoStartToggle: document.getElementById("llamacppAutoStartToggle"),
   llamacppConnectBtn: document.getElementById("llamacppConnectBtn"),
   llamacppStartBtn: document.getElementById("llamacppStartBtn"),
   llamacppSaveBtn: document.getElementById("llamacppSaveBtn"),
@@ -200,6 +201,7 @@ const els = {
   assistantSendBtn: document.getElementById("assistantSendBtn"),
   assistantModelBtn: document.getElementById("assistantModelBtn"),
   assistantModelLabel: document.getElementById("assistantModelLabel"),
+  assistantModelStatusDot: document.getElementById("assistantModelStatusDot"),
   assistantModelMenu: document.getElementById("assistantModelMenu"),
   assistantModelWrap: document.getElementById("assistantModelWrap"),
   assistantModelLoadingPopup: document.getElementById("assistantModelLoadingPopup"),
@@ -327,6 +329,8 @@ const runtime = {
   llamacppLibraryPath: "",
   llamacppServerArgs: "",
   llamacppProfile: "custom",
+  llamacppAutoStart: true,
+  llamacppLogPath: "",
   llamacppModels: [],
   llamacppConnected: false,
   llamacppStarted: false,
@@ -591,6 +595,27 @@ function buildLlamaCppArgsFromControls() {
   return llamaCppProfileArgs(profile);
 }
 
+function setLlamaCppReasoningArg(args, level) {
+  const nextLevel = ["on", "off", "auto"].includes(String(level || "").toLowerCase())
+    ? String(level).toLowerCase()
+    : "off";
+  const tokens = String(args || "").trim().split(/\s+/).filter(Boolean);
+  const cleaned = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--reasoning" || token === "-rea") {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--reasoning=") || token.startsWith("-rea=")) {
+      continue;
+    }
+    cleaned.push(token);
+  }
+  cleaned.push("--reasoning", nextLevel);
+  return cleaned.join(" ");
+}
+
 function loadAssistantModelVisibility() {
   const defaults = assistantBaseModels.reduce((acc, model) => {
     acc[model] = Boolean(assistantModelDefaultVisibility[model]);
@@ -674,9 +699,15 @@ function assistantGeminiModelItems() {
 function assistantLocalModelItems() {
   const models = Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [];
   const names = new Set();
+  const installed = new Set();
+  const running = new Set();
   for (const model of models) {
     const name = String(model?.name || "").trim();
-    if (name) names.add(name);
+    if (name) {
+      names.add(name);
+      installed.add(name);
+      if (model?.running) running.add(name);
+    }
   }
   const selectedLocal = String(runtime.ollamaModel || "").trim();
   if (selectedLocal) names.add(selectedLocal);
@@ -689,7 +720,8 @@ function assistantLocalModelItems() {
         label: `Ollama · ${name}`,
         provider: "local",
         providerLabel: "Local",
-        available: runtime.ollamaConnected || name === selectedLocal,
+        available: runtime.ollamaConnected && installed.has(name),
+        running: running.has(name),
         visible: isAssistantModelVisible(value),
         modelName: name,
       };
@@ -818,7 +850,12 @@ function ollamaModelSizeLabel(modelName) {
 }
 
 function currentOllamaAssistantModel() {
-  return runtime.ollamaModel ? `ollama:${runtime.ollamaModel}` : "";
+  const model = String(runtime.ollamaModel || "").trim();
+  if (!model) return "";
+  const installed = (Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [])
+    .some((item) => String(item?.name || "").trim() === model);
+  if (!installed) return "";
+  return `ollama:${model}`;
 }
 
 function currentLlamaCppAssistantModel() {
@@ -835,6 +872,25 @@ function isLlamaCppAssistantModel(model) {
 
 function isLocalAssistantModel(model) {
   return isOllamaAssistantModel(model) || isLlamaCppAssistantModel(model);
+}
+
+function assistantModelConnectionState(model) {
+  const normalized = normalizeAssistantModel(model || runtime.assistantModel);
+  if (isOllamaAssistantModel(normalized)) {
+    const name = normalized.slice("ollama:".length).trim();
+    const installed = (Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [])
+      .some((item) => String(item?.name || "").trim() === name);
+    const item = (Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels : [])
+      .find((entry) => String(entry?.name || "").trim() === name);
+    return runtime.ollamaConnected && Boolean(item?.running) ? "connected" : "disconnected";
+  }
+  if (isLlamaCppAssistantModel(normalized)) {
+    const name = normalized.slice("llamacpp:".length).trim();
+    const served = (Array.isArray(runtime.llamacppModels) ? runtime.llamacppModels : [])
+      .some((item) => String(item?.id || "").trim() === name);
+    return runtime.llamacppConnected && (served || name === runtime.llamacppModel) ? "connected" : "disconnected";
+  }
+  return "neutral";
 }
 
 function normalizeAssistantModel(model) {
@@ -1828,6 +1884,7 @@ function renderSettingsPanel() {
   if (els.llamacppModelPathInput) els.llamacppModelPathInput.value = runtime.llamacppModelPath || "";
   if (els.llamacppLibraryPathInput) els.llamacppLibraryPathInput.value = runtime.llamacppLibraryPath || "";
   if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs || "";
+  if (els.llamacppAutoStartToggle) els.llamacppAutoStartToggle.checked = Boolean(runtime.llamacppAutoStart);
   const llamaArgs = parseLlamaCppArgs(runtime.llamacppServerArgs || "");
   if (els.llamacppProfileInput) els.llamacppProfileInput.value = llamaArgs.profile;
   if (els.llamacppContextInput) els.llamacppContextInput.value = llamaArgs.context;
@@ -1849,6 +1906,8 @@ function renderSettingsPanel() {
     } else {
       parts.push(`llama.cpp is not reachable at ${runtime.llamacppBaseUrl || "http://localhost:8098"}.`);
     }
+    parts.push(`Auto-start is ${runtime.llamacppAutoStart ? "on" : "off"}.`);
+    if (runtime.llamacppLogPath) parts.push(`Log: ${runtime.llamacppLogPath}`);
     if (runtime.llamacppError) parts.push(runtime.llamacppError);
     if (runtime.llamacppWarmupError) parts.push(`Warmup failed: ${runtime.llamacppWarmupError}`);
     els.llamacppStatus.textContent = parts.join(" ");
@@ -2071,6 +2130,8 @@ function applyLlamaCppValues(payload = {}) {
   runtime.llamacppLibraryPath = String(payload.llamacpp_library_path || "").trim();
   runtime.llamacppServerArgs = String(payload.llamacpp_server_args || "").trim();
   runtime.llamacppProfile = String(payload.llamacpp_profile || parseLlamaCppArgs(runtime.llamacppServerArgs).profile || "custom").trim();
+  runtime.llamacppAutoStart = payload.llamacpp_auto_start !== undefined ? Boolean(payload.llamacpp_auto_start) : runtime.llamacppAutoStart;
+  runtime.llamacppLogPath = String(payload.llamacpp_log_path || "").trim();
   runtime.llamacppConnected = Boolean(payload.connected);
   runtime.llamacppStarted = Boolean(payload.started);
   runtime.llamacppModels = Array.isArray(payload.models) ? payload.models : [];
@@ -2198,6 +2259,7 @@ async function submitLlamaCppSettings(overrides = {}) {
       llamacpp_library_path: runtime.llamacppLibraryPath,
       llamacpp_server_args: runtime.llamacppServerArgs,
       llamacpp_profile: runtime.llamacppProfile || parseLlamaCppArgs(runtime.llamacppServerArgs).profile || "custom",
+      llamacpp_auto_start: Boolean(runtime.llamacppAutoStart),
       ...overrides,
     }),
   });
@@ -2286,6 +2348,16 @@ async function selectAssistantModel(requestedModel) {
   const normalized = normalizeAssistantModel(requestedModel);
   if (!normalized) return;
   if (runtime.assistantModelLoading) return;
+  const catalogItem = assistantModelCatalog().find((item) => item.value === normalized);
+  if (catalogItem && catalogItem.available === false) {
+    const message = `${catalogItem.label || normalized} is not available from the connected local backend.`;
+    runtime.ollamaWarmupError = isOllamaAssistantModel(normalized) ? message : runtime.ollamaWarmupError;
+    runtime.llamacppWarmupError = isLlamaCppAssistantModel(normalized) ? message : runtime.llamacppWarmupError;
+    trackAppEvent("error", "assistant_model_unavailable", message, { assistant_model: normalized });
+    renderSettingsPanel();
+    updateAssistantModelUI();
+    return;
+  }
   if (isOllamaAssistantModel(normalized)) {
     const localModel = normalized.slice("ollama:".length).trim();
     if (!localModel) {
@@ -2346,8 +2418,15 @@ async function selectAssistantModel(requestedModel) {
     renderSettingsPanel();
     await nextAnimationFrame();
     try {
+      runtime.llamacppServerArgs = setLlamaCppReasoningArg(
+        runtime.llamacppServerArgs || buildLlamaCppArgsFromControls(),
+        normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"),
+      );
       const payload = await saveLlamaCppSettings({
         llamacpp_model: localModel,
+        llamacpp_server_args: runtime.llamacppServerArgs,
+        start: Boolean(runtime.llamacppAutoStart),
+        restart: true,
         warmup: true,
       });
       if (!payload.connected) {
@@ -6438,12 +6517,24 @@ function updateAssistantModelUI() {
   localStorage.setItem(assistantModelStorageKey, activeModel);
   if (els.assistantModelMenu) {
     els.assistantModelMenu.innerHTML = options.map((item) => `
-      <button class="assistant-toolbar-menu-item assistant-model-item" type="button" data-model="${escapeHtml(item.value)}">${escapeHtml(item.label)}</button>
+      <button class="assistant-toolbar-menu-item assistant-model-item${item.available ? "" : " is-disabled"}" type="button" data-model="${escapeHtml(item.value)}" ${item.available ? "" : "disabled"}>${escapeHtml(item.label)}${item.available ? "" : " · unavailable"}</button>
     `).join("");
   }
   if (els.assistantModelBtn) {
     els.assistantModelBtn.disabled = Boolean(runtime.assistantModelLoading);
     els.assistantModelBtn.setAttribute("aria-busy", runtime.assistantModelLoading ? "true" : "false");
+  }
+  if (els.assistantModelStatusDot) {
+    const connectionState = assistantModelConnectionState(activeModel);
+    els.assistantModelStatusDot.classList.toggle("is-connected", connectionState === "connected");
+    els.assistantModelStatusDot.classList.toggle("is-disconnected", connectionState === "disconnected");
+    els.assistantModelStatusDot.classList.toggle("is-neutral", connectionState === "neutral");
+    const label = connectionState === "connected"
+      ? "Local model connected"
+      : connectionState === "disconnected"
+        ? "Local model disconnected"
+        : "Cloud model";
+    els.assistantModelBtn?.setAttribute("title", label);
   }
   els.assistantModelLabel.textContent = runtime.assistantModelLoading
     ? `Loading ${assistantModelDisplayLabel(runtime.assistantModelLoadingTarget) || "model"}...`
@@ -6471,7 +6562,7 @@ function assistantThinkingLevelForRequest() {
     return normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off");
   }
   if (isLlamaCppAssistantModel(runtime.assistantModel)) {
-    return "off";
+    return normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off");
   }
   return effectiveThinkingLevel();
 }
@@ -6505,8 +6596,10 @@ function updateThinkingLabel() {
 
 function updateOllamaThinkingControlUI() {
   const isOllamaModel = isOllamaAssistantModel(runtime.assistantModel);
+  const isLlamaModel = isLlamaCppAssistantModel(runtime.assistantModel);
+  const isLocalThinkingModel = isOllamaModel || isLlamaModel;
   if (els.assistantOllamaThinkingWrap) {
-    els.assistantOllamaThinkingWrap.hidden = !isOllamaModel;
+    els.assistantOllamaThinkingWrap.hidden = !isLocalThinkingModel;
   }
   if (els.assistantOllamaThinkingLabel) {
     els.assistantOllamaThinkingLabel.textContent = `Thinking: ${ollamaThinkingLevelLabel(runtime.ollamaThinkingLevel)}`;
@@ -6514,7 +6607,7 @@ function updateOllamaThinkingControlUI() {
   document.querySelectorAll(".think-menu-item[data-ollama-think]").forEach((item) => {
     item.classList.toggle("is-selected", item.dataset.ollamaThink === normalizeOllamaThinkingLevel(runtime.ollamaThinkingLevel, "off"));
   });
-  if (!isOllamaModel && els.assistantOllamaThinkingMenu) els.assistantOllamaThinkingMenu.hidden = true;
+  if (!isLocalThinkingModel && els.assistantOllamaThinkingMenu) els.assistantOllamaThinkingMenu.hidden = true;
   if (els.assistantOllamaThinkingBtn) els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
 }
 
@@ -7426,10 +7519,31 @@ function bindEvents() {
     if (els.assistantOllamaThinkingMenu) els.assistantOllamaThinkingMenu.hidden = true;
     if (els.assistantOllamaThinkingBtn) els.assistantOllamaThinkingBtn.setAttribute("aria-expanded", "false");
     try {
-      await saveOllamaSettings({ ollama_thinking_level: nextValue });
-      trackAppEvent("info", "ollama_thinking_level_updated", "Ollama thinking level updated from the native UI.", {
-        ollama_thinking_level: nextValue,
-      });
+      if (isLlamaCppAssistantModel(runtime.assistantModel)) {
+        const previousArgs = runtime.llamacppServerArgs;
+        runtime.llamacppServerArgs = setLlamaCppReasoningArg(runtime.llamacppServerArgs || buildLlamaCppArgsFromControls(), nextValue);
+        if (els.llamacppReasoningInput) els.llamacppReasoningInput.value = nextValue;
+        if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs;
+        try {
+          await saveLlamaCppSettings({
+            llamacpp_server_args: runtime.llamacppServerArgs,
+            start: true,
+            restart: true,
+            warmup: true,
+          });
+        } catch (error) {
+          runtime.llamacppServerArgs = previousArgs;
+          throw error;
+        }
+        trackAppEvent("info", "llamacpp_thinking_level_updated", "llama.cpp thinking level updated from the native UI.", {
+          llamacpp_reasoning: nextValue,
+        });
+      } else {
+        await saveOllamaSettings({ ollama_thinking_level: nextValue });
+        trackAppEvent("info", "ollama_thinking_level_updated", "Ollama thinking level updated from the native UI.", {
+          ollama_thinking_level: nextValue,
+        });
+      }
     } catch (error) {
       runtime.ollamaThinkingLevel = previousValue;
       renderSettingsPanel();
@@ -7506,6 +7620,7 @@ function bindEvents() {
     runtime.llamacppLibraryPath = String(els.llamacppLibraryPathInput?.value || "").trim();
     runtime.llamacppServerArgs = buildLlamaCppArgsFromControls();
     runtime.llamacppProfile = parseLlamaCppArgs(runtime.llamacppServerArgs).profile;
+    runtime.llamacppAutoStart = Boolean(els.llamacppAutoStartToggle?.checked);
     if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs;
   };
   [
@@ -7517,6 +7632,7 @@ function bindEvents() {
   ].forEach((input) => {
     input?.addEventListener("input", syncLlamaCppInputs);
   });
+  els.llamacppAutoStartToggle?.addEventListener("change", syncLlamaCppInputs);
   els.llamacppServerArgsInput?.addEventListener("input", () => {
     runtime.llamacppServerArgs = String(els.llamacppServerArgsInput?.value || "").trim();
     const parsed = parseLlamaCppArgs(runtime.llamacppServerArgs);

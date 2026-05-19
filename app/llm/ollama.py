@@ -163,6 +163,17 @@ def _ollama_thinking_budget(thinking_level: str) -> dict[str, int] | None:
     return {"budget_tokens": OLLAMA_DEFAULT_THINKING_BUDGET_TOKENS}
 
 
+def _ollama_error_text(response: httpx.Response, *, model: str) -> str:
+    try:
+        payload = response.json() or {}
+        raw_error = str(payload.get("error") or "").strip()
+    except Exception:
+        raw_error = response.text.strip()
+    if raw_error:
+        return f"Ollama model '{model}' failed: {raw_error}"
+    return f"Ollama model '{model}' failed with HTTP {response.status_code}."
+
+
 async def ollama_chat(
     *,
     base_url: str,
@@ -197,6 +208,8 @@ async def ollama_chat(
         follow_redirects=True,
     ) as client:
         response = await client.post("/api/chat", json=payload)
+        if response.status_code >= 400:
+            raise RuntimeError(_ollama_error_text(response, model=model))
         response.raise_for_status()
         data = response.json()
         message = data.get("message")
@@ -240,6 +253,16 @@ async def ollama_chat_stream(
         follow_redirects=True,
     ) as client:
         async with client.stream("POST", "/api/chat", json=payload) as response:
+            if response.status_code >= 400:
+                body = await response.aread()
+                try:
+                    error_payload = json.loads(body.decode("utf-8") or "{}")
+                    error_text = str(error_payload.get("error") or "").strip()
+                except Exception:
+                    error_text = body.decode("utf-8", errors="replace").strip()
+                if error_text:
+                    raise RuntimeError(f"Ollama model '{model}' failed: {error_text}")
+                raise RuntimeError(f"Ollama model '{model}' failed with HTTP {response.status_code}.")
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line.strip():

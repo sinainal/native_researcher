@@ -36,6 +36,7 @@ class FakePubMedService:
             ollama_base_url="http://localhost:11434",
             ollama_model="gemma4:e2b",
             request_user_agent="NativeResearcherTests/1.0",
+            skip_local_model_validation=True,
         )
 
     async def search(self, request) -> PubMedSearchResponse:

@@ -36,6 +36,7 @@ class OllamaModelInfo(BaseModel):
     size: int | None = None
     modified_at: str | None = None
     digest: str | None = None
+    running: bool = False
 
 
 class OllamaStatusResponse(BaseModel):
@@ -59,7 +60,9 @@ class LlamaCppSettingsPayload(BaseModel):
     llamacpp_library_path: str = Field(default="", max_length=4096)
     llamacpp_server_args: str = Field(default="", max_length=4096)
     llamacpp_profile: str = Field(default="custom", max_length=128)
+    llamacpp_auto_start: bool = True
     start: bool = False
+    restart: bool = False
     warmup: bool = False
 
 
@@ -82,6 +85,8 @@ class LlamaCppStatusResponse(BaseModel):
     llamacpp_library_path: str = ""
     llamacpp_server_args: str = ""
     llamacpp_profile: str = "custom"
+    llamacpp_auto_start: bool = True
+    llamacpp_log_path: str = ""
     profiles: list[LlamaCppProfileInfo] = Field(default_factory=list)
     connected: bool
     models: list[LlamaCppModelInfo] = Field(default_factory=list)

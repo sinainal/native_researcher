@@ -31,6 +31,12 @@ from app.llm.llamacpp_profiles import (
     detect_llamacpp_profile,
     llama_cpp_profile_choices,
 )
+from app.services.local_llamacpp_supervisor import (
+    ensure_llamacpp_ready,
+    is_supervised_llamacpp_running,
+    probe_llamacpp_server,
+    stop_local_llamacpp_servers,
+)
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
 
@@ -234,6 +240,49 @@ def _stop_ollama_model(base_url: str, model: str) -> tuple[bool, str | None]:
     if completed.returncode not in {0, 1}:
         return False, f"ollama stop exited with code {completed.returncode}."
     return True, None
+
+
+def _ollama_model_available(model: str, models: list[OllamaModelInfo]) -> bool:
+    normalized = str(model or "").strip()
+    if not normalized:
+        return True
+    names = {str(item.name or "").strip() for item in models}
+    return normalized in names
+
+
+def _ollama_missing_model_error(model: str, models: list[OllamaModelInfo]) -> str:
+    names = ", ".join(item.name for item in models[:8]) or "none"
+    return f"Ollama model '{model}' is not installed or not loaded in /api/tags. Available models: {names}."
+
+
+async def _list_ollama_running_models(base_url: str, *, request_user_agent: str) -> list[str]:
+    if not _ollama_base_url_is_local(base_url):
+        return []
+    try:
+        async with httpx.AsyncClient(
+            base_url=_normalize_ollama_base_url(base_url, "http://localhost:11434"),
+            timeout=httpx.Timeout(4.0),
+            headers={"User-Agent": request_user_agent},
+            follow_redirects=True,
+        ) as client:
+            response = await client.get("/api/ps")
+            response.raise_for_status()
+            payload = response.json() or {}
+            names = []
+            for item in payload.get("models") or []:
+                if isinstance(item, dict) and str(item.get("name") or item.get("model") or "").strip():
+                    names.append(str(item.get("name") or item.get("model")).strip())
+            return names
+    except Exception:
+        return []
+
+
+async def _stop_ollama_running_models(base_url: str, *, request_user_agent: str, except_model: str = "") -> None:
+    running = await _list_ollama_running_models(base_url, request_user_agent=request_user_agent)
+    for model in running:
+        if except_model and model == except_model:
+            continue
+        await asyncio.to_thread(_stop_ollama_model, base_url, model)
 
 
 async def _finalize_ollama_warmup(
@@ -465,6 +514,10 @@ def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
         or default_library_path,
         llamacpp_server_args=server_args,
         llamacpp_profile=detect_llamacpp_profile(server_args),
+        llamacpp_auto_start=_read_bool_value(
+            settings.llamacpp_auto_start_path,
+            bool(getattr(settings, "llamacpp_auto_start", True)),
+        ),
     )
 
 
@@ -476,12 +529,27 @@ def _apply_llamacpp_runtime_settings(request: Request, payload: LlamaCppSettings
     object.__setattr__(settings, "llamacpp_model_path", payload.llamacpp_model_path)
     object.__setattr__(settings, "llamacpp_library_path", payload.llamacpp_library_path)
     object.__setattr__(settings, "llamacpp_server_args", payload.llamacpp_server_args)
+    object.__setattr__(settings, "llamacpp_auto_start", payload.llamacpp_auto_start)
 
 
 def _llamacpp_process_is_running(request: Request) -> bool:
     process = getattr(request.app.state, "llamacpp_process", None)
     poll = getattr(process, "poll", None)
     return bool(process is not None and callable(poll) and poll() is None)
+
+
+def _stop_llamacpp_process(request: Request) -> None:
+    process = getattr(request.app.state, "llamacpp_process", None)
+    poll = getattr(process, "poll", None)
+    if process is None or not callable(poll) or poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    except Exception:
+        return
 
 
 def _spawn_llamacpp_process(request: Request, payload: LlamaCppSettingsPayload) -> tuple[bool, str | None]:
@@ -537,37 +605,12 @@ async def _probe_llamacpp(
     *,
     request_user_agent: str,
 ) -> tuple[bool, list[LlamaCppModelInfo], str | None]:
-    normalized_base_url = _normalize_llamacpp_base_url(base_url)
-    timeout = httpx.Timeout(4.0)
-    headers = {"User-Agent": request_user_agent}
-    try:
-        async with httpx.AsyncClient(
-            base_url=normalized_base_url,
-            timeout=timeout,
-            headers=headers,
-            follow_redirects=True,
-        ) as client:
-            health_response = await client.get("/health")
-            if health_response.status_code >= 500:
-                health_response.raise_for_status()
-            models: list[LlamaCppModelInfo] = []
-            try:
-                models_response = await client.get("/v1/models")
-                models_response.raise_for_status()
-                models_payload = models_response.json() or {}
-                for item in models_payload.get("data") or []:
-                    if isinstance(item, dict) and str(item.get("id") or "").strip():
-                        models.append(
-                            LlamaCppModelInfo(
-                                id=str(item.get("id")).strip(),
-                                object=str(item.get("object") or "").strip() or None,
-                            )
-                        )
-            except Exception:
-                models = []
-            return True, models, None
-    except Exception as exc:
-        return False, [], f"{type(exc).__name__}: {exc}"
+    result = await probe_llamacpp_server(base_url, request_user_agent=request_user_agent)
+    return (
+        result.connected,
+        [LlamaCppModelInfo(id=model) for model in result.models],
+        result.error,
+    )
 
 
 async def _llamacpp_warmup(
@@ -610,6 +653,18 @@ async def _probe_ollama(base_url: str, *, request_user_agent: str) -> tuple[bool
                 return False, None, [], f"{type(exc).__name__}: {exc}"
 
             models: list[OllamaModelInfo] = []
+            running_models: set[str] = set()
+            try:
+                ps_response = await client.get("/api/ps")
+                ps_response.raise_for_status()
+                ps_payload = ps_response.json() or {}
+                for item in ps_payload.get("models") or []:
+                    if isinstance(item, dict):
+                        running_name = str(item.get("name") or item.get("model") or "").strip()
+                        if running_name:
+                            running_models.add(running_name)
+            except Exception:
+                running_models = set()
             tags_error: str | None = None
             try:
                 tags_response = await client.get("/api/tags")
@@ -633,6 +688,7 @@ async def _probe_ollama(base_url: str, *, request_user_agent: str) -> tuple[bool
                             size=size,
                             modified_at=str(item.get("modified_at") or item.get("modifiedAt") or "").strip() or None,
                             digest=str(item.get("digest") or "").strip() or None,
+                            running=name in running_models,
                         )
                     )
             except Exception as exc:
@@ -702,6 +758,8 @@ async def get_ollama_settings(request: Request) -> OllamaStatusResponse:
         payload.ollama_base_url,
         request_user_agent=settings.request_user_agent,
     )
+    if connected and payload.ollama_model and not _ollama_model_available(payload.ollama_model, models):
+        error = _ollama_missing_model_error(payload.ollama_model, models)
     warming_up, warming_model, warmup_error = _ollama_warmup_snapshot(request)
     return OllamaStatusResponse(
         ollama_base_url=payload.ollama_base_url,
@@ -755,14 +813,28 @@ async def update_ollama_settings(payload: OllamaSettingsPayload, request: Reques
             next_payload.ollama_base_url,
             request_user_agent=settings.request_user_agent,
         )
-    if payload.warmup and connected and next_payload.ollama_model:
-        _schedule_ollama_warmup(
-            request,
-            base_url=next_payload.ollama_base_url,
-            model=next_payload.ollama_model,
-            request_user_agent=settings.request_user_agent,
-        )
-    warming_up, warming_model, warmup_error = _ollama_warmup_snapshot(request)
+    if connected and next_payload.ollama_model and not _ollama_model_available(next_payload.ollama_model, models):
+        error = _ollama_missing_model_error(next_payload.ollama_model, models)
+        warmup_error = error
+        warming_up = False
+        warming_model = ""
+    else:
+        warmup_error = None
+        if payload.warmup and connected and next_payload.ollama_model:
+            stop_local_llamacpp_servers()
+            _stop_llamacpp_process(request)
+            await _stop_ollama_running_models(
+                next_payload.ollama_base_url,
+                request_user_agent=settings.request_user_agent,
+                except_model=next_payload.ollama_model,
+            )
+            _schedule_ollama_warmup(
+                request,
+                base_url=next_payload.ollama_base_url,
+                model=next_payload.ollama_model,
+                request_user_agent=settings.request_user_agent,
+            )
+        warming_up, warming_model, warmup_error = _ollama_warmup_snapshot(request)
     if stop_error and not warmup_error:
         warmup_error = stop_error
     request.app.state.app_event_log_service.log(
@@ -808,11 +880,13 @@ async def get_llamacpp_settings(request: Request) -> LlamaCppStatusResponse:
         llamacpp_library_path=payload.llamacpp_library_path,
         llamacpp_server_args=payload.llamacpp_server_args,
         llamacpp_profile=payload.llamacpp_profile,
+        llamacpp_auto_start=payload.llamacpp_auto_start,
+        llamacpp_log_path=str(getattr(settings, "llamacpp_log_path", "") or ""),
         profiles=llama_cpp_profile_choices(),
         connected=connected,
         models=models,
         error=error,
-        started=_llamacpp_process_is_running(request),
+        started=is_supervised_llamacpp_running(payload.llamacpp_base_url) or _llamacpp_process_is_running(request),
     )
 
 
@@ -837,7 +911,9 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         llamacpp_library_path=payload.llamacpp_library_path.strip(),
         llamacpp_server_args=server_args,
         llamacpp_profile=detect_llamacpp_profile(server_args),
+        llamacpp_auto_start=payload.llamacpp_auto_start,
         start=payload.start,
+        restart=payload.restart,
         warmup=payload.warmup,
     )
     _write_value(settings.llamacpp_base_url_path, normalized_payload.llamacpp_base_url)
@@ -846,22 +922,32 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
     _write_value(settings.llamacpp_model_path_path, normalized_payload.llamacpp_model_path)
     _write_value(settings.llamacpp_library_path_path, normalized_payload.llamacpp_library_path)
     _write_value(settings.llamacpp_server_args_path, normalized_payload.llamacpp_server_args)
+    _write_bool_value(settings.llamacpp_auto_start_path, normalized_payload.llamacpp_auto_start)
     _apply_llamacpp_runtime_settings(request, normalized_payload)
 
     start_error: str | None = None
     started = False
     if normalized_payload.start:
-        started, start_error = _spawn_llamacpp_process(request, normalized_payload)
-        if started:
-            deadline = asyncio.get_running_loop().time() + 30.0
-            while asyncio.get_running_loop().time() < deadline:
-                connected, models, error = await _probe_llamacpp(
-                    normalized_payload.llamacpp_base_url,
-                    request_user_agent=settings.request_user_agent,
-                )
-                if connected:
-                    break
-                await asyncio.sleep(0.5)
+        ollama_model = str(getattr(settings, "ollama_model", "") or _read_value(settings.ollama_model_path)).strip()
+        ollama_base_url = str(getattr(settings, "ollama_base_url", "") or _read_value(settings.ollama_base_url_path) or "http://localhost:11434")
+        await _stop_ollama_running_models(ollama_base_url, request_user_agent=settings.request_user_agent)
+        if ollama_model:
+            await asyncio.to_thread(_stop_ollama_model, ollama_base_url, ollama_model)
+        if normalized_payload.restart:
+            stop_local_llamacpp_servers(normalized_payload.llamacpp_base_url)
+        try:
+            await ensure_llamacpp_ready(
+                settings,
+                model=normalized_payload.llamacpp_model,
+                request_user_agent=settings.request_user_agent,
+                timeout_seconds=120.0,
+            )
+            started = True
+            normalized_payload.llamacpp_base_url = str(getattr(settings, "llamacpp_base_url", normalized_payload.llamacpp_base_url))
+            _write_value(settings.llamacpp_base_url_path, normalized_payload.llamacpp_base_url)
+            _write_value(settings.llamacpp_log_path_path, str(getattr(settings, "llamacpp_log_path", "") or ""))
+        except Exception as exc:
+            start_error = f"{type(exc).__name__}: {exc}"
 
     connected, models, error = await _probe_llamacpp(
         normalized_payload.llamacpp_base_url,
@@ -896,10 +982,12 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         llamacpp_library_path=normalized_payload.llamacpp_library_path,
         llamacpp_server_args=normalized_payload.llamacpp_server_args,
         llamacpp_profile=normalized_payload.llamacpp_profile,
+        llamacpp_auto_start=normalized_payload.llamacpp_auto_start,
+        llamacpp_log_path=str(getattr(settings, "llamacpp_log_path", "") or ""),
         profiles=llama_cpp_profile_choices(),
         connected=connected,
         models=models,
         error=error,
         warmup_error=warmup_error,
-        started=started or _llamacpp_process_is_running(request),
+        started=started or is_supervised_llamacpp_running(normalized_payload.llamacpp_base_url) or _llamacpp_process_is_running(request),
     )

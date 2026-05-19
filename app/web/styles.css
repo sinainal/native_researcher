@@ -2093,6 +2093,25 @@ body.is-document-viewer-open .native-document-viewer {
   max-width: 132px;
 }
 
+.assistant-model-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+  box-shadow: 0 0 0 2px rgba(148, 163, 184, .16);
+}
+
+.assistant-model-status-dot.is-connected {
+  background: #16a34a;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, .16);
+}
+
+.assistant-model-status-dot.is-disconnected {
+  background: #dc2626;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, .16);
+}
+
 .assistant-model-btn span {
   display: block;
   overflow: hidden;
@@ -5629,6 +5648,11 @@ body.is-document-viewer-open .native-document-viewer {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.native-assistant-panel .assistant-model-status-dot {
+  display: inline-block;
+  overflow: visible;
 }
 
 .native-assistant-panel .assistant-toolbar-btn:hover,

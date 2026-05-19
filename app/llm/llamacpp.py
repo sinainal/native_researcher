@@ -72,6 +72,7 @@ def _chat_payload(
     tools: list[dict[str, Any]] | None,
     stream: bool,
     tool_choice: Any | None = None,
+    thinking_level: str = "off",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model or "local",
@@ -85,6 +86,9 @@ def _chat_payload(
     if openai_tools:
         payload["tools"] = openai_tools
         payload["tool_choice"] = _llamacpp_tool_choice(tool_choice) or "auto"
+    level = str(thinking_level or "off").strip().lower()
+    if level in {"on", "off"}:
+        payload["chat_template_kwargs"] = {"enable_thinking": level == "on"}
     return payload
 
 
@@ -100,7 +104,7 @@ async def llamacpp_chat(
     timeout_seconds: float = 120.0,
     request_user_agent: str = "NativeResearcher/0.1",
 ) -> dict[str, Any]:
-    del thinking_level, keep_alive
+    del keep_alive
     headers = {"User-Agent": request_user_agent}
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     async with httpx.AsyncClient(
@@ -111,7 +115,14 @@ async def llamacpp_chat(
     ) as client:
         response = await client.post(
             "/v1/chat/completions",
-            json=_chat_payload(model=model, messages=messages, tools=tools, stream=False, tool_choice=tool_choice),
+            json=_chat_payload(
+                model=model,
+                messages=messages,
+                tools=tools,
+                stream=False,
+                tool_choice=tool_choice,
+                thinking_level=thinking_level,
+            ),
         )
         response.raise_for_status()
         data = response.json()
@@ -150,7 +161,7 @@ async def llamacpp_chat_stream(
     timeout_seconds: float = 120.0,
     request_user_agent: str = "NativeResearcher/0.1",
 ) -> AsyncIterator[dict[str, Any]]:
-    del thinking_level, keep_alive
+    del keep_alive
     headers = {"User-Agent": request_user_agent}
     timeout = httpx.Timeout(timeout_seconds, connect=5.0)
     collected_tool_calls: dict[int, dict[str, Any]] = {}
@@ -164,7 +175,14 @@ async def llamacpp_chat_stream(
         async with client.stream(
             "POST",
             "/v1/chat/completions",
-            json=_chat_payload(model=model, messages=messages, tools=tools, stream=True, tool_choice=tool_choice),
+            json=_chat_payload(
+                model=model,
+                messages=messages,
+                tools=tools,
+                stream=True,
+                tool_choice=tool_choice,
+                thinking_level=thinking_level,
+            ),
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():

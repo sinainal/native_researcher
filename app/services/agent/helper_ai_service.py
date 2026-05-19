@@ -44,6 +44,9 @@ from app.services.agent.system_prompts import (
     build_research_agent_system_instruction,
 )
 from app.services.helper_log_service import HelperLogService
+from app.services.local_llamacpp_supervisor import ensure_llamacpp_ready, is_llamacpp_connection_error
+from app.services.local_llamacpp_supervisor import stop_local_llamacpp_servers
+from app.services.local_ollama_supervisor import ensure_ollama_model_available
 from app.services.pubmed_service import PubMedService
 from app.utils.cache import TTLCache
 MAX_FAST_TOOL_CALLS = 3
@@ -122,15 +125,95 @@ class HelperAIService:
             return str(getattr(settings, "llamacpp_base_url", "http://localhost:8098") or "http://localhost:8098")
         return self._ollama_base_url()
 
+    async def _ensure_ollama_ready_for_model(self, model: str) -> None:
+        settings = self._runtime_settings()
+        if bool(getattr(settings, "skip_local_model_validation", False)):
+            return
+        stop_local_llamacpp_servers()
+        await ensure_ollama_model_available(
+            base_url=self._ollama_base_url(),
+            model=model,
+            request_user_agent=str(getattr(settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1"),
+        )
+
     async def _local_llm_chat(self, *, provider: str, **kwargs: Any) -> dict[str, Any]:
         kwargs["base_url"] = self._local_llm_base_url(provider)
         if provider == "llamacpp":
-            return await llamacpp_chat(**kwargs)
+            settings = self._runtime_settings()
+            if settings is not None:
+                kwargs["base_url"] = await ensure_llamacpp_ready(
+                    settings,
+                    model=str(kwargs.get("model") or "local"),
+                    request_user_agent=str(kwargs.get("request_user_agent") or self._ollama_request_user_agent()),
+                )
+            try:
+                return await llamacpp_chat(**kwargs)
+            except Exception as exc:
+                if settings is None or not is_llamacpp_connection_error(exc):
+                    raise
+                kwargs["base_url"] = await ensure_llamacpp_ready(
+                    settings,
+                    model=str(kwargs.get("model") or "local"),
+                    request_user_agent=str(kwargs.get("request_user_agent") or self._ollama_request_user_agent()),
+                )
+                return await llamacpp_chat(**kwargs)
+        await self._ensure_ollama_ready_for_model(str(kwargs.get("model") or ""))
         return await ollama_chat(**kwargs)
 
     async def _local_llm_chat_stream(self, *, provider: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         kwargs["base_url"] = self._local_llm_base_url(provider)
-        stream = llamacpp_chat_stream(**kwargs) if provider == "llamacpp" else ollama_chat_stream(**kwargs)
+        if provider == "llamacpp":
+            settings = self._runtime_settings()
+            if settings is not None:
+                status_events: list[dict[str, Any]] = []
+                ensure_task = asyncio.create_task(
+                    ensure_llamacpp_ready(
+                        settings,
+                        model=str(kwargs.get("model") or "local"),
+                        request_user_agent=str(kwargs.get("request_user_agent") or self._ollama_request_user_agent()),
+                        status_callback=status_events.append,
+                    )
+                )
+                while True:
+                    try:
+                        kwargs["base_url"] = await asyncio.wait_for(asyncio.shield(ensure_task), timeout=0.25)
+                        break
+                    except asyncio.TimeoutError:
+                        while status_events:
+                            yield status_events.pop(0)
+                while status_events:
+                    yield status_events.pop(0)
+            try:
+                async for chunk in llamacpp_chat_stream(**kwargs):
+                    yield chunk
+                return
+            except Exception as exc:
+                if settings is None or not is_llamacpp_connection_error(exc):
+                    raise
+                retry_events: list[dict[str, Any]] = [{"type": "status", "text": "Recovering llama.cpp connection."}]
+                ensure_task = asyncio.create_task(
+                    ensure_llamacpp_ready(
+                        settings,
+                        model=str(kwargs.get("model") or "local"),
+                        request_user_agent=str(kwargs.get("request_user_agent") or self._ollama_request_user_agent()),
+                        status_callback=retry_events.append,
+                    )
+                )
+                while True:
+                    try:
+                        kwargs["base_url"] = await asyncio.wait_for(asyncio.shield(ensure_task), timeout=0.25)
+                        break
+                    except asyncio.TimeoutError:
+                        while retry_events:
+                            yield retry_events.pop(0)
+                retry_events.append({"type": "status", "text": "Retrying llama.cpp request after reconnect."})
+                for event in retry_events:
+                    yield event
+                async for chunk in llamacpp_chat_stream(**kwargs):
+                    yield chunk
+                return
+        await self._ensure_ollama_ready_for_model(str(kwargs.get("model") or ""))
+        stream = ollama_chat_stream(**kwargs)
         async for chunk in stream:
             yield chunk
 
@@ -936,6 +1019,9 @@ class HelperAIService:
                 timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
             ):
+                if chunk.get("type") == "status":
+                    yield chunk
+                    continue
                 message = chunk.get("message") or {}
                 thinking_text = str(message.get("thinking") or "")
                 if thinking_text:
@@ -1064,6 +1150,9 @@ class HelperAIService:
                 timeout_seconds=900.0,
                 request_user_agent=self._ollama_request_user_agent(),
             ):
+                if chunk.get("type") == "status":
+                    yield chunk
+                    continue
                 final_message = chunk.get("message") or {}
                 final_thinking = str(final_message.get("thinking") or "")
                 if final_thinking:
@@ -1606,6 +1695,9 @@ class HelperAIService:
                     timeout_seconds=900.0,
                     request_user_agent=self._ollama_request_user_agent(),
                 ):
+                    if chunk.get("type") == "status":
+                        yield chunk
+                        continue
                     message = chunk.get("message") or {}
                     thinking = str(message.get("thinking") or "")
                     if thinking:
@@ -1751,6 +1843,9 @@ class HelperAIService:
                         timeout_seconds=900.0,
                         request_user_agent=self._ollama_request_user_agent(),
                     ):
+                        if chunk.get("type") == "status":
+                            queue.put_nowait(chunk)
+                            continue
                         queue.put_nowait({"type": "chunk", "chunk": chunk})
                 except asyncio.CancelledError:
                     raise

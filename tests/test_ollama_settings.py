@@ -36,6 +36,7 @@ async def _fake_probe_success(base_url: str, *, request_user_agent: str):
         [
             OllamaModelInfo(name="llama3.1:8b", size=4_900_000_000),
             OllamaModelInfo(name="mistral:7b", size=4_100_000_000),
+            OllamaModelInfo(name="gemma4:e2b", size=9_000_000_000),
         ],
         None,
     )
@@ -77,6 +78,8 @@ def _build_settings(temp_root: Path) -> Settings:
         llamacpp_model_path_path=temp_root / "llamacpp_model_path",
         llamacpp_library_path_path=temp_root / "llamacpp_library_path",
         llamacpp_server_args_path=temp_root / "llamacpp_server_args",
+        llamacpp_auto_start_path=temp_root / "llamacpp_auto_start",
+        llamacpp_log_path_path=temp_root / "llamacpp_log_path",
         pdf_unpaywall_fallback_enabled_path=temp_root / "pdf_unpaywall_fallback_enabled",
         pdf_core_fallback_enabled_path=temp_root / "pdf_core_fallback_enabled",
         pdf_arxiv_fallback_enabled_path=temp_root / "pdf_arxiv_fallback_enabled",
@@ -108,7 +111,7 @@ def test_ollama_settings_detects_running_service(monkeypatch) -> None:
                 payload = response.json()
                 assert payload["connected"] is True
                 assert payload["version"] == "0.5.7"
-                assert [item["name"] for item in payload["models"]] == ["llama3.1:8b", "mistral:7b"]
+                assert [item["name"] for item in payload["models"]] == ["llama3.1:8b", "mistral:7b", "gemma4:e2b"]
 
                 saved = await client.put(
                     "/app/ollama",
@@ -209,6 +212,48 @@ def test_ollama_settings_warms_selected_model(monkeypatch) -> None:
                 assert warmup_calls == [
                     ("http://localhost:11434", "gemma4:e2b", settings.request_user_agent),
                 ]
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_ollama_settings_rejects_missing_selected_model(monkeypatch) -> None:
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            settings = _build_settings(temp_root)
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            warmup_calls: list[str] = []
+
+            def _fake_schedule(request, *, base_url: str, model: str, request_user_agent: str):
+                _ = request, base_url, request_user_agent
+                warmup_calls.append(model)
+
+            monkeypatch.setattr("app.api.routes.app_settings._probe_ollama", _fake_probe_success)
+            monkeypatch.setattr("app.api.routes.app_settings._schedule_ollama_warmup", _fake_schedule)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.put(
+                    "/app/ollama",
+                    json={
+                        "ollama_base_url": "localhost:11434",
+                        "ollama_model": "missing:latest",
+                        "warmup": True,
+                    },
+                )
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["connected"] is True
+                assert "missing:latest" in payload["warmup_error"]
+                assert payload["warming_up"] is False
+                assert warmup_calls == []
 
     import asyncio
 

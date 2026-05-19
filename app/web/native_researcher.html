@@ -558,6 +558,8 @@
                   <div class="assistant-model-picker" id="assistantModelWrap">
                     <button id="assistantModelBtn" class="assistant-toolbar-btn assistant-model-btn" type="button"
                       aria-haspopup="menu" aria-expanded="false">
+                      <span id="assistantModelStatusDot" class="assistant-model-status-dot is-neutral"
+                        aria-hidden="true"></span>
                       <span id="assistantModelLabel">Gemini 3 Flash</span>
                       <svg class="assistant-toolbar-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none"
                         stroke="currentColor" stroke-width="2.2" aria-hidden="true">
@@ -806,107 +808,122 @@
             </select>
           </label>
         </div>
-        <div class="native-settings-row native-model-settings-paths">
-          <label class="native-settings-field" for="llamacppContextInput">
-            <span>Context</span>
-            <select id="llamacppContextInput" class="native-settings-select">
-              <option value="16384">16K</option>
-              <option value="32768">32K</option>
-              <option value="65536">64K</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppBatchInput">
-            <span>Batch</span>
-            <select id="llamacppBatchInput" class="native-settings-select">
-              <option value="512">512</option>
-              <option value="1024">1024</option>
-              <option value="2048">2048</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppUbatchInput">
-            <span>uBatch</span>
-            <select id="llamacppUbatchInput" class="native-settings-select">
-              <option value="128">128</option>
-              <option value="256">256</option>
-              <option value="384">384</option>
-              <option value="512">512</option>
-            </select>
+        <div class="native-settings-row">
+          <div class="native-settings-copy">
+            <div class="native-settings-title">Auto-start llama.cpp</div>
+            <div class="native-settings-description">
+              Starts the configured local llama-server when the selected llama.cpp model is requested and the server is down.
+            </div>
+          </div>
+          <label class="native-settings-switch" for="llamacppAutoStartToggle">
+            <input id="llamacppAutoStartToggle" type="checkbox" checked>
+            <span class="native-settings-switch-ui" aria-hidden="true"></span>
           </label>
         </div>
-        <div class="native-settings-row native-model-settings-paths">
-          <label class="native-settings-field" for="llamacppCpuMoeInput">
-            <span>CPU MoE</span>
-            <select id="llamacppCpuMoeInput" class="native-settings-select">
-              <option value="">Off</option>
-              <option value="13">13</option>
-              <option value="14">14</option>
-              <option value="15">15</option>
-              <option value="16">16</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppCacheKInput">
-            <span>K Cache</span>
-            <select id="llamacppCacheKInput" class="native-settings-select">
-              <option value="f16">f16</option>
-              <option value="turbo4">turbo4</option>
-              <option value="turbo3">turbo3</option>
-              <option value="q8_0">q8_0</option>
-              <option value="q4_0">q4_0</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppCacheVInput">
-            <span>V Cache</span>
-            <select id="llamacppCacheVInput" class="native-settings-select">
-              <option value="f16">f16</option>
-              <option value="turbo3">turbo3</option>
-              <option value="turbo4">turbo4</option>
-              <option value="q8_0">q8_0</option>
-              <option value="q4_0">q4_0</option>
-            </select>
-          </label>
-        </div>
-        <div class="native-settings-row native-model-settings-paths">
-          <label class="native-settings-field" for="llamacppCacheRamInput">
-            <span>Prompt Cache</span>
-            <select id="llamacppCacheRamInput" class="native-settings-select">
-              <option value="0">Disabled</option>
-              <option value="2048">2 GB</option>
-              <option value="4096">4 GB</option>
-              <option value="8192">8 GB</option>
-              <option value="-1">Unlimited</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppReasoningInput">
-            <span>Reasoning</span>
-            <select id="llamacppReasoningInput" class="native-settings-select">
-              <option value="auto">Auto</option>
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppReasoningBudgetInput">
-            <span>Reasoning Budget</span>
-            <select id="llamacppReasoningBudgetInput" class="native-settings-select">
-              <option value="-1">Unlimited</option>
-              <option value="0">Immediate answer</option>
-              <option value="256">256 tokens</option>
-              <option value="512">512 tokens</option>
-              <option value="1024">1024 tokens</option>
-              <option value="1536">1536 tokens</option>
-              <option value="2048">2048 tokens</option>
-            </select>
-          </label>
-          <label class="native-settings-field" for="llamacppFitTargetInput">
-            <span>VRAM Reserve</span>
-            <select id="llamacppFitTargetInput" class="native-settings-select">
-              <option value="">Off</option>
-              <option value="512">512 MB</option>
-              <option value="1024">1 GB</option>
-              <option value="1536">1.5 GB</option>
-              <option value="2048">2 GB</option>
-            </select>
-          </label>
-        </div>
+        <details class="native-model-advanced">
+          <summary>Advanced runtime profile</summary>
+          <div class="native-settings-row native-model-settings-paths">
+            <label class="native-settings-field" for="llamacppContextInput">
+              <span>Context</span>
+              <select id="llamacppContextInput" class="native-settings-select">
+                <option value="16384">16K</option>
+                <option value="32768">32K</option>
+                <option value="65536">64K</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppBatchInput">
+              <span>Batch</span>
+              <select id="llamacppBatchInput" class="native-settings-select">
+                <option value="512">512</option>
+                <option value="1024">1024</option>
+                <option value="2048">2048</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppUbatchInput">
+              <span>uBatch</span>
+              <select id="llamacppUbatchInput" class="native-settings-select">
+                <option value="128">128</option>
+                <option value="256">256</option>
+                <option value="384">384</option>
+                <option value="512">512</option>
+              </select>
+            </label>
+          </div>
+          <div class="native-settings-row native-model-settings-paths">
+            <label class="native-settings-field" for="llamacppCpuMoeInput">
+              <span>CPU MoE</span>
+              <select id="llamacppCpuMoeInput" class="native-settings-select">
+                <option value="">Off</option>
+                <option value="13">13</option>
+                <option value="14">14</option>
+                <option value="15">15</option>
+                <option value="16">16</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppCacheKInput">
+              <span>K Cache</span>
+              <select id="llamacppCacheKInput" class="native-settings-select">
+                <option value="f16">f16</option>
+                <option value="turbo4">turbo4</option>
+                <option value="turbo3">turbo3</option>
+                <option value="q8_0">q8_0</option>
+                <option value="q4_0">q4_0</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppCacheVInput">
+              <span>V Cache</span>
+              <select id="llamacppCacheVInput" class="native-settings-select">
+                <option value="f16">f16</option>
+                <option value="turbo3">turbo3</option>
+                <option value="turbo4">turbo4</option>
+                <option value="q8_0">q8_0</option>
+                <option value="q4_0">q4_0</option>
+              </select>
+            </label>
+          </div>
+          <div class="native-settings-row native-model-settings-paths">
+            <label class="native-settings-field" for="llamacppCacheRamInput">
+              <span>Prompt Cache</span>
+              <select id="llamacppCacheRamInput" class="native-settings-select">
+                <option value="0">Disabled</option>
+                <option value="2048">2 GB</option>
+                <option value="4096">4 GB</option>
+                <option value="8192">8 GB</option>
+                <option value="-1">Unlimited</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppReasoningInput">
+              <span>Reasoning</span>
+              <select id="llamacppReasoningInput" class="native-settings-select">
+                <option value="auto">Auto</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppReasoningBudgetInput">
+              <span>Reasoning Budget</span>
+              <select id="llamacppReasoningBudgetInput" class="native-settings-select">
+                <option value="-1">Unlimited</option>
+                <option value="0">Immediate answer</option>
+                <option value="256">256 tokens</option>
+                <option value="512">512 tokens</option>
+                <option value="1024">1024 tokens</option>
+                <option value="1536">1536 tokens</option>
+                <option value="2048">2048 tokens</option>
+              </select>
+            </label>
+            <label class="native-settings-field" for="llamacppFitTargetInput">
+              <span>VRAM Reserve</span>
+              <select id="llamacppFitTargetInput" class="native-settings-select">
+                <option value="">Off</option>
+                <option value="512">512 MB</option>
+                <option value="1024">1 GB</option>
+                <option value="1536">1.5 GB</option>
+                <option value="2048">2 GB</option>
+              </select>
+            </label>
+          </div>
+        </details>
         <details class="native-model-advanced">
           <summary>Advanced startup paths</summary>
           <label class="native-settings-field native-settings-field-wide" for="llamacppLibraryPathInput">

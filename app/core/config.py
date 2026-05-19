@@ -112,6 +112,8 @@ class Settings:
     llamacpp_model_path_path: Path = _runtime_settings_file("llamacpp_model_path")
     llamacpp_library_path_path: Path = _runtime_settings_file("llamacpp_library_path")
     llamacpp_server_args_path: Path = _runtime_settings_file("llamacpp_server_args")
+    llamacpp_auto_start_path: Path = _runtime_settings_file("llamacpp_auto_start")
+    llamacpp_log_path_path: Path = _runtime_settings_file("llamacpp_log_path")
     pdf_unpaywall_fallback_enabled_path: Path = _runtime_settings_file("pdf_unpaywall_fallback_enabled")
     pdf_core_fallback_enabled_path: Path = _runtime_settings_file("pdf_core_fallback_enabled")
     pdf_arxiv_fallback_enabled_path: Path = _runtime_settings_file("pdf_arxiv_fallback_enabled")
@@ -130,6 +132,8 @@ class Settings:
     llamacpp_model_path: str = ""
     llamacpp_library_path: str = ""
     llamacpp_server_args: str = ""
+    llamacpp_auto_start: bool = True
+    llamacpp_log_path: str = ""
     request_user_agent: str = "NativeResearcher/0.1 (FastAPI Searcher AI Service)"
     pubmed_default_batch_size: int = 250
     pubmed_max_batch_size: int = 250
@@ -179,6 +183,8 @@ class Settings:
         llamacpp_model_path_path = _settings_path("LLAMACPP_MODEL_PATH_FILE", "llamacpp_model_path")
         llamacpp_library_path_path = _settings_path("LLAMACPP_LIBRARY_PATH_FILE", "llamacpp_library_path")
         llamacpp_server_args_path = _settings_path("LLAMACPP_SERVER_ARGS_FILE", "llamacpp_server_args")
+        llamacpp_auto_start_path = _settings_path("LLAMACPP_AUTO_START_FILE", "llamacpp_auto_start")
+        llamacpp_log_path_path = _settings_path("LLAMACPP_LOG_PATH_FILE", "llamacpp_log_path")
         pdf_unpaywall_fallback_enabled_path = Path(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED_FILE", str(_runtime_settings_file("pdf_unpaywall_fallback_enabled")))
         )
@@ -255,6 +261,11 @@ class Settings:
         llamacpp_model_file = os.getenv("LLAMACPP_MODEL_PATH") or _read_secret_file(llamacpp_model_path_path) or ""
         llamacpp_library_path = os.getenv("LLAMACPP_LIBRARY_PATH") or _read_secret_file(llamacpp_library_path_path) or ""
         llamacpp_server_args = os.getenv("LLAMACPP_SERVER_ARGS") or _read_secret_file(llamacpp_server_args_path) or ""
+        llamacpp_auto_start = _parse_bool(
+            os.getenv("LLAMACPP_AUTO_START") or _read_secret_file(llamacpp_auto_start_path),
+            True,
+        )
+        llamacpp_log_path = os.getenv("LLAMACPP_LOG_PATH") or _read_secret_file(llamacpp_log_path_path) or ""
         pdf_unpaywall_fallback_enabled = _parse_bool(
             os.getenv("PDF_UNPAYWALL_FALLBACK_ENABLED")
             or _read_first_secret_file(
@@ -314,6 +325,8 @@ class Settings:
             llamacpp_model_path_path=llamacpp_model_path_path,
             llamacpp_library_path_path=llamacpp_library_path_path,
             llamacpp_server_args_path=llamacpp_server_args_path,
+            llamacpp_auto_start_path=llamacpp_auto_start_path,
+            llamacpp_log_path_path=llamacpp_log_path_path,
             pdf_unpaywall_fallback_enabled_path=pdf_unpaywall_fallback_enabled_path,
             pdf_core_fallback_enabled_path=pdf_core_fallback_enabled_path,
             pdf_arxiv_fallback_enabled_path=pdf_arxiv_fallback_enabled_path,
@@ -332,6 +345,8 @@ class Settings:
             llamacpp_model_path=llamacpp_model_file.strip(),
             llamacpp_library_path=llamacpp_library_path.strip(),
             llamacpp_server_args=llamacpp_server_args.strip(),
+            llamacpp_auto_start=llamacpp_auto_start,
+            llamacpp_log_path=llamacpp_log_path.strip(),
             request_user_agent=os.getenv(
                 "REQUEST_USER_AGENT",
                 "NativeResearcher/0.1 (FastAPI Searcher AI Service)",

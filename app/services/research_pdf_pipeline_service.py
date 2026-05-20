@@ -20,6 +20,27 @@ class ResearchPdfPipelineService:
     def __init__(self, *, extraction_service: PDFExtractionService) -> None:
         self.extraction_service = extraction_service
 
+    def defer_pdf_screening(
+        self,
+        payload: ResearchPlanExecuteRequest,
+        plan: dict[str, Any],
+        response: ResearchPlanExecuteResponse,
+    ) -> None:
+        articles = pdf_screen_articles(response, payload.pdf_scope)
+        questions = research_plan_questions(plan)
+        response.run_trace.status = "awaiting_pdf_approval"
+        response.run_trace.meta["run_status"] = "awaiting_pdf_approval"
+        response.run_trace.meta["pdf_screening"] = {
+            "enabled": True,
+            "status": "awaiting_approval",
+            "reason": "autoprocess_disabled",
+            "article_count": len(articles),
+            "question_count": len(questions),
+            "pdf_scope": payload.pdf_scope,
+            "full_text_model": full_text_model_from_payload(payload) or "",
+        }
+        _set_stage_status(response, "pdf_screening", "awaiting_approval")
+
     async def run_pdf_screening(
         self,
         payload: ResearchPlanExecuteRequest,
@@ -30,6 +51,8 @@ class ResearchPdfPipelineService:
     ) -> PDFExtractionResponse | None:
         if not payload.pdf_extractor_enabled:
             response.run_trace.meta["pdf_screening"] = {"enabled": False}
+            response.run_trace.status = "completed"
+            response.run_trace.meta["run_status"] = "completed"
             _set_stage_status(response, "pdf_screening", "disabled")
             return None
 
@@ -45,6 +68,8 @@ class ResearchPdfPipelineService:
                 "article_count": len(articles),
                 "question_count": len(questions),
             }
+            response.run_trace.status = "completed"
+            response.run_trace.meta["run_status"] = "completed"
             _set_stage_status(response, "pdf_screening", "skipped")
             return None
 
@@ -72,6 +97,8 @@ class ResearchPdfPipelineService:
             )
         )
         response.run_trace.meta["pdf_screening"] = extraction_response.model_dump(mode="json")
+        response.run_trace.status = "completed"
+        response.run_trace.meta["run_status"] = "completed"
         _set_stage_status(response, "pdf_screening", "completed")
         if progress is not None:
             await progress(

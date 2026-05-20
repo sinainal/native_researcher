@@ -271,6 +271,8 @@ class ResearchExecutionService:
                 "selection_pool_count": len(selection_pool),
                 "selected_count": len(selected_articles),
                 "criteria_enabled": not criteria_disabled,
+                "execution_mode": "auto" if full_text_settings.get("autoprocess", True) else "manual",
+                "run_status": "completed",
                 "screening_status": "skipped" if criteria_disabled else "completed",
                 "raw_query_count": len(raw_queries),
                 "normalized_query_count": len(raw_queries),

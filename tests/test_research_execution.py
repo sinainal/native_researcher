@@ -119,6 +119,7 @@ def test_research_execution_plan_payload_disables_criteria_without_mutating_sour
     assert plan["criteria_mode"] == "disabled"
     assert plan["screening_criteria"] == []
     assert plan["exclusion_criteria"] == []
+    assert plan["full_text_settings"]["autoprocess"] is True
     assert plan["full_text_settings"]["full_text_model"] == "ollama:screen"
     assert original_plan["screening_criteria"] == [{"id": "topic_match"}]
 
@@ -248,6 +249,33 @@ def test_screening_agent_maps_label_scores_to_criterion_ids() -> None:
         )
         assert traces[0].criterion_scores["residue_evidence"] == 1.0
         assert traces[0].final_score == 1.0
+
+    asyncio.run(runner())
+
+
+def test_screening_agent_accepts_compact_output_contract() -> None:
+    async def runner() -> None:
+        service = ResearchScreeningService()
+        article = Article(id=1, pmid="", title="Alpha residue interaction", abstract="Residue interaction evidence.")
+        from app.services.research_candidate_normalizer import NormalizedResearchCandidate
+
+        candidate = NormalizedResearchCandidate(candidate_id="cand_1", article=article)
+        traces = service._normalize_agent_items(
+            [candidate],
+            {
+                "screening_criteria": [
+                    {"id": "residue_evidence", "label": "Residue Evidence", "description": "Residue evidence"}
+                ],
+                "exclusion_criteria": ["review"],
+            },
+            [{"id": "cand_1", "s": {"residue_evidence": 1}, "x": 0, "e": ["compact evidence"], "r": "ok"}],
+        )
+
+        assert traces[0].candidate_id == "cand_1"
+        assert traces[0].criterion_scores["residue_evidence"] == 1.0
+        assert traces[0].excluded is False
+        assert traces[0].evidence == ["compact evidence"]
+        assert traces[0].rationale == "ok"
 
     asyncio.run(runner())
 
@@ -446,6 +474,7 @@ def test_research_plan_execute_endpoint_dedupes_screens_and_persists_trace(monke
                 assert payload["run_trace"]["excluded_candidate_ids"] == ["cand_2"]
                 assert payload["run_trace"]["meta"]["full_text_settings"] == {
                     "pdf_extractor_enabled": True,
+                    "autoprocess": True,
                     "pdf_scope": "selected_backup",
                     "full_text_model": "llamacpp:qwen3.6-35b-a3b-q4_K_M",
                 }
@@ -653,6 +682,89 @@ def test_research_plan_execute_skips_screening_when_criteria_disabled_and_runs_p
                 pdf_screening = payload["run_trace"]["meta"]["pdf_screening"]
                 assert pdf_screening["success_count"] == 1
                 assert "Beta456" in pdf_screening["results"][0]["answers"][0]["answer"]
+
+    asyncio.run(runner())
+
+
+def test_research_plan_manual_mode_defers_pdf_screening(monkeypatch) -> None:
+    async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
+        candidates = json.loads(kwargs["messages"][1]["content"])["candidates"]
+        candidate_id = candidates[0]["candidate_id"]
+        yield {"message": {"tool_calls": [{"function": {"id": "screen_call", "name": "screen_research_candidates", "arguments": {"items": [
+            {
+                "id": candidate_id,
+                "s": {"residue_evidence": 1.0},
+                "x": 0,
+                "e": ["manual mode screened"],
+            }
+        ]}}}]}}
+
+    monkeypatch.setattr("app.services.research_screening_service.ollama_chat_stream", fake_ollama_chat_stream)
+
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = Settings(
+                download_root=root / "downloads",
+                workspace_root=root / "workspace",
+                helper_log_path=root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=root / "assistant_api_key.txt",
+                ncbi_api_key_path=root / "ncbi_api",
+                unpaywall_email_path=root / "unpaywall_email",
+                openalex_api_key_path=root / "openalex_api_key",
+                core_api_key_path=root / "core_api_key",
+                pubmed_oa_only_path=root / "pubmed_oa_only",
+                ai_primary_search_resource_path=root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=root / "pdf_arxiv_fallback_enabled",
+            )
+
+            class NoDownloadPDFService(FakePDFService):
+                async def download_articles(self, payload):  # noqa: ANN001
+                    raise AssertionError("manual mode must not download PDFs automatically")
+
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=NoDownloadPDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                project = await client.post("/app/projects", json={"name": "Manual PDF Test", "description": ""})
+                project_id = project.json()["id"]
+                plan = {
+                    "topic": "Manual receptor scan",
+                    "target_count_per_branch": 1,
+                    "active_databases": ["PubMed"],
+                    "candidate_budget": {"per_database": 2},
+                    "search_branches": [{"id": "alpha", "label": "Receptor alpha", "query": "receptor alpha"}],
+                    "screening_criteria": [{"id": "residue_evidence", "label": "Residue evidence"}],
+                    "exclusion_criteria": ["review"],
+                    "extraction_questions": ["Which residue contacts dopamine?"],
+                }
+                response = await client.post(
+                    f"/app/projects/{project_id}/research-plan/execute",
+                    json={
+                        "plan": plan,
+                        "screening_model": "ollama:test-screen-model",
+                        "pdf_extractor_enabled": True,
+                        "autoprocess": False,
+                        "pdf_scope": "selected",
+                    },
+                )
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["run_trace"]["status"] == "awaiting_pdf_approval"
+                assert payload["run_trace"]["meta"]["execution_mode"] == "manual"
+                assert payload["run_trace"]["meta"]["run_status"] == "awaiting_pdf_approval"
+                assert payload["run_trace"]["meta"]["stage_statuses"]["pdf_screening"] == "awaiting_approval"
+                assert payload["run_trace"]["meta"]["pdf_screening"]["status"] == "awaiting_approval"
+                assert payload["run_trace"]["meta"]["full_text_settings"]["autoprocess"] is False
 
     asyncio.run(runner())
 

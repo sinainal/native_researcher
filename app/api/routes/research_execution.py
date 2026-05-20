@@ -63,7 +63,10 @@ async def execute_research_plan(
             api_key=payload.api_key,
             thinking_level=payload.thinking_level,
         )
-        await pdf_pipeline_service.run_pdf_screening(payload, plan, response)
+        if payload.pdf_extractor_enabled and not payload.autoprocess:
+            pdf_pipeline_service.defer_pdf_screening(payload, plan, response)
+        else:
+            await pdf_pipeline_service.run_pdf_screening(payload, plan, response)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -101,7 +104,17 @@ async def execute_research_plan_stream(
                     thinking_level=payload.thinking_level,
                     progress=progress,
                 )
-                await pdf_pipeline_service.run_pdf_screening(payload, plan, response, progress=progress)
+                if payload.pdf_extractor_enabled and not payload.autoprocess:
+                    pdf_pipeline_service.defer_pdf_screening(payload, plan, response)
+                    await progress(
+                        {
+                            "stage": "pdf_screening_awaiting_approval",
+                            "message": "PDF/full-text screening is waiting for manual approval.",
+                            "pdf_scope": payload.pdf_scope,
+                        }
+                    )
+                else:
+                    await pdf_pipeline_service.run_pdf_screening(payload, plan, response, progress=progress)
                 run_service.persist_execution(project_id, response)
                 run_service.log_execution(project_id, response)
                 await queue.put({"type": "final", "response": response.model_dump(mode="json")})

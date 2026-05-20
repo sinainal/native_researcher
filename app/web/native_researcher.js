@@ -118,6 +118,7 @@ const els = {
   agentScreeningModelInput: document.getElementById("agentScreeningModelInput"),
   agentCriteriaEnabledInput: document.getElementById("agentCriteriaEnabledInput"),
   agentPdfExtractorEnabledInput: document.getElementById("agentPdfExtractorEnabledInput"),
+  agentAutoprocessEnabledInput: document.getElementById("agentAutoprocessEnabledInput"),
   agentFullTextModelInput: document.getElementById("agentFullTextModelInput"),
   agentPdfScopeInput: document.getElementById("agentPdfScopeInput"),
   assistantHistoryToggleBtn: document.getElementById("assistantHistoryToggleBtn"),
@@ -282,6 +283,7 @@ const researchPlannerModeStorageKey = "native_researcher_research_planner_mode";
 const agentScreeningModelStorageKey = "native_researcher_agent_screening_model";
 const agentCriteriaEnabledStorageKey = "native_researcher_agent_criteria_enabled";
 const agentPdfExtractorEnabledStorageKey = "native_researcher_agent_pdf_extractor_enabled";
+const agentAutoprocessEnabledStorageKey = "native_researcher_agent_autoprocess_enabled";
 const agentFullTextModelStorageKey = "native_researcher_agent_full_text_model";
 const agentPdfScopeStorageKey = "native_researcher_agent_pdf_scope";
 const stateModel = localStorage.getItem(assistantModelStorageKey) || "Gemini 3 Flash";
@@ -348,6 +350,7 @@ const runtime = {
   agentScreeningModel: localStorage.getItem(agentScreeningModelStorageKey) || "",
   agentCriteriaEnabled: localStorage.getItem(agentCriteriaEnabledStorageKey) !== "false",
   agentPdfExtractorEnabled: localStorage.getItem(agentPdfExtractorEnabledStorageKey) !== "false",
+  agentAutoprocessEnabled: localStorage.getItem(agentAutoprocessEnabledStorageKey) !== "false",
   agentFullTextModel: localStorage.getItem(agentFullTextModelStorageKey) || "",
   agentPdfScope: normalizePdfAgentScope(localStorage.getItem(agentPdfScopeStorageKey), "selected_backup"),
   assistantModel: stateModel,
@@ -2060,6 +2063,9 @@ function renderAgentSettingsMenu() {
   }
   if (els.agentPdfExtractorEnabledInput) {
     els.agentPdfExtractorEnabledInput.checked = Boolean(runtime.agentPdfExtractorEnabled);
+  }
+  if (els.agentAutoprocessEnabledInput) {
+    els.agentAutoprocessEnabledInput.checked = Boolean(runtime.agentAutoprocessEnabled);
   }
   if (els.agentFullTextModelInput) {
     const selected = runtime.agentFullTextModel || runtime.agentScreeningModel || runtime.assistantModel;
@@ -5766,6 +5772,7 @@ async function executeResearchPlan(messageId, actionIndex, trigger = null) {
           screening_model: runtime.agentScreeningModel || runtime.assistantModel,
           criteria_enabled: Boolean(runtime.agentCriteriaEnabled),
           pdf_extractor_enabled: Boolean(runtime.agentPdfExtractorEnabled),
+          autoprocess: Boolean(runtime.agentAutoprocessEnabled),
           pdf_scope: normalizePdfAgentScope(runtime.agentPdfScope, "selected_backup"),
           full_text_model: runtime.agentFullTextModel || runtime.agentScreeningModel || runtime.assistantModel,
           api_key: isLocalAssistantModel(runtime.agentScreeningModel || runtime.assistantModel) ? "" : runtime.apiKey,
@@ -7531,6 +7538,14 @@ function bindEvents() {
     renderAgentSettingsMenu();
     trackAppEvent("info", "agent_pdf_extractor_setting_updated", "Agent PDF extractor setting updated.", {
       pdf_extractor_enabled: runtime.agentPdfExtractorEnabled,
+    });
+  });
+  els.agentAutoprocessEnabledInput?.addEventListener("change", () => {
+    runtime.agentAutoprocessEnabled = Boolean(els.agentAutoprocessEnabledInput?.checked);
+    localStorage.setItem(agentAutoprocessEnabledStorageKey, runtime.agentAutoprocessEnabled ? "true" : "false");
+    renderAgentSettingsMenu();
+    trackAppEvent("info", "agent_autoprocess_setting_updated", "Agent autoprocess setting updated.", {
+      autoprocess: runtime.agentAutoprocessEnabled,
     });
   });
   els.agentFullTextModelInput?.addEventListener("change", () => {

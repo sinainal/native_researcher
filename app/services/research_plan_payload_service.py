@@ -14,6 +14,7 @@ def build_execution_plan(payload: ResearchPlanExecuteRequest) -> dict:
         plan["exclusion_criteria"] = []
     plan["full_text_settings"] = {
         "pdf_extractor_enabled": bool(payload.pdf_extractor_enabled),
+        "autoprocess": bool(payload.autoprocess),
         "pdf_scope": payload.pdf_scope,
         "full_text_model": full_text_model_from_payload(payload) or "",
     }

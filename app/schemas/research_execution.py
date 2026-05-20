@@ -15,6 +15,7 @@ class ResearchPlanExecuteRequest(BaseModel):
     screening_model: str | None = Field(default=None, max_length=200)
     criteria_enabled: bool = True
     pdf_extractor_enabled: bool = True
+    autoprocess: bool = True
     pdf_scope: Literal["selected", "selected_backup", "all"] = "selected_backup"
     full_text_model: str | None = Field(default=None, max_length=200)
     api_key: str = Field(default="", max_length=500)
@@ -86,6 +87,7 @@ class ResearchSelectionTrace(BaseModel):
 class ResearchPlanRunTrace(BaseModel):
     id: str
     created_at: str
+    status: Literal["completed", "awaiting_pdf_approval", "failed"] = "completed"
     topic: str = ""
     objective: str = ""
     target_count_per_branch: int = 20

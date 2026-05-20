@@ -150,31 +150,38 @@ class ResearchScreeningService:
         progress: ProgressCallback | None,
     ) -> list[Any]:
         system_instruction = (
-            "screening subagent: screen one literature candidate. "
-            "Use only the provided candidate and criteria. "
+            "screening subagent: screen the provided literature candidate batch. "
+            "Use only the provided candidates and criteria. "
             "Call `screen_research_candidates` exactly once. "
             "No prose."
         )
+        criteria_payload = [
+            {
+                "id": criterion["id"],
+                "label": criterion["label"],
+                "weight": criterion["weight"],
+            }
+            for criterion in _criteria(plan)
+        ]
         user_prompt = json.dumps(
             {
-                "task": "Score this candidate. Return exactly one item for the provided candidate_id.",
+                "task": "Score each candidate. Return exactly one item per provided candidate_id.",
                 "score_rules": {
-                    "criterion_scores": "0.0 absent, 0.5 partial, 1.0 explicit",
-                    "exclusion_scores": "1.0 clearly excluded, otherwise 0.0",
+                    "s": "criterion scores keyed by criterion id: 0 absent, 0.5 partial, 1 explicit",
+                    "x": "1 if excluded by exclusion criteria, otherwise 0",
+                    "e": "up to 2 short evidence strings from title/abstract",
                 },
                 "plan": {
                     "topic": plan.get("topic") or "",
                     "objective": plan.get("objective") or "",
-                    "screening_criteria": plan.get("screening_criteria") or [],
+                    "criteria": criteria_payload,
                     "exclusion_criteria": plan.get("exclusion_criteria") or [],
                 },
-                "required_output_shape": {
-                    "candidate_id": "cand_1",
-                    "criterion_scores": {"criterion_id": 0.0},
-                    "exclusion_scores": {"exclusion_1": 0.0},
-                    "confidence": 0.0,
-                    "evidence": ["short evidence strings from title/abstract"],
-                    "rationale": "short reason",
+                "preferred_output_shape": {
+                    "id": "cand_1",
+                    "s": {"criterion_id": 0.0},
+                    "x": 0,
+                    "e": ["short evidence"],
                 },
                 "candidates": [_candidate_payload(candidate) for candidate in candidates],
             },
@@ -376,9 +383,8 @@ class ResearchScreeningService:
                         "content": (
                             "Your previous `screen_research_candidates` function call had invalid arguments. "
                             "Call `screen_research_candidates` again now with exactly this argument shape: "
-                            '{"items":[{"candidate_id":"cand_1","criterion_scores":{"criterion_id":0.0},'
-                            '"exclusion_scores":{"exclusion_1":0.0},"confidence":0.0,'
-                            '"evidence":["short evidence from the abstract"],"rationale":"short reason"}]}. '
+                            '{"items":[{"id":"cand_1","s":{"criterion_id":0.0},"x":0,'
+                            '"e":["short evidence from the abstract"]}]}. '
                             "Include exactly one item for the provided candidate_id. Do not answer in prose."
                         ),
                     },
@@ -416,9 +422,8 @@ class ResearchScreeningService:
                                 "You returned text/JSON instead of calling the required function. "
                                 "Do not write JSON in the message content. "
                                 "Call `screen_research_candidates` now with exactly this argument shape: "
-                                '{"items":[{"candidate_id":"cand_1","criterion_scores":{"criterion_id":0.0},'
-                                '"exclusion_scores":{"exclusion_1":0.0},"confidence":0.0,'
-                                '"evidence":["short evidence from the abstract"],"rationale":"short reason"}]}. '
+                                '{"items":[{"id":"cand_1","s":{"criterion_id":0.0},"x":0,'
+                                '"e":["short evidence from the abstract"]}]}. '
                                 "Include exactly one item for the provided candidate_id."
                             ),
                         },
@@ -451,9 +456,8 @@ class ResearchScreeningService:
                             "Error: your previous response did not call `screen_research_candidates` "
                             "and did not contain parseable screening JSON. Retry now. "
                             "Call `screen_research_candidates` with exactly this argument shape: "
-                            '{"items":[{"candidate_id":"cand_1","criterion_scores":{"criterion_id":0.0},'
-                            '"exclusion_scores":{"exclusion_1":0.0},"confidence":0.0,'
-                            '"evidence":["short evidence from the abstract"],"rationale":"short reason"}]}. '
+                            '{"items":[{"id":"cand_1","s":{"criterion_id":0.0},"x":0,'
+                            '"e":["short evidence from the abstract"]}]}. '
                             "Include exactly one item for the provided candidate_id. Do not answer in prose."
                         ),
                     },
@@ -481,7 +485,12 @@ class ResearchScreeningService:
                                     "type": "object",
                                     "properties": {
                                         "candidate_id": {"type": "string"},
+                                        "id": {"type": "string"},
                                         "criterion_scores": {
+                                            "type": "object",
+                                            "additionalProperties": {"type": "number"},
+                                        },
+                                        "s": {
                                             "type": "object",
                                             "additionalProperties": {"type": "number"},
                                         },
@@ -489,14 +498,19 @@ class ResearchScreeningService:
                                             "type": "object",
                                             "additionalProperties": {"type": "number"},
                                         },
+                                        "x": {"type": "number"},
                                         "confidence": {"type": "number"},
                                         "evidence": {
                                             "type": "array",
                                             "items": {"type": "string"},
                                         },
+                                        "e": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
                                         "rationale": {"type": "string"},
+                                        "r": {"type": "string"},
                                     },
-                                    "required": ["candidate_id", "criterion_scores", "exclusion_scores"],
                                 },
                             }
                         },
@@ -517,7 +531,7 @@ class ResearchScreeningService:
         exclusions = [str(item).strip() for item in plan.get("exclusion_criteria") or [] if str(item).strip()]
         criterion_aliases = _criterion_aliases(criteria)
         item_by_id = {
-            str(item.get("candidate_id") or ""): item
+            str(item.get("candidate_id") or item.get("id") or ""): item
             for item in items
             if isinstance(item, dict)
         }
@@ -547,17 +561,21 @@ class ResearchScreeningService:
                     )
                 )
                 continue
-            raw_criterion_scores = item.get("criterion_scores") or item.get("criteria_scores") or item.get("scores") or {}
+            raw_criterion_scores = (
+                item.get("criterion_scores")
+                or item.get("criteria_scores")
+                or item.get("scores")
+                or item.get("s")
+                or {}
+            )
             criterion_scores = _normalize_criterion_scores(
                 raw_criterion_scores,
                 criteria,
                 criterion_aliases,
             )
-            exclusion_scores = {
-                _exclusion_id(index): _clamp_score((item.get("exclusion_scores") or {}).get(_exclusion_id(index), 0))
-                for index, _exclusion in enumerate(exclusions, start=1)
-            }
-            excluded = any(score >= 0.75 for score in exclusion_scores.values())
+            exclusion_scores = _normalize_exclusion_scores(item, exclusions)
+            explicit_excluded = _clamp_score(item.get("x", item.get("excluded", item.get("exclude", 0)))) >= 0.75
+            excluded = explicit_excluded or any(score >= 0.75 for score in exclusion_scores.values())
             traces.append(
                 ResearchScreeningTrace(
                     candidate_id=candidate.candidate_id,
@@ -568,10 +586,10 @@ class ResearchScreeningService:
                     matched_branch_ids=sorted({match.branch_id for match in candidate.matches if match.branch_id}),
                     evidence=[
                         str(value)[:500]
-                        for value in (item.get("evidence") or [])
+                        for value in (item.get("evidence") or item.get("e") or [])
                         if str(value).strip()
                     ][:5],
-                    rationale=str(item.get("rationale") or "").strip()[:1000],
+                    rationale=str(item.get("rationale") or item.get("r") or "").strip()[:1000],
                 )
             )
         return traces
@@ -690,6 +708,22 @@ def _normalize_criterion_scores(
     return normalized
 
 
+def _normalize_exclusion_scores(item: dict[str, Any], exclusions: list[str]) -> dict[str, float]:
+    raw_scores = item.get("exclusion_scores") or item.get("x_scores") or {}
+    normalized = {
+        _exclusion_id(index): 0.0
+        for index, _exclusion in enumerate(exclusions, start=1)
+    }
+    if isinstance(raw_scores, dict):
+        for exclusion_id in normalized:
+            normalized[exclusion_id] = _clamp_score(raw_scores.get(exclusion_id, 0))
+    compact_excluded = _clamp_score(item.get("x", item.get("excluded", item.get("exclude", 0)))) >= 0.75
+    if compact_excluded and normalized:
+        first_key = next(iter(normalized))
+        normalized[first_key] = 1.0
+    return normalized
+
+
 def _keyword_score(text: str, terms: list[str]) -> float:
     if not terms:
         return 0.0
@@ -791,7 +825,7 @@ def _tool_call_screening_items(args: dict[str, Any]) -> list[Any]:
     nested = _find_screening_items(args)
     if nested is not None:
         return nested
-    if isinstance(args.get("candidate_id"), str):
+    if isinstance(args.get("candidate_id") or args.get("id"), str):
         return [args]
     keys = ", ".join(sorted(str(key) for key in args.keys())) or "no keys"
     raise RuntimeError(f"Screening function call did not include a candidate score list. Argument keys: {keys}.")
@@ -811,7 +845,11 @@ def _find_screening_items(value: Any) -> list[Any] | None:
 def _looks_like_screening_items(value: list[Any]) -> bool:
     if not value:
         return True
-    return any(isinstance(item, dict) and isinstance(item.get("candidate_id"), str) for item in value)
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("candidate_id") or item.get("id"), str)
+        for item in value
+    )
 
 
 def _clamp_score(value: Any) -> float:

@@ -13,6 +13,8 @@ from app.llm.tool_calls import normalized_tool_calls_from_message, tool_calls_fr
 LLAMACPP_DEFAULT_TEMPERATURE = 0.7
 LLAMACPP_DEFAULT_TOP_P = 0.9
 LLAMACPP_DEFAULT_MAX_TOKENS = 4096
+LLAMACPP_DEFAULT_REASONING_BUDGET_TOKENS = 768
+LLAMACPP_LOW_REASONING_BUDGET_TOKENS = 384
 
 
 def _normalize_openai_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +91,13 @@ def _chat_payload(
     level = str(thinking_level or "off").strip().lower()
     if level in {"on", "off"}:
         payload["chat_template_kwargs"] = {"enable_thinking": level == "on"}
+        if level == "on":
+            payload["thinking_budget_tokens"] = LLAMACPP_DEFAULT_REASONING_BUDGET_TOKENS
+    elif level == "low":
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
+        payload["thinking_budget_tokens"] = LLAMACPP_LOW_REASONING_BUDGET_TOKENS
+    elif level == "max":
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
     return payload
 
 

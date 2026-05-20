@@ -44,7 +44,8 @@ Notes:
 
 - `llama.cpp-turbo3-cuda` is not compatible with this IQ4_NL file on this machine. It fails at load time with `qwen35moe.rope.dimension_sections has wrong array length; expected 3, got 4`.
 - The latest CUDA build does not support `turbo3` KV cache types. It accepts standard cache types such as `f16`, `q8_0`, `q4_0`, and `iq4_nl`.
-- The safest measured profile remains 64k context, flash attention on, direct I/O on, `-b 512`, `-ub 128`.
+- The practical default profile is now 16k context, flash attention on, direct I/O on, partial CPU-MoE, q4 KV cache, `-b 512`, `-ub 128`.
+- The older 64k full-F16-KV command is kept as a long-context fallback, but it is less reliable on a busy 16 GB card.
 
 Recommended command:
 
@@ -53,10 +54,11 @@ env LD_LIBRARY_PATH="/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-c
   "/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-cuda130/bin/llama-server" \
   -m "/home/sina/Downloads/LLMs/LLm test/models/qwen36-unsloth/Qwen3.6-35B-A3B-UD-IQ4_NL.gguf" \
   --host 127.0.0.1 --port 8100 \
-  -c 65536 -fa on -b 512 -ub 128 \
+  -c 16384 -fa on -b 512 -ub 128 \
   --threads 10 --threads-batch 16 \
   --parallel 1 -np 1 --no-cont-batching --no-warmup \
   --reasoning off --direct-io --cache-ram 0 \
+  --n-cpu-moe 8 -ctk q4_0 -ctv q4_0 \
   --alias qwen3.6-iq4nl-latest-b512
 ```
 
@@ -122,7 +124,8 @@ Native Researcher now exposes the measured llama.cpp profiles through `app/llm/l
 - `qwen36-q4km-safe`: `--n-cpu-moe 15`, `-ctk turbo4`, `-ctv turbo3`, 32K context, direct I/O.
 - `qwen36-q4km-fast-risky`: `--n-cpu-moe 14`, `-ctk turbo4`, `-ctv turbo3`, 32K context, lower VRAM margin.
 - `qwen36-q4km-64k-safe`: safe Q4_K_M settings with 64K context.
-- `qwen36-iq4nl-safe`: latest CUDA 13 IQ4_NL settings with 64K context.
+- `qwen36-iq4nl-safe`: measured CUDA 13 IQ4_NL settings with 16K context, `--n-cpu-moe 8`, q4 KV cache, direct I/O.
+- `qwen36-iq4nl-64k-safe`: long-context IQ4_NL fallback using the older conservative 64K/F16 KV runtime.
 - `gemma4-iq4nl-safe`: existing Gemma 4 IQ4_NL full-GPU settings.
 
 The benchmark CLI can now start llama-server with one of these profiles:

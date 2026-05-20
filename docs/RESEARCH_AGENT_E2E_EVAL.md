@@ -134,6 +134,61 @@ Conclusion:
 - Quality was mixed: good D1-D5 branch coverage and good selected/rejected decisions at batch 3, but weak rationale completeness and batch-5 instability.
 - For this hardware, IQ3_S remains more practical for Qwen-family local screening unless the IQ4_NL runtime profile is improved.
 
+## 2026-05-21 Qwen IQ4_NL CPU-MoE Retest
+
+The local `LLMs` benchmark logs showed the faster Qwen 3.6 runs were not the previous `-ngl 32` CPU-offload path. They used full layer offload with partial CPU-MoE and q4 KV cache. The built-in `qwen36-iq4nl-safe` profile now uses that path by default:
+
+```text
+-c 16384 -b 512 -ub 128 -ngl all --flash-attn on --n-cpu-moe 8 -ctk q4_0 -ctv q4_0 --direct-io
+```
+
+The llama.cpp provider also caps normal `thinking_level=on` reasoning to 768 tokens per request. `thinking_level=max` is still available for intentionally unbounded runs.
+
+Limited retest command:
+
+```bash
+.venv/bin/python scripts/research_agent_e2e_eval.py \
+  --models Qwen3.6-35B-A3B-UD-IQ4_NL \
+  --thinking-level on \
+  --planner-prompts qwen_compact_dopamine_series \
+  --batch-sizes 3,5 \
+  --skip-residue-screening \
+  --out output/evals/research_agent_e2e/qwen_iq4nl_compact_think_on_cpumoe_bounded
+```
+
+Prompt-only retest after tightening branch-query wording:
+
+```bash
+.venv/bin/python scripts/research_agent_e2e_eval.py \
+  --models Qwen3.6-35B-A3B-UD-IQ4_NL \
+  --thinking-level on \
+  --planner-prompts qwen_compact_dopamine_series \
+  --skip-series-screening \
+  --skip-residue-screening \
+  --skip-full-execution \
+  --out output/evals/research_agent_e2e/qwen_iq4nl_compact_prompt2_planner
+```
+
+Results:
+
+| Run | Planner | D1-D5 batch 3 | D1-D5 batch 5 | PDF extraction | Engine eval TPS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Compact prompt, bounded thinking | 0.55 / 71.861s | 0.922 / 59.069s | 0.875 / 41.691s | pass / 63.466s | ~59-61 |
+| Prompt v2 planner-only | 0.65 / 178.533s | n/a | n/a | n/a | ~60 |
+
+Manual read:
+
+- The compact prompt fixed the earlier Qwen collapse: it produced five D1-D5 branches, four criteria, and seven extraction questions.
+- The first compact version made branch queries too broad (`D1 OR DRD1`). Prompt v2 fixed this to receptor-context queries such as `dopamine D1 receptor OR DRD1 OR D1R`.
+- Screening decisions were good: both batch sizes selected all five receptor papers and rejected the review/transporter/serotonin distractors.
+- Rationale coverage remains weaker than Gemma (`0.375` at batch 3 and `0.0` at batch 5), so Qwen still needs output-format work for auditability.
+- PDF/XML extraction succeeded and found the `Alpha123` evidence.
+
+Conclusion:
+
+- The poor Qwen IQ4_NL result was partly runtime/profile related and partly prompt related. The CPU-MoE profile restores the expected ~60 tok/s generation band, while the compact prompt restores the D1-D5 branch shape.
+- Qwen is still more verbose in thinking mode than Gemma. Bounded reasoning is necessary for agent flows; use `max` only for targeted experiments.
+
 ## Interpretation
 
 - Both target local models can complete the staged Research Agent flow, abstract screening, and full-text extraction fixture.

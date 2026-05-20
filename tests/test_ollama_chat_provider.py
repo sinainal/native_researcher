@@ -21,7 +21,12 @@ from app.llm.ollama import (
     _ollama_thinking_budget,
     extract_ollama_tool_calls,
 )
-from app.llm.llamacpp import _chat_payload, _normalize_openai_message
+from app.llm.llamacpp import (
+    LLAMACPP_DEFAULT_REASONING_BUDGET_TOKENS,
+    LLAMACPP_LOW_REASONING_BUDGET_TOKENS,
+    _chat_payload,
+    _normalize_openai_message,
+)
 from app.schemas.helper import HelperArticle, HelperChatRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.services.agent.helper_ai_service import HelperAIService, HelperThreadState
@@ -147,6 +152,37 @@ def test_llamacpp_payload_uses_auto_for_forced_tool_choice_object() -> None:
     )
 
     assert payload["tool_choice"] == "auto"
+
+
+def test_llamacpp_payload_caps_reasoning_budget_for_thinking_modes() -> None:
+    on_payload = _chat_payload(
+        model="qwen",
+        messages=[{"role": "user", "content": "plan"}],
+        tools=None,
+        stream=False,
+        thinking_level="on",
+    )
+    low_payload = _chat_payload(
+        model="qwen",
+        messages=[{"role": "user", "content": "plan"}],
+        tools=None,
+        stream=False,
+        thinking_level="low",
+    )
+    max_payload = _chat_payload(
+        model="qwen",
+        messages=[{"role": "user", "content": "plan"}],
+        tools=None,
+        stream=False,
+        thinking_level="max",
+    )
+
+    assert on_payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert on_payload["thinking_budget_tokens"] == LLAMACPP_DEFAULT_REASONING_BUDGET_TOKENS
+    assert low_payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert low_payload["thinking_budget_tokens"] == LLAMACPP_LOW_REASONING_BUDGET_TOKENS
+    assert max_payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert "thinking_budget_tokens" not in max_payload
 
 
 def test_ollama_stream_parser_splits_think_and_preserves_spacing() -> None:

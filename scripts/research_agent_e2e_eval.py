@@ -66,6 +66,21 @@ DOPAMINE_SERIES_PROMPT = (
     "exact evidence quote, and uncertainty."
 )
 
+QWEN_COMPACT_DOPAMINE_SERIES_PROMPT = (
+    "Create a research execution plan only. Do not answer the biology question. "
+    "Return concise tool arguments for create_research_plan. Task: find primary papers for dopamine receptor "
+    "subtypes D1, D2, D3, D4, and D5, then compare subtype-specific binding, signaling, residue, pathway, "
+    "and functional assay evidence. Make exactly five search branches: D1/DRD1, D2/DRD2, D3/DRD3, D4/DRD4, "
+    "and D5/DRD5. Branch queries must be short receptor-context alias queries, not long PubMed syntax: "
+    "include the phrase dopamine receptor plus the subtype aliases, for example "
+    "'dopamine D1 receptor OR DRD1 OR D1R'. Do not use bare D1/D2/D3/D4/D5 alone. "
+    "Use at most four screening criteria: primary paper, exact D1-D5 subtype match, receptor-level evidence, "
+    "and exclude reviews/transporters/unrelated receptor families. Use short criteria ids. "
+    "Use 5-7 extraction questions that each ask for one field: subtype, ligand or perturbation, assay or model, "
+    "endpoint/pathway, effect direction, exact evidence quote, and uncertainty. "
+    "Avoid disease-model expansion unless receptor-level evidence is explicit."
+)
+
 SCREENING_PLAN = {
     "topic": "Dopamine receptor residue interaction evidence",
     "objective": "Find primary papers that report exact dopamine receptor residue or binding-site interactions.",
@@ -378,9 +393,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-timeout-s", type=int, default=420, help="Per-model planner timeout.")
     parser.add_argument("--thinking-level", default="off", choices=["off", "on", "low", "max"], help="Thinking level for model calls.")
     parser.add_argument("--n-gpu-layers", default="", help="Optional llama.cpp -ngl override for tight-VRAM eval runs.")
+    parser.add_argument(
+        "--planner-prompts",
+        default="nanoplastic_dopamine,dopamine_d1_d5_series",
+        help="Comma-separated planner prompts: nanoplastic_dopamine,dopamine_d1_d5_series,qwen_compact_dopamine_series.",
+    )
+    parser.add_argument("--skip-residue-screening", action="store_true", help="Skip residue triage screening eval.")
+    parser.add_argument("--skip-series-screening", action="store_true", help="Skip D1-D5 series screening eval.")
+    parser.add_argument("--skip-full-execution", action="store_true", help="Skip full execution/PDF extraction eval.")
     parser.add_argument("--skip-planner", action="store_true", help="Skip staged planner eval.")
     parser.add_argument("--skip-pdf-model", action="store_true", help="Use deterministic PDF extraction instead of model extraction.")
     return parser.parse_args()
+
+
+def selected_planner_prompts(raw: str) -> list[tuple[str, str]]:
+    registry = {
+        "nanoplastic_dopamine": DEFAULT_NANOPLASTIC_DOPAMINE_PROMPT,
+        "dopamine_d1_d5_series": DOPAMINE_SERIES_PROMPT,
+        "qwen_compact_dopamine_series": QWEN_COMPACT_DOPAMINE_SERIES_PROMPT,
+    }
+    names = [item.strip() for item in str(raw or "").split(",") if item.strip()]
+    prompts: list[tuple[str, str]] = []
+    for name in names:
+        if name not in registry:
+            available = ", ".join(sorted(registry))
+            raise SystemExit(f"Unknown planner prompt '{name}'. Available: {available}")
+        prompts.append((name, registry[name]))
+    return prompts or [("dopamine_d1_d5_series", DOPAMINE_SERIES_PROMPT)]
 
 
 def resolve_targets(settings: Settings, model_ids: list[str]) -> list[ModelTarget]:
@@ -796,33 +835,38 @@ async def run_model_eval(args: argparse.Namespace, settings: Settings, target: M
                     settings,
                     target,
                     args.planner_timeout_s,
-                    prompt_name="nanoplastic_dopamine",
-                    prompt=DEFAULT_NANOPLASTIC_DOPAMINE_PROMPT,
+                    prompt_name=prompt_name,
+                    prompt=prompt,
                     thinking_level=args.thinking_level,
-                ),
-                await run_planner_eval(
-                    settings,
-                    target,
-                    args.planner_timeout_s,
-                    prompt_name="dopamine_d1_d5_series",
-                    prompt=DOPAMINE_SERIES_PROMPT,
-                    thinking_level=args.thinking_level,
-                ),
+                )
+                for prompt_name, prompt in selected_planner_prompts(args.planner_prompts)
             ]
         )
-        screening = await run_screening_eval(settings, target, batch_sizes, thinking_level=args.thinking_level)
-        dopamine_series_screening = await run_dopamine_series_screening_eval(
-            settings,
-            target,
-            batch_sizes,
-            thinking_level=args.thinking_level,
+        screening = (
+            []
+            if args.skip_residue_screening
+            else await run_screening_eval(settings, target, batch_sizes, thinking_level=args.thinking_level)
         )
-        full_execution = await run_full_execution_eval(
-            settings,
-            target,
-            model_out,
-            use_pdf_model=not args.skip_pdf_model,
-            thinking_level=args.thinking_level,
+        dopamine_series_screening = (
+            []
+            if args.skip_series_screening
+            else await run_dopamine_series_screening_eval(
+                settings,
+                target,
+                batch_sizes,
+                thinking_level=args.thinking_level,
+            )
+        )
+        full_execution = (
+            {"skipped": True, "ok": None}
+            if args.skip_full_execution
+            else await run_full_execution_eval(
+                settings,
+                target,
+                model_out,
+                use_pdf_model=not args.skip_pdf_model,
+                thinking_level=args.thinking_level,
+            )
         )
         result = {
             "model": target.id,

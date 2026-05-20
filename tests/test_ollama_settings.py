@@ -212,6 +212,7 @@ def test_llamacpp_settings_discovers_local_gguf_models(monkeypatch) -> None:
                 qwen_item = next(item for item in payload["models"] if item["id"] == "Qwen3.6-35B-A3B-UD-IQ4_NL")
                 assert qwen_item["path"] == str(qwen_model.resolve())
                 assert qwen_item["profile"] == "qwen36-iq4nl-safe"
+                assert any(profile["id"] == "qwen36-iq4nl-64k-safe" for profile in payload["profiles"])
 
     import asyncio
 

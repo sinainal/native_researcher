@@ -25,6 +25,8 @@ def profile_for_llamacpp_model(path: Path) -> str | None:
     if "qwen3.6" in name or "qwen36" in name:
         if "iq4_nl" in name or "iq4-nl" in name:
             return "qwen36-iq4nl-safe"
+        if "iq3_s" in name or "iq3-s" in name or "iq3s" in name:
+            return "qwen36-iq3s-safe"
         if "q4_k_m" in name or "q4-k-m" in name or "q4km" in name:
             return "qwen36-q4km-safe"
     if "gemma-4" in name or "gemma4" in name:
@@ -46,11 +48,22 @@ def _path_list_from_env(*names: str) -> list[Path]:
     return roots
 
 
+def _inferred_roots_from_configured_model(configured_model: str) -> list[Path]:
+    if not configured_model:
+        return []
+    model_path = Path(configured_model).expanduser()
+    roots = [model_path.parent]
+    for parent in model_path.parents:
+        if parent.name.lower() == "llms":
+            roots.append(parent)
+            break
+    return roots
+
+
 def llamacpp_discovery_roots(settings: Any | None = None) -> list[Path]:
     roots = _path_list_from_env("LLAMACPP_MODEL_ROOTS", "LOCAL_LLM_MODEL_ROOTS")
     configured_model = str(getattr(settings, "llamacpp_model_path", "") or "").strip() if settings is not None else ""
-    if configured_model:
-        roots.append(Path(configured_model).expanduser().parent)
+    roots.extend(_inferred_roots_from_configured_model(configured_model))
 
     seen: set[Path] = set()
     unique: list[Path] = []

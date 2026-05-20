@@ -15,7 +15,6 @@ from fastapi import APIRouter, Request
 
 from app.schemas.settings import (
     AppAPIKeysPayload,
-    LlamaCppModelInfo,
     LlamaCppSettingsPayload,
     LlamaCppStatusResponse,
     OllamaModelInfo,
@@ -23,7 +22,6 @@ from app.schemas.settings import (
     OllamaStatusResponse,
 )
 from app.llm.ollama import ollama_warmup
-from app.llm.llamacpp import llamacpp_chat
 from app.llm.llamacpp_profiles import (
     LLAMACPP_SERVER_PROFILES,
     build_llamacpp_server_args,
@@ -33,7 +31,6 @@ from app.llm.llamacpp_profiles import (
 from app.services.local_llamacpp_supervisor import (
     ensure_llamacpp_ready,
     is_supervised_llamacpp_running,
-    probe_llamacpp_server,
     stop_local_llamacpp_servers,
 )
 from app.services.app_settings_service import (
@@ -49,8 +46,14 @@ from app.services.llamacpp_model_discovery import (
     merge_llamacpp_models,
     resolve_llamacpp_model_path,
 )
+from app.services.llamacpp_settings_service import (
+    apply_llamacpp_runtime_settings,
+    current_llamacpp_payload,
+    normalize_llamacpp_base_url,
+    probe_llamacpp,
+    warmup_llamacpp,
+)
 from app.services.runtime_settings_store import (
-    read_bool_value as _read_bool_value,
     read_value as _read_value,
     write_bool_value as _write_bool_value,
     write_value as _write_value,
@@ -59,13 +62,6 @@ from app.services.runtime_settings_store import (
 router = APIRouter(prefix="/app", tags=["app-settings"])
 
 def _normalize_ollama_base_url(value: str | None, default: str) -> str:
-    normalized = (value or "").strip() or default.strip()
-    if "://" not in normalized:
-        normalized = f"http://{normalized}"
-    return normalized.rstrip("/")
-
-
-def _normalize_llamacpp_base_url(value: str | None, default: str = "http://localhost:8098") -> str:
     normalized = (value or "").strip() or default.strip()
     if "://" not in normalized:
         normalized = f"http://{normalized}"
@@ -97,7 +93,7 @@ def _ollama_base_url_is_local(base_url: str) -> bool:
 
 
 def _llamacpp_base_url_is_local(base_url: str) -> bool:
-    parsed = urlparse(_normalize_llamacpp_base_url(base_url))
+    parsed = urlparse(normalize_llamacpp_base_url(base_url))
     host = (parsed.hostname or "").strip().lower()
     return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
@@ -358,46 +354,6 @@ def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
     )
 
 
-def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
-    settings = request.app.state.settings
-    server_args = (
-        _read_value(settings.llamacpp_server_args_path)
-        or str(getattr(settings, "llamacpp_server_args", "") or "")
-    )
-    return LlamaCppSettingsPayload(
-        llamacpp_base_url=_normalize_llamacpp_base_url(
-            _read_value(settings.llamacpp_base_url_path),
-            str(getattr(settings, "llamacpp_base_url", "http://localhost:8098")),
-        ),
-        llamacpp_model=_read_value(settings.llamacpp_model_name_path)
-        or str(getattr(settings, "llamacpp_model", "") or "")
-        or "local",
-        llamacpp_executable=_read_value(settings.llamacpp_executable_path)
-        or str(getattr(settings, "llamacpp_executable", "") or ""),
-        llamacpp_model_path=_read_value(settings.llamacpp_model_path_path)
-        or str(getattr(settings, "llamacpp_model_path", "") or ""),
-        llamacpp_library_path=_read_value(settings.llamacpp_library_path_path)
-        or str(getattr(settings, "llamacpp_library_path", "") or ""),
-        llamacpp_server_args=server_args,
-        llamacpp_profile=detect_llamacpp_profile(server_args),
-        llamacpp_auto_start=_read_bool_value(
-            settings.llamacpp_auto_start_path,
-            bool(getattr(settings, "llamacpp_auto_start", True)),
-        ),
-    )
-
-
-def _apply_llamacpp_runtime_settings(request: Request, payload: LlamaCppSettingsPayload) -> None:
-    settings = request.app.state.settings
-    object.__setattr__(settings, "llamacpp_base_url", payload.llamacpp_base_url)
-    object.__setattr__(settings, "llamacpp_model", payload.llamacpp_model)
-    object.__setattr__(settings, "llamacpp_executable", payload.llamacpp_executable)
-    object.__setattr__(settings, "llamacpp_model_path", payload.llamacpp_model_path)
-    object.__setattr__(settings, "llamacpp_library_path", payload.llamacpp_library_path)
-    object.__setattr__(settings, "llamacpp_server_args", payload.llamacpp_server_args)
-    object.__setattr__(settings, "llamacpp_auto_start", payload.llamacpp_auto_start)
-
-
 def _llamacpp_process_is_running(request: Request) -> bool:
     process = getattr(request.app.state, "llamacpp_process", None)
     poll = getattr(process, "poll", None)
@@ -464,38 +420,6 @@ def _spawn_llamacpp_process(request: Request, payload: LlamaCppSettingsPayload) 
         return False, f"{type(exc).__name__}: {exc}"
     request.app.state.llamacpp_process = process
     return True, None
-
-
-async def _probe_llamacpp(
-    base_url: str,
-    *,
-    request_user_agent: str,
-) -> tuple[bool, list[LlamaCppModelInfo], str | None]:
-    result = await probe_llamacpp_server(base_url, request_user_agent=request_user_agent)
-    return (
-        result.connected,
-        [LlamaCppModelInfo(id=model) for model in result.models],
-        result.error,
-    )
-
-
-async def _llamacpp_warmup(
-    *,
-    base_url: str,
-    model: str,
-    request_user_agent: str,
-) -> str | None:
-    try:
-        await llamacpp_chat(
-            base_url=base_url,
-            model=model or "local",
-            messages=[{"role": "user", "content": "Warm up the model and reply with a single word."}],
-            timeout_seconds=600.0,
-            request_user_agent=request_user_agent,
-        )
-        return None
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc}"
 
 
 async def _probe_ollama(base_url: str, *, request_user_agent: str) -> tuple[bool, str | None, list[OllamaModelInfo], str | None]:
@@ -704,9 +628,9 @@ async def update_ollama_settings(payload: OllamaSettingsPayload, request: Reques
 @router.get("/llamacpp", response_model=LlamaCppStatusResponse)
 async def get_llamacpp_settings(request: Request) -> LlamaCppStatusResponse:
     settings = request.app.state.settings
-    payload = _current_llamacpp_payload(request)
-    _apply_llamacpp_runtime_settings(request, payload)
-    connected, models, error = await _probe_llamacpp(
+    payload = current_llamacpp_payload(settings)
+    apply_llamacpp_runtime_settings(settings, payload)
+    connected, models, error = await probe_llamacpp(
         payload.llamacpp_base_url,
         request_user_agent=settings.request_user_agent,
     )
@@ -740,7 +664,7 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
             alias=payload.llamacpp_model.strip() or "local",
         )
     normalized_payload = LlamaCppSettingsPayload(
-        llamacpp_base_url=_normalize_llamacpp_base_url(
+        llamacpp_base_url=normalize_llamacpp_base_url(
             payload.llamacpp_base_url,
             str(getattr(settings, "llamacpp_base_url", "http://localhost:8098")),
         ),
@@ -763,7 +687,7 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
     _write_value(settings.llamacpp_library_path_path, normalized_payload.llamacpp_library_path)
     _write_value(settings.llamacpp_server_args_path, normalized_payload.llamacpp_server_args)
     _write_bool_value(settings.llamacpp_auto_start_path, normalized_payload.llamacpp_auto_start)
-    _apply_llamacpp_runtime_settings(request, normalized_payload)
+    apply_llamacpp_runtime_settings(settings, normalized_payload)
 
     start_error: str | None = None
     started = False
@@ -789,14 +713,14 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         except Exception as exc:
             start_error = f"{type(exc).__name__}: {exc}"
 
-    connected, models, error = await _probe_llamacpp(
+    connected, models, error = await probe_llamacpp(
         normalized_payload.llamacpp_base_url,
         request_user_agent=settings.request_user_agent,
     )
     models = merge_llamacpp_models(discover_llamacpp_model_files(settings), models, normalized_payload)
     warmup_error = None
     if normalized_payload.warmup and connected:
-        warmup_error = await _llamacpp_warmup(
+        warmup_error = await warmup_llamacpp(
             base_url=normalized_payload.llamacpp_base_url,
             model=normalized_payload.llamacpp_model,
             request_user_agent=settings.request_user_agent,

@@ -148,7 +148,7 @@ def test_llamacpp_settings_accepts_named_qwen_profile(monkeypatch) -> None:
                 helper_service=FakeHelperService(),
                 batch_llm_service=FakeBatchLLMService(),
             )
-            monkeypatch.setattr("app.api.routes.app_settings._probe_llamacpp", _fake_llamacpp_probe_success)
+            monkeypatch.setattr("app.api.routes.app_settings.probe_llamacpp", _fake_llamacpp_probe_success)
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
                 response = await client.put(
@@ -199,7 +199,7 @@ def test_llamacpp_settings_discovers_local_gguf_models(monkeypatch) -> None:
                 batch_llm_service=FakeBatchLLMService(),
             )
             monkeypatch.setenv("LOCAL_LLM_MODEL_ROOTS", str(model_root))
-            monkeypatch.setattr("app.api.routes.app_settings._probe_llamacpp", _fake_llamacpp_probe_success)
+            monkeypatch.setattr("app.api.routes.app_settings.probe_llamacpp", _fake_llamacpp_probe_success)
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
                 response = await client.get("/app/llamacpp")
@@ -212,6 +212,52 @@ def test_llamacpp_settings_discovers_local_gguf_models(monkeypatch) -> None:
                 qwen_item = next(item for item in payload["models"] if item["id"] == "Qwen3.6-35B-A3B-UD-IQ4_NL")
                 assert qwen_item["path"] == str(qwen_model.resolve())
                 assert qwen_item["profile"] == "qwen36-iq4nl-safe"
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_llamacpp_settings_discovers_sibling_models_from_configured_llms_tree(monkeypatch) -> None:
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            llms_root = temp_root / "LLMs"
+            configured_dir = llms_root / "LLm test" / "models" / "gemma4-unsloth"
+            sibling_dir = llms_root / "LLm test" / "models" / "qwen36-unsloth"
+            other_dir = llms_root / "models"
+            configured_dir.mkdir(parents=True)
+            sibling_dir.mkdir(parents=True)
+            other_dir.mkdir(parents=True)
+            gemma_model = configured_dir / "gemma-4-26B-A4B-it-UD-IQ4_NL.gguf"
+            qwen_model = sibling_dir / "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"
+            iq3_model = other_dir / "Qwen3.6-35B-A3B-IQ3_S-merged.gguf"
+            for model in (gemma_model, qwen_model, iq3_model):
+                model.write_bytes(b"GGUF")
+                model.open("r+b").truncate(2 * 1024 * 1024 * 1024)
+
+            settings = _build_settings(temp_root)
+            object.__setattr__(settings, "llamacpp_model_path", str(gemma_model))
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            monkeypatch.delenv("LOCAL_LLM_MODEL_ROOTS", raising=False)
+            monkeypatch.delenv("LLAMACPP_MODEL_ROOTS", raising=False)
+            monkeypatch.setattr("app.api.routes.app_settings.probe_llamacpp", _fake_llamacpp_probe_success)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.get("/app/llamacpp")
+                assert response.status_code == 200
+                model_ids = {item["id"] for item in response.json()["models"]}
+                assert "gemma-4-26B-A4B-it-UD-IQ4_NL" in model_ids
+                assert "Qwen3.6-35B-A3B-UD-IQ4_NL" in model_ids
+                assert "Qwen3.6-35B-A3B-IQ3_S-merged" in model_ids
+                iq3_item = next(item for item in response.json()["models"] if item["id"] == "Qwen3.6-35B-A3B-IQ3_S-merged")
+                assert iq3_item["profile"] == "qwen36-iq3s-safe"
 
     import asyncio
 

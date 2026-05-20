@@ -1645,7 +1645,7 @@ class HelperAIService:
                         f"Call `{stage['tool_name']}` exactly once. Do not answer in prose. "
                         "Planning does not execute database searches, screening, downloads, or PDF scans. "
                         "Keep the plan compact and executable. "
-                        "If the request names a complete series such as D1-D5, make one branch per member and keep each branch query focused on target aliases only. "
+                        "If the request names a complete subtype, gene, receptor, compound, or category series, make one branch per member and keep each branch query focused on target aliases only. "
                         "Put shared method/evidence concepts in shared_query_concepts instead of repeating them in every branch. "
                         "Do not add disease-model terms, organisms, or mechanisms that the user did not request. "
                         "For CriteriaPlannerAgent, produce a small auditable rubric with required target match, primary study type, intervention/exposure match, and requested evidence type. "

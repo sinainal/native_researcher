@@ -377,6 +377,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://127.0.0.1:8098", help="llama.cpp base URL.")
     parser.add_argument("--planner-timeout-s", type=int, default=420, help="Per-model planner timeout.")
     parser.add_argument("--thinking-level", default="off", choices=["off", "on", "low", "max"], help="Thinking level for model calls.")
+    parser.add_argument("--n-gpu-layers", default="", help="Optional llama.cpp -ngl override for tight-VRAM eval runs.")
     parser.add_argument("--skip-planner", action="store_true", help="Skip staged planner eval.")
     parser.add_argument("--skip-pdf-model", action="store_true", help="Use deterministic PDF extraction instead of model extraction.")
     return parser.parse_args()
@@ -394,13 +395,27 @@ def resolve_targets(settings: Settings, model_ids: list[str]) -> list[ModelTarge
     return targets
 
 
-def configure_settings(settings: Settings, target: ModelTarget, out_dir: Path, base_url: str, thinking_level: str) -> None:
+def configure_settings(
+    settings: Settings,
+    target: ModelTarget,
+    out_dir: Path,
+    base_url: str,
+    thinking_level: str,
+    n_gpu_layers: str,
+) -> None:
     server_args = build_llamacpp_server_args(target.profile, alias=target.id)
     if str(thinking_level or "off").strip().lower() != "off":
         tokens = shlex.split(server_args)
         for index, token in enumerate(tokens[:-1]):
             if token == "--reasoning":
                 tokens[index + 1] = "on"
+                break
+        server_args = shlex.join(tokens)
+    if str(n_gpu_layers or "").strip():
+        tokens = shlex.split(server_args)
+        for index, token in enumerate(tokens[:-1]):
+            if token == "-ngl":
+                tokens[index + 1] = str(n_gpu_layers).strip()
                 break
         server_args = shlex.join(tokens)
     object.__setattr__(settings, "llamacpp_base_url", base_url.rstrip("/"))
@@ -763,7 +778,7 @@ async def run_full_execution_eval(
 async def run_model_eval(args: argparse.Namespace, settings: Settings, target: ModelTarget, batch_sizes: list[int]) -> dict[str, Any]:
     model_out = Path(args.out) / safe_name(target.id)
     model_out.mkdir(parents=True, exist_ok=True)
-    configure_settings(settings, target, model_out, args.base_url, args.thinking_level)
+    configure_settings(settings, target, model_out, args.base_url, args.thinking_level, args.n_gpu_layers)
     stop_local_llamacpp_servers(args.base_url)
     await ensure_llamacpp_ready(
         settings,

@@ -99,6 +99,41 @@ Interpretation:
 - Batch 5 remains promising for compact screening, but Qwen had unstable tool-call behavior in one thinking-mode batch-2 residue run and one batch-1 D1-D5 run.
 - Browser-driven UI execution is intentionally not part of this eval yet. It should be added as a later Playwright smoke test for autoprocess on/off and criteria on/off paths.
 
+## 2026-05-21 Qwen IQ4_NL Limited Eval
+
+Qwen IQ4_NL did not fit with the full-GPU profile on the 16 GB card. The first attempts failed at model load because the model requested about 16.3-16.7 GiB of CUDA buffer. The limited eval therefore used `-ngl 32`, leaving part of the model on CPU:
+
+```bash
+.venv/bin/python scripts/research_agent_e2e_eval.py \
+  --models Qwen3.6-35B-A3B-UD-IQ4_NL \
+  --batch-sizes 3,5 \
+  --thinking-level off \
+  --n-gpu-layers 32 \
+  --out output/evals/research_agent_e2e/qwen_iq4nl_limited_off_ngl32
+```
+
+Results:
+
+| Model | Mode | GPU layers | Nanoplastic planner | D1-D5 planner | Residue batch 5 | D1-D5 batch 3 | D1-D5 batch 5 | PDF extraction |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Qwen IQ4_NL | thinking off | 32 | 0.3 / 226.362s | 0.75 / 86.356s | 1.0 / 7.422s | 0.922 / 38.580s | failed / 20.016s | pass / 23.578s |
+
+Manual read:
+
+- The D1-D5 plan had the right five-branch shape and usable extraction questions.
+- The nanoplastic/dopamine plan collapsed to a single placeholder-like branch, similar to Qwen IQ3_S thinking-mode behavior.
+- Residue screening was clean and fast once the model was loaded.
+- D1-D5 batch 3 selected all five receptor papers and rejected the review, DAT transporter paper, and serotonin paper.
+- D1-D5 batch 3 still had incomplete rationales, with rationale coverage `0.375`.
+- D1-D5 batch 5 failed to emit output within the screening timeout.
+- PDF/XML extraction answered the `Alpha123` evidence question correctly.
+
+Conclusion:
+
+- IQ4_NL was not better than IQ3_S in this local setup because it does not fit comfortably in VRAM and needs CPU offload.
+- Quality was mixed: good D1-D5 branch coverage and good selected/rejected decisions at batch 3, but weak rationale completeness and batch-5 instability.
+- For this hardware, IQ3_S remains more practical for Qwen-family local screening unless the IQ4_NL runtime profile is improved.
+
 ## Interpretation
 
 - Both target local models can complete the staged Research Agent flow, abstract screening, and full-text extraction fixture.

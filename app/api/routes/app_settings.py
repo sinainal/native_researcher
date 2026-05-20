@@ -42,41 +42,14 @@ from app.services.llamacpp_model_discovery import (
     merge_llamacpp_models,
     resolve_llamacpp_model_path,
 )
+from app.services.runtime_settings_store import (
+    read_bool_value as _read_bool_value,
+    read_value as _read_value,
+    write_bool_value as _write_bool_value,
+    write_value as _write_value,
+)
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
-
-def _read_value(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def _write_value(path: Path, value: str) -> None:
-    cleaned = value.strip()
-    if not cleaned:
-        try:
-            path.unlink()
-        except OSError:
-            return
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(cleaned + "\n", encoding="utf-8")
-
-
-def _write_bool_value(path: Path, value: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(("true" if value else "false") + "\n", encoding="utf-8")
-
-
-def _read_bool_value(path: Path, default: bool) -> bool:
-    raw = _read_value(path).strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return default
-
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
     normalized = (value or "").strip().lower()

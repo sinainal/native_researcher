@@ -30,6 +30,7 @@ class ResearchPdfPipelineService:
     ) -> PDFExtractionResponse | None:
         if not payload.pdf_extractor_enabled:
             response.run_trace.meta["pdf_screening"] = {"enabled": False}
+            _set_stage_status(response, "pdf_screening", "disabled")
             return None
 
         articles = pdf_screen_articles(response, payload.pdf_scope)
@@ -44,6 +45,7 @@ class ResearchPdfPipelineService:
                 "article_count": len(articles),
                 "question_count": len(questions),
             }
+            _set_stage_status(response, "pdf_screening", "skipped")
             return None
 
         if progress is not None:
@@ -70,6 +72,7 @@ class ResearchPdfPipelineService:
             )
         )
         response.run_trace.meta["pdf_screening"] = extraction_response.model_dump(mode="json")
+        _set_stage_status(response, "pdf_screening", "completed")
         if progress is not None:
             await progress(
                 {
@@ -151,3 +154,11 @@ def article_reference(article: Article) -> ArticleReference:
         oa_pdf_url=article.oa_pdf_url,
         landing_page_url=article.landing_page_url,
     )
+
+
+def _set_stage_status(response: ResearchPlanExecuteResponse, stage: str, status: str) -> None:
+    statuses = response.run_trace.meta.get("stage_statuses")
+    if not isinstance(statuses, dict):
+        statuses = {}
+        response.run_trace.meta["stage_statuses"] = statuses
+    statuses[stage] = status

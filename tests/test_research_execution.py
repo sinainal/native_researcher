@@ -561,6 +561,102 @@ def test_research_plan_execute_runs_pdf_screening_through_existing_download_serv
     asyncio.run(runner())
 
 
+def test_research_plan_execute_skips_screening_when_criteria_disabled_and_runs_pdf_stage() -> None:
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = Settings(
+                download_root=root / "downloads",
+                workspace_root=root / "workspace",
+                helper_log_path=root / "logs" / "helper_ai_history.jsonl",
+                app_event_log_path=root / "logs" / "app_events.jsonl",
+                assistant_api_key_path=root / "assistant_api_key.txt",
+                ncbi_api_key_path=root / "ncbi_api",
+                unpaywall_email_path=root / "unpaywall_email",
+                openalex_api_key_path=root / "openalex_api_key",
+                core_api_key_path=root / "core_api_key",
+                pubmed_oa_only_path=root / "pubmed_oa_only",
+                ai_primary_search_resource_path=root / "ai_primary_search_resource",
+                pdf_downloader_mode_path=root / "pdf_downloader_mode",
+                pdf_unpaywall_fallback_enabled_path=root / "pdf_unpaywall_fallback_enabled",
+                pdf_core_fallback_enabled_path=root / "pdf_core_fallback_enabled",
+                pdf_arxiv_fallback_enabled_path=root / "pdf_arxiv_fallback_enabled",
+            )
+
+            class XMLDownloadPDFService(FakePDFService):
+                async def download_articles(self, payload):  # noqa: ANN001
+                    assert payload.downloader_mode == "pdf_xml"
+                    assert len(payload.articles) == 1
+                    xml_path = root / "criteria_off.xml"
+                    xml_path.write_text(
+                        "<article><body><p>Residue Beta456 contacts dopamine in the receptor.</p></body></article>",
+                        encoding="utf-8",
+                    )
+                    return PDFDownloadResponse(
+                        total=1,
+                        success_count=1,
+                        failed_count=0,
+                        results=[
+                            PDFDownloadResult(
+                                article=payload.articles[0],
+                                success=True,
+                                file_path=str(xml_path),
+                                content_kind="xml_fulltext",
+                            )
+                        ],
+                    )
+
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=XMLDownloadPDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                project = await client.post("/app/projects", json={"name": "Criteria Off PDF Test", "description": ""})
+                project_id = project.json()["id"]
+                plan = {
+                    "topic": "Criteria disabled receptor scan",
+                    "objective": "Find papers and extract residue evidence.",
+                    "target_count_per_branch": 1,
+                    "active_databases": ["PubMed"],
+                    "candidate_budget": {"per_database": 2},
+                    "search_branches": [{"id": "alpha", "label": "Receptor alpha", "query": "receptor alpha"}],
+                    "screening_criteria": [{"id": "residue_evidence", "label": "Residue evidence", "weight": 1}],
+                    "exclusion_criteria": ["review"],
+                    "extraction_questions": ["Which residue contacts dopamine?"],
+                    "extraction_fields": ["residue", "evidence_quote"],
+                }
+                response = await client.post(
+                    f"/app/projects/{project_id}/research-plan/execute",
+                    json={
+                        "plan": plan,
+                        "criteria_enabled": False,
+                        "screening_model": "ollama:test-screen-model",
+                        "pdf_extractor_enabled": True,
+                        "pdf_scope": "selected",
+                        "full_text_model": "",
+                        "thinking_level": "off",
+                    },
+                )
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["run_trace"]["screening"] == []
+                assert payload["run_trace"]["meta"]["criteria_enabled"] is False
+                assert payload["run_trace"]["meta"]["screening_status"] == "skipped"
+                assert payload["run_trace"]["meta"]["screened_candidate_count"] == 0
+                assert payload["run_trace"]["selected_candidate_ids"] == ["cand_1"]
+                assert payload["run_trace"]["meta"]["stage_statuses"]["screening"] == "skipped"
+                assert payload["run_trace"]["meta"]["stage_statuses"]["pdf_screening"] == "completed"
+                pdf_screening = payload["run_trace"]["meta"]["pdf_screening"]
+                assert pdf_screening["success_count"] == 1
+                assert "Beta456" in pdf_screening["results"][0]["answers"][0]["answer"]
+
+    asyncio.run(runner())
+
+
 def test_research_plan_stream_executes_two_branches_two_categories_with_small_limits(monkeypatch) -> None:
     async def fake_ollama_chat_stream(**kwargs):  # noqa: ANN001
         body = kwargs["messages"][1]["content"]

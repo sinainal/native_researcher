@@ -140,28 +140,44 @@ class ResearchExecutionService:
                     "normalized_queries": raw_queries,
                 }
             )
-        screening_candidates = self._screening_candidates(candidates, plan)
-        if progress is not None:
-            await progress(
-                {
-                    "stage": "screening_start",
-                    "message": (
-                        f"Screening {len(screening_candidates)} of {len(candidates)} normalized candidates "
-                        f"with {screening_model or 'default model'}."
-                    ),
-                    "candidate_count": len(candidates),
-                    "screened_candidate_count": len(screening_candidates),
-                    "screening_model": screening_model or "",
-                }
+        criteria_disabled = self._criteria_disabled(plan)
+        screening_candidates = [] if criteria_disabled else self._screening_candidates(candidates, plan)
+        screening = []
+        if criteria_disabled:
+            selection_pool = self._screening_candidates(candidates, plan)
+            if progress is not None:
+                await progress(
+                    {
+                        "stage": "screening_skipped",
+                        "message": "Criteria screening is disabled. Selecting candidates for the PDF stage without LLM screening.",
+                        "candidate_count": len(candidates),
+                        "selection_pool_count": len(selection_pool),
+                        "screened_candidate_count": 0,
+                    }
+                )
+        else:
+            selection_pool = screening_candidates
+            if progress is not None:
+                await progress(
+                    {
+                        "stage": "screening_start",
+                        "message": (
+                            f"Screening {len(screening_candidates)} of {len(candidates)} normalized candidates "
+                            f"with {screening_model or 'default model'}."
+                        ),
+                        "candidate_count": len(candidates),
+                        "screened_candidate_count": len(screening_candidates),
+                        "screening_model": screening_model or "",
+                    }
+                )
+            screening = await self.screening_service.screen_candidates(
+                screening_candidates,
+                plan,
+                model=screening_model,
+                api_key=api_key,
+                thinking_level=thinking_level,
+                progress=progress,
             )
-        screening = await self.screening_service.screen_candidates(
-            screening_candidates,
-            plan,
-            model=screening_model,
-            api_key=api_key,
-            thinking_level=thinking_level,
-            progress=progress,
-        )
         if progress is not None:
             await progress({"stage": "selection", "message": "Selecting final articles per branch."})
         screening_by_id = {item.candidate_id: item for item in screening}
@@ -171,7 +187,10 @@ class ResearchExecutionService:
         ]
         for index, article in enumerate(candidate_articles, start=1):
             article.id = index
-        selections = self._select_candidates(candidates, plan, screening_by_id)
+        if criteria_disabled:
+            selections = self._select_candidates_without_screening(selection_pool, plan)
+        else:
+            selections = self._select_candidates(candidates, plan, screening_by_id)
         selected_ids = []
         backup_ids = []
         excluded_ids = []
@@ -217,10 +236,16 @@ class ResearchExecutionService:
             selected_articles,
         )
         if progress is not None:
+            completion_stage = "selection_complete" if criteria_disabled else "screening_complete"
+            completion_message = (
+                f"Selection complete. Selected {len(selected_articles)} branch/article rows without criteria screening."
+                if criteria_disabled
+                else f"Screening complete. Selected {len(selected_articles)} branch/article rows."
+            )
             await progress(
                 {
-                    "stage": "screening_complete",
-                    "message": f"Screening complete. Selected {len(selected_articles)} branch/article rows.",
+                    "stage": completion_stage,
+                    "message": completion_message,
                     "selected_count": len(selected_articles),
                     "distribution": distribution,
                 }
@@ -243,7 +268,10 @@ class ResearchExecutionService:
                 "candidate_count": len(candidates),
                 "candidate_article_count": len(candidate_articles),
                 "screened_candidate_count": len(screening_candidates),
+                "selection_pool_count": len(selection_pool),
                 "selected_count": len(selected_articles),
+                "criteria_enabled": not criteria_disabled,
+                "screening_status": "skipped" if criteria_disabled else "completed",
                 "raw_query_count": len(raw_queries),
                 "normalized_query_count": len(raw_queries),
                 "normalized_queries": raw_queries,
@@ -253,6 +281,12 @@ class ResearchExecutionService:
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 "screening_model": screening_model or "",
                 "full_text_settings": full_text_settings,
+                "stage_statuses": {
+                    "search": "completed",
+                    "screening": "skipped" if criteria_disabled else "completed",
+                    "selection": "completed",
+                    "pdf_screening": "pending" if full_text_settings.get("pdf_extractor_enabled") else "disabled",
+                },
             },
         )
         return ResearchPlanExecuteResponse(
@@ -450,6 +484,34 @@ class ResearchExecutionService:
                     selected_candidate_ids=[candidate.candidate_id for candidate in selected],
                     backup_candidate_ids=[candidate.candidate_id for candidate in backup],
                     excluded_candidate_ids=[candidate.candidate_id for candidate in excluded],
+                )
+            )
+        return selections
+
+    def _select_candidates_without_screening(
+        self,
+        candidates: list[NormalizedResearchCandidate],
+        plan: dict[str, Any],
+    ) -> list[ResearchSelectionTrace]:
+        target_count = self._target_count(plan)
+        selections: list[ResearchSelectionTrace] = []
+        for branch in self._branches(plan):
+            branch_id = branch["id"]
+            branch_candidates = [
+                candidate
+                for candidate in candidates
+                if any(match.branch_id == branch_id for match in candidate.matches)
+            ]
+            branch_candidates.sort(key=lambda candidate: _year_sort(candidate.article.year), reverse=True)
+            selected = branch_candidates[:target_count]
+            backup = branch_candidates[target_count:]
+            selections.append(
+                ResearchSelectionTrace(
+                    branch_id=branch_id,
+                    branch_label=branch["label"],
+                    selected_candidate_ids=[candidate.candidate_id for candidate in selected],
+                    backup_candidate_ids=[candidate.candidate_id for candidate in backup],
+                    excluded_candidate_ids=[],
                 )
             )
         return selections
@@ -670,6 +732,10 @@ class ResearchExecutionService:
 
     def _candidate_limit(self, raw_query: dict[str, Any], plan: dict[str, Any]) -> int:
         return max(1, min(5000, _int_value(raw_query.get("candidate_limit"), self._per_database(plan))))
+
+    @staticmethod
+    def _criteria_disabled(plan: dict[str, Any]) -> bool:
+        return str(plan.get("criteria_mode") or "").strip().lower() in {"disabled", "off", "none", "false"}
 
     def _year_start(self, plan: dict[str, Any]) -> int:
         return max(1000, min(9999, _int_value(plan.get("year_start"), 1900)))

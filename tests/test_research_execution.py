@@ -18,9 +18,11 @@ from app.schemas.pdf import PDFAvailabilityResponse, PDFResolveResponse
 from app.schemas.pdf import PDFDownloadResponse, PDFDownloadResult
 from app.schemas.pdf_extraction import PDFExtractionRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
-from app.schemas.research_execution import ResearchScreeningTrace
+from app.schemas.research_execution import ResearchPlanExecuteRequest, ResearchScreeningTrace
 from app.services.pdf_extraction_service import PDFExtractionService
+from app.services.research_pdf_pipeline_service import research_plan_questions
 from app.services.research_execution_service import ResearchExecutionService
+from app.services.research_plan_payload_service import build_execution_plan
 from app.services.research_screening_service import ResearchScreeningService
 
 
@@ -95,6 +97,41 @@ def _sse_events(text: str) -> list[dict]:
 
             events.append(json.loads("\n".join(lines)))
     return events
+
+
+def test_research_execution_plan_payload_disables_criteria_without_mutating_source() -> None:
+    original_plan = {
+        "topic": "criteria off",
+        "screening_criteria": [{"id": "topic_match"}],
+        "exclusion_criteria": ["review"],
+    }
+    request = ResearchPlanExecuteRequest(
+        plan=original_plan,
+        criteria_enabled=False,
+        screening_model="ollama:screen",
+        pdf_extractor_enabled=True,
+        pdf_scope="selected_backup",
+        full_text_model=None,
+    )
+
+    plan = build_execution_plan(request)
+
+    assert plan["criteria_mode"] == "disabled"
+    assert plan["screening_criteria"] == []
+    assert plan["exclusion_criteria"] == []
+    assert plan["full_text_settings"]["full_text_model"] == "ollama:screen"
+    assert original_plan["screening_criteria"] == [{"id": "topic_match"}]
+
+
+def test_research_pdf_pipeline_prefers_structured_question_specs() -> None:
+    plan = {
+        "extraction_questions": ["fallback question"],
+        "extraction_question_specs": [
+            {"id": "q1", "question": "Which residue is reported?", "answer_format": "exact_text"}
+        ],
+    }
+
+    assert research_plan_questions(plan) == ["Which residue is reported?"]
 
 
 class FakePDFService:

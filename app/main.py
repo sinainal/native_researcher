@@ -32,6 +32,7 @@ from app.services.pdf_service import PDFService
 from app.services.project_service import ProjectService
 from app.services.pubmed_service import PubMedService
 from app.services.research_execution_service import ResearchExecutionService
+from app.services.research_run_service import ResearchRunService
 from app.services.research_screening_service import ResearchScreeningService
 from app.services.workspace_db import WorkspaceDatabase
 from app.utils.cache import TTLCache
@@ -81,6 +82,10 @@ def create_app(
         app.state.research_execution_service = ResearchExecutionService(
             pubmed_service=pubmed_service,
             screening_service=ResearchScreeningService(settings=resolved_settings),
+        )
+        app.state.research_run_service = ResearchRunService(
+            project_service=project_service,
+            event_log_service=app_event_log_service,
         )
         app.state.native_helper_service = NativeResearcherService(
             thread_cache=TTLCache(

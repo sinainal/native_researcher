@@ -104,6 +104,26 @@ def test_extract_tool_calls_from_gemma4_text_tool_block() -> None:
     assert calls[0].args == {"query": "dopamine D1 receptor", "max_results": 4}
 
 
+def test_extract_tool_calls_wraps_list_arguments_as_items() -> None:
+    message = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "function": {
+                    "id": "call_1",
+                    "name": "screen_research_candidates",
+                    "arguments": '[{"id":"cand_1","s":{"criterion":1},"x":0}]',
+                }
+            }
+        ],
+    }
+
+    calls = extract_ollama_tool_calls(message)
+
+    assert len(calls) == 1
+    assert calls[0].args == {"items": [{"id": "cand_1", "s": {"criterion": 1}, "x": 0}]}
+
+
 def test_llamacpp_normalizes_gemma4_text_tool_block_to_openai_tool_calls() -> None:
     normalized = _normalize_openai_message(
         {

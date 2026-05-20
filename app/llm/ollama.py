@@ -352,7 +352,13 @@ def extract_ollama_tool_calls(message: dict[str, Any]) -> list[OllamaToolCall]:
                 parsed_args = {}
         elif isinstance(args, dict):
             parsed_args = args
+        elif isinstance(args, list):
+            parsed_args = {"items": args}
         else:
+            parsed_args = {}
+        if isinstance(parsed_args, list):
+            parsed_args = {"items": parsed_args}
+        if not isinstance(parsed_args, dict):
             parsed_args = {}
         extracted.append(
             OllamaToolCall(

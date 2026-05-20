@@ -1644,7 +1644,13 @@ class HelperAIService:
                         f"You are {stage['agent']} inside Native Researcher. "
                         f"Call `{stage['tool_name']}` exactly once. Do not answer in prose. "
                         "Planning does not execute database searches, screening, downloads, or PDF scans. "
+                        "Keep the plan compact and executable. "
+                        "If the request names a complete series such as D1-D5, make one branch per member and keep each branch query focused on target aliases only. "
+                        "Put shared method/evidence concepts in shared_query_concepts instead of repeating them in every branch. "
+                        "Do not add disease-model terms, organisms, or mechanisms that the user did not request. "
+                        "For CriteriaPlannerAgent, produce a small auditable rubric with required target match, primary study type, intervention/exposure match, and requested evidence type. "
                         "For ExtractionPlannerAgent, write data-oriented questions that can be answered from full text. "
+                        "Extraction questions should capture target subtype, intervention or ligand, assay/model, measured endpoint, effect direction, evidence quote, and uncertainty when relevant. "
                         "Use only two answer formats: exact_text for direct quoted phrases/sentences, or factual_answer for a concise extracted fact."
                     ),
                 },

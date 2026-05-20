@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import csv
 import json
+import shlex
 import sys
 import time
 import traceback
@@ -55,6 +56,16 @@ DEFAULT_MODELS = [
     "Qwen3.6-35B-A3B-IQ3_S-merged",
 ]
 
+DOPAMINE_SERIES_PROMPT = (
+    "Create a precise research plan to find primary papers across the full dopamine D-series receptor family "
+    "(D1, D2, D3, D4, and D5). The goal is to compare receptor-subtype-specific binding, signaling, residue, "
+    "mutagenesis, ligand-interaction, cellular pathway, and functional assay evidence. Keep the plan focused on "
+    "dopamine receptor evidence, not broad Parkinson disease models unless the receptor evidence is explicit. "
+    "I want clear branches for the complete D1-D5 series, concise inclusion/exclusion criteria, and full-text "
+    "questions that can extract subtype, ligand or perturbation, assay/model, measured endpoint, direction of effect, "
+    "exact evidence quote, and uncertainty."
+)
+
 SCREENING_PLAN = {
     "topic": "Dopamine receptor residue interaction evidence",
     "objective": "Find primary papers that report exact dopamine receptor residue or binding-site interactions.",
@@ -84,6 +95,63 @@ SCREENING_PLAN = {
     ],
     "extraction_questions": ["Which residue or binding-site contact is reported for dopamine receptor interaction?"],
     "extraction_fields": ["residue", "evidence_quote"],
+}
+
+DOPAMINE_SERIES_PLAN = {
+    "topic": "Dopamine D-series receptor evidence",
+    "objective": "Select primary papers covering specific dopamine receptor subtypes D1-D5 with receptor-level evidence.",
+    "target_count_per_branch": 5,
+    "active_databases": ["PubMed"],
+    "candidate_budget": {"per_database": 8},
+    "search_branches": [
+        {"id": "d1", "label": "D1 receptor", "query": "dopamine D1 receptor DRD1"},
+        {"id": "d2", "label": "D2 receptor", "query": "dopamine D2 receptor DRD2"},
+        {"id": "d3", "label": "D3 receptor", "query": "dopamine D3 receptor DRD3"},
+        {"id": "d4", "label": "D4 receptor", "query": "dopamine D4 receptor DRD4"},
+        {"id": "d5", "label": "D5 receptor", "query": "dopamine D5 receptor DRD5"},
+    ],
+    "screening_criteria": [
+        {
+            "id": "dopamine_receptor_subtype",
+            "label": "D-series subtype match",
+            "description": "Clearly studies a dopamine D-series receptor subtype D1, D2, D3, D4, or D5.",
+            "required": True,
+            "weight": 1.0,
+        },
+        {
+            "id": "primary_receptor_evidence",
+            "label": "Primary receptor evidence",
+            "description": "Reports primary binding, signaling, mutagenesis, residue, cellular pathway, or functional assay evidence.",
+            "required": True,
+            "weight": 1.0,
+        },
+        {
+            "id": "subtype_specificity",
+            "label": "Subtype specificity",
+            "description": "The result is subtype-specific rather than only pan-dopamine or general neuroscience evidence.",
+            "required": False,
+            "weight": 0.5,
+        },
+    ],
+    "exclusion_criteria": [
+        "Exclude reviews, editorials, and non-primary summaries.",
+        "Exclude papers about dopamine metabolism, transporters, or disease models without explicit D1-D5 receptor evidence.",
+        "Exclude unrelated monoamine, serotonin, or adrenergic receptor papers.",
+    ],
+    "extraction_questions": [
+        "Which dopamine receptor subtype is studied and what ligand, perturbation, or assay is used?",
+        "What receptor-level binding, signaling, residue, pathway, or functional endpoint is reported?",
+        "What exact evidence quote supports the subtype-specific conclusion?",
+    ],
+    "extraction_fields": [
+        "receptor_subtype",
+        "ligand_or_perturbation",
+        "assay_or_model",
+        "endpoint",
+        "effect_direction",
+        "evidence_quote",
+        "uncertainty",
+    ],
 }
 
 
@@ -201,6 +269,106 @@ def fixture_candidates() -> list[NormalizedResearchCandidate]:
     ]
 
 
+def dopamine_series_articles() -> list[Article]:
+    return [
+        Article(
+            id=11,
+            source_name="pubmed",
+            source_record_id="series-d1",
+            pmid="2001",
+            title="DRD1 dopamine D1 receptor cAMP signaling after agonist binding",
+            abstract="A primary cell assay shows dopamine D1 receptor DRD1 agonist binding increases cAMP signaling.",
+            year="2024",
+            doi="10.1000/d1",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=12,
+            source_name="pubmed",
+            source_record_id="series-d2",
+            pmid="2002",
+            title="Dopamine D2 receptor DRD2 ligand binding and beta-arrestin signaling",
+            abstract="Primary binding and signaling experiments report DRD2 ligand affinity and beta-arrestin pathway activation.",
+            year="2023",
+            doi="10.1000/d2",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=13,
+            source_name="pubmed",
+            source_record_id="series-d3",
+            pmid="2003",
+            title="Mutagenesis identifies a dopamine D3 receptor DRD3 residue controlling ligand selectivity",
+            abstract="A mutagenesis study identifies residue Gamma345 in dopamine D3 receptor DRD3 as controlling ligand selectivity.",
+            year="2022",
+            doi="10.1000/d3",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=14,
+            source_name="pubmed",
+            source_record_id="series-d4",
+            pmid="2004",
+            title="Dopamine D4 receptor DRD4 calcium pathway response in neuronal cells",
+            abstract="Primary neuronal-cell assays show dopamine D4 receptor DRD4 activation changes calcium pathway signaling.",
+            year="2021",
+            doi="10.1000/d4",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=15,
+            source_name="pubmed",
+            source_record_id="series-d5",
+            pmid="2005",
+            title="Dopamine D5 receptor DRD5 functional assay maps ligand-dependent signaling",
+            abstract="A primary functional assay maps dopamine D5 receptor DRD5 ligand-dependent signaling endpoints.",
+            year="2020",
+            doi="10.1000/d5",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=16,
+            source_name="pubmed",
+            source_record_id="series-review",
+            pmid="2006",
+            title="Review of dopamine receptor family pharmacology",
+            abstract="This review summarizes D1-D5 receptor pharmacology without new primary receptor experiments.",
+            year="2024",
+            doi="10.1000/d-review",
+            article_type="Review",
+        ),
+        Article(
+            id=17,
+            source_name="pubmed",
+            source_record_id="series-transporter",
+            pmid="2007",
+            title="Dopamine transporter DAT controls striatal dopamine uptake",
+            abstract="A primary transporter study measures DAT dopamine uptake but does not study dopamine D1-D5 receptors.",
+            year="2023",
+            doi="10.1000/dat",
+            article_type="Journal Article",
+        ),
+        Article(
+            id=18,
+            source_name="pubmed",
+            source_record_id="series-serotonin",
+            pmid="2008",
+            title="Serotonin 5-HT2A receptor ligand binding in cortical neurons",
+            abstract="This primary study reports serotonin receptor ligand binding and does not involve dopamine receptors.",
+            year="2022",
+            doi="10.1000/5ht",
+            article_type="Journal Article",
+        ),
+    ]
+
+
+def dopamine_series_candidates() -> list[NormalizedResearchCandidate]:
+    return [
+        NormalizedResearchCandidate(candidate_id=f"series_{index}", article=article)
+        for index, article in enumerate(dopamine_series_articles(), start=1)
+    ]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local-model Research Agent e2e evals.")
     parser.add_argument("--models", default=",".join(DEFAULT_MODELS), help="Comma-separated discovered llama.cpp model IDs.")
@@ -208,6 +376,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default="output/evals/research_agent_e2e", help="Output directory.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8098", help="llama.cpp base URL.")
     parser.add_argument("--planner-timeout-s", type=int, default=420, help="Per-model planner timeout.")
+    parser.add_argument("--thinking-level", default="off", choices=["off", "on", "low", "max"], help="Thinking level for model calls.")
     parser.add_argument("--skip-planner", action="store_true", help="Skip staged planner eval.")
     parser.add_argument("--skip-pdf-model", action="store_true", help="Use deterministic PDF extraction instead of model extraction.")
     return parser.parse_args()
@@ -225,26 +394,42 @@ def resolve_targets(settings: Settings, model_ids: list[str]) -> list[ModelTarge
     return targets
 
 
-def configure_settings(settings: Settings, target: ModelTarget, out_dir: Path, base_url: str) -> None:
+def configure_settings(settings: Settings, target: ModelTarget, out_dir: Path, base_url: str, thinking_level: str) -> None:
+    server_args = build_llamacpp_server_args(target.profile, alias=target.id)
+    if str(thinking_level or "off").strip().lower() != "off":
+        tokens = shlex.split(server_args)
+        for index, token in enumerate(tokens[:-1]):
+            if token == "--reasoning":
+                tokens[index + 1] = "on"
+                break
+        server_args = shlex.join(tokens)
     object.__setattr__(settings, "llamacpp_base_url", base_url.rstrip("/"))
     object.__setattr__(settings, "llamacpp_model", target.id)
     object.__setattr__(settings, "llamacpp_model_path", target.path)
-    object.__setattr__(settings, "llamacpp_server_args", build_llamacpp_server_args(target.profile, alias=target.id))
+    object.__setattr__(settings, "llamacpp_server_args", server_args)
     object.__setattr__(settings, "llamacpp_log_path", str(out_dir / "llamacpp_server.log"))
     object.__setattr__(settings, "llamacpp_auto_start", True)
 
 
-async def run_planner_eval(settings: Settings, target: ModelTarget, timeout_s: int) -> dict[str, Any]:
+async def run_planner_eval(
+    settings: Settings,
+    target: ModelTarget,
+    timeout_s: int,
+    *,
+    prompt_name: str,
+    prompt: str,
+    thinking_level: str,
+) -> dict[str, Any]:
     service = HelperAIService(
         thread_cache=TTLCache(ttl_seconds=600, max_entries=8),
         pubmed_service=None,
         log_service=HelperLogService(Path("output/evals/research_agent_e2e/helper_log.jsonl")),
     )
     request = HelperChatRequest(
-        message=DEFAULT_NANOPLASTIC_DOPAMINE_PROMPT,
+        message=prompt,
         model=f"llamacpp:{target.id}",
         mode="research_agent",
-        thinking_level="off",
+        thinking_level=thinking_level,
         research_planner_mode="staged",
         research_criteria_enabled=True,
     )
@@ -287,7 +472,10 @@ async def run_planner_eval(settings: Settings, target: ModelTarget, timeout_s: i
         ensure_ascii=False,
     ).lower()
     stages = [event.get("stage") for event in events if event.get("type") == "tool_result" and event.get("stage")]
+    series_metrics = dopamine_series_plan_metrics(plan)
     return {
+        "prompt_name": prompt_name,
+        "thinking_level": thinking_level,
         "ok": bool(plan),
         "elapsed_s": round(time.perf_counter() - started, 3),
         "stage_results": stages,
@@ -300,12 +488,19 @@ async def run_planner_eval(settings: Settings, target: ModelTarget, timeout_s: i
         "question_count": len((plan or {}).get("extraction_questions") or []),
         "has_nanoplastic": "nanoplastic" in query_blob or "microplastic" in query_blob,
         "has_dopamine": "dopamine" in query_blob or "dopaminergic" in query_blob,
+        "dopamine_series_metrics": series_metrics,
         "events": events[-80:],
         "plan": plan,
     }
 
 
-async def run_screening_eval(settings: Settings, target: ModelTarget, batch_sizes: list[int]) -> list[dict[str, Any]]:
+async def run_screening_eval(
+    settings: Settings,
+    target: ModelTarget,
+    batch_sizes: list[int],
+    *,
+    thinking_level: str,
+) -> list[dict[str, Any]]:
     rows = []
     service = ResearchScreeningService(settings=settings)
     original_batch_size = screening_module.BATCH_SIZE
@@ -323,7 +518,7 @@ async def run_screening_eval(settings: Settings, target: ModelTarget, batch_size
                     fixture_candidates(),
                     SCREENING_PLAN,
                     model=f"llamacpp:{target.id}",
-                    thinking_level="off",
+                    thinking_level=thinking_level,
                     progress=progress,
                 )
                 error = ""
@@ -346,6 +541,8 @@ async def run_screening_eval(settings: Settings, target: ModelTarget, batch_size
             rows.append(
                 {
                     "batch_size": batch_size,
+                    "scenario": "residue_triage",
+                    "thinking_level": thinking_level,
                     "ok": score >= 0.8,
                     "score": round(score, 3),
                     "elapsed_s": elapsed_s,
@@ -366,7 +563,136 @@ async def run_screening_eval(settings: Settings, target: ModelTarget, batch_size
     return rows
 
 
-async def run_full_execution_eval(settings: Settings, target: ModelTarget, out_dir: Path, *, use_pdf_model: bool) -> dict[str, Any]:
+async def run_dopamine_series_screening_eval(
+    settings: Settings,
+    target: ModelTarget,
+    batch_sizes: list[int],
+    *,
+    thinking_level: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    service = ResearchScreeningService(settings=settings)
+    original_batch_size = screening_module.BATCH_SIZE
+    expected_selected = {f"series_{index}" for index in range(1, 6)}
+    expected_rejected = {"series_6", "series_7", "series_8"}
+    try:
+        for batch_size in batch_sizes:
+            screening_module.BATCH_SIZE = max(1, batch_size)
+            started = time.perf_counter()
+            progress_events: list[dict[str, Any]] = []
+
+            async def progress(event: dict[str, Any]) -> None:
+                progress_events.append(dict(event))
+
+            try:
+                traces = await service.screen_candidates(
+                    dopamine_series_candidates(),
+                    DOPAMINE_SERIES_PLAN,
+                    model=f"llamacpp:{target.id}",
+                    thinking_level=thinking_level,
+                    progress=progress,
+                )
+                error = ""
+            except Exception as exc:
+                traces = []
+                error = f"{type(exc).__name__}: {exc}"
+            elapsed_s = round(time.perf_counter() - started, 3)
+            trace_by_id = {item.candidate_id: item for item in traces}
+            candidate_by_id = {item.candidate_id: item for item in dopamine_series_candidates()}
+            selected_ids = {
+                item.candidate_id
+                for item in traces
+                if item.final_score >= 0.5 and not item.excluded
+            }
+            rejected_ids = {
+                item.candidate_id
+                for item in traces
+                if item.excluded or item.final_score < 0.5
+            }
+            receptor_hits = {
+                receptor: any(
+                    receptor in " ".join(
+                        [
+                            candidate_by_id[candidate_id].article.title,
+                            candidate_by_id[candidate_id].article.abstract or "",
+                            " ".join(trace_by_id[candidate_id].evidence),
+                        ]
+                    ).lower()
+                    for candidate_id in expected_selected
+                    if candidate_id in trace_by_id
+                )
+                for receptor in ["d1", "d2", "d3", "d4", "d5"]
+            }
+            valid_output = len(traces) == 8 and not error
+            selected_coverage = len(expected_selected & selected_ids) / len(expected_selected)
+            rejection_coverage = len(expected_rejected & rejected_ids) / len(expected_rejected)
+            no_false_positive = selected_ids <= expected_selected
+            receptor_coverage = sum(receptor_hits.values()) / len(receptor_hits)
+            criterion_score_coverage = (
+                sum(1 for item in traces if item.criterion_scores) / len(traces)
+                if traces
+                else 0.0
+            )
+            evidence_coverage = (
+                sum(1 for item in traces if item.evidence) / len(traces)
+                if traces
+                else 0.0
+            )
+            rationale_coverage = (
+                sum(1 for item in traces if str(item.rationale or "").strip()) / len(traces)
+                if traces
+                else 0.0
+            )
+            score = (
+                float(valid_output)
+                + selected_coverage
+                + rejection_coverage
+                + float(no_false_positive)
+                + receptor_coverage
+                + criterion_score_coverage
+                + evidence_coverage
+                + rationale_coverage
+            ) / 8
+            rows.append(
+                {
+                    "batch_size": batch_size,
+                    "scenario": "dopamine_d1_d5_series",
+                    "thinking_level": thinking_level,
+                    "ok": score >= 0.85,
+                    "score": round(score, 3),
+                    "elapsed_s": elapsed_s,
+                    "error": error,
+                    "trace_count": len(traces),
+                    "selected_ids": sorted(selected_ids),
+                    "rejected_ids": sorted(rejected_ids),
+                    "selected_coverage": round(selected_coverage, 3),
+                    "rejection_coverage": round(rejection_coverage, 3),
+                    "no_false_positive": no_false_positive,
+                    "receptor_hits": receptor_hits,
+                    "receptor_coverage": round(receptor_coverage, 3),
+                    "criterion_score_coverage": round(criterion_score_coverage, 3),
+                    "evidence_coverage": round(evidence_coverage, 3),
+                    "rationale_coverage": round(rationale_coverage, 3),
+                    "scores": {item.candidate_id: item.final_score for item in traces},
+                    "excluded": {item.candidate_id: item.excluded for item in traces},
+                    "evidence": {item.candidate_id: item.evidence for item in traces},
+                    "rationale": {item.candidate_id: item.rationale for item in traces},
+                    "progress_stages": [event.get("stage") for event in progress_events],
+                }
+            )
+    finally:
+        screening_module.BATCH_SIZE = original_batch_size
+    return rows
+
+
+async def run_full_execution_eval(
+    settings: Settings,
+    target: ModelTarget,
+    out_dir: Path,
+    *,
+    use_pdf_model: bool,
+    thinking_level: str,
+) -> dict[str, Any]:
     started = time.perf_counter()
     pubmed = EvalPubMedService()
     execution_service = ResearchExecutionService(
@@ -385,7 +711,7 @@ async def run_full_execution_eval(settings: Settings, target: ModelTarget, out_d
         autoprocess=True,
         pdf_scope="selected",
         full_text_model=f"llamacpp:{target.id}" if use_pdf_model else "",
-        thinking_level="off",
+        thinking_level=thinking_level,
     )
     plan = build_execution_plan(payload)
     progress_events: list[dict[str, Any]] = []
@@ -437,7 +763,7 @@ async def run_full_execution_eval(settings: Settings, target: ModelTarget, out_d
 async def run_model_eval(args: argparse.Namespace, settings: Settings, target: ModelTarget, batch_sizes: list[int]) -> dict[str, Any]:
     model_out = Path(args.out) / safe_name(target.id)
     model_out.mkdir(parents=True, exist_ok=True)
-    configure_settings(settings, target, model_out, args.base_url)
+    configure_settings(settings, target, model_out, args.base_url, args.thinking_level)
     stop_local_llamacpp_servers(args.base_url)
     await ensure_llamacpp_ready(
         settings,
@@ -447,22 +773,53 @@ async def run_model_eval(args: argparse.Namespace, settings: Settings, target: M
     )
     started = time.perf_counter()
     try:
-        planner = {"skipped": True} if args.skip_planner else await run_planner_eval(settings, target, args.planner_timeout_s)
-        screening = await run_screening_eval(settings, target, batch_sizes)
+        planner_evals = (
+            [{"skipped": True, "prompt_name": "skipped", "thinking_level": args.thinking_level}]
+            if args.skip_planner
+            else [
+                await run_planner_eval(
+                    settings,
+                    target,
+                    args.planner_timeout_s,
+                    prompt_name="nanoplastic_dopamine",
+                    prompt=DEFAULT_NANOPLASTIC_DOPAMINE_PROMPT,
+                    thinking_level=args.thinking_level,
+                ),
+                await run_planner_eval(
+                    settings,
+                    target,
+                    args.planner_timeout_s,
+                    prompt_name="dopamine_d1_d5_series",
+                    prompt=DOPAMINE_SERIES_PROMPT,
+                    thinking_level=args.thinking_level,
+                ),
+            ]
+        )
+        screening = await run_screening_eval(settings, target, batch_sizes, thinking_level=args.thinking_level)
+        dopamine_series_screening = await run_dopamine_series_screening_eval(
+            settings,
+            target,
+            batch_sizes,
+            thinking_level=args.thinking_level,
+        )
         full_execution = await run_full_execution_eval(
             settings,
             target,
             model_out,
             use_pdf_model=not args.skip_pdf_model,
+            thinking_level=args.thinking_level,
         )
         result = {
             "model": target.id,
             "path": target.path,
             "profile": target.profile,
+            "thinking_level": args.thinking_level,
             "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "elapsed_s": round(time.perf_counter() - started, 3),
-            "planner": planner,
+            "planner": planner_evals[0],
+            "planner_evals": planner_evals,
             "screening": screening,
+            "dopamine_series_screening": dopamine_series_screening,
             "full_execution": full_execution,
         }
         (model_out / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -479,6 +836,54 @@ def extract_plan(final_response: dict[str, Any] | None) -> dict[str, Any] | None
     return None
 
 
+def dopamine_series_plan_metrics(plan: dict[str, Any] | None) -> dict[str, Any]:
+    if not plan:
+        return {
+            "series_coverage": 0.0,
+            "branch_count": 0,
+            "covered_receptors": [],
+            "has_database_specific_warning": False,
+            "field_question_coverage": 0.0,
+        }
+    branches = plan.get("search_branches") or []
+    branch_text = json.dumps(branches, ensure_ascii=False).lower()
+    covered = [
+        receptor
+        for receptor in ["d1", "d2", "d3", "d4", "d5"]
+        if receptor in branch_text or f"drd{receptor[-1]}" in branch_text
+    ]
+    questions = " ".join(str(item) for item in (plan.get("extraction_questions") or [])).lower()
+    field_terms = [
+        ("subtype", "receptor"),
+        ("ligand", "perturbation"),
+        ("assay", "model"),
+        ("endpoint", "pathway"),
+        ("effect", "direction"),
+        ("quote", "evidence"),
+        ("uncertainty", "confidence"),
+    ]
+    field_hits = sum(any(term in questions for term in group) for group in field_terms)
+    query_text = json.dumps(
+        {
+            "branches": branches,
+            "shared_query_concepts": plan.get("shared_query_concepts") or [],
+            "raw_search_queries": plan.get("raw_search_queries") or [],
+        },
+        ensure_ascii=False,
+    ).lower()
+    has_database_specific_warning = any(
+        token in query_text
+        for token in ["[tiab]", "mesh", "title-abs-key", "ts=("]
+    )
+    return {
+        "series_coverage": round(len(set(covered)) / 5, 3),
+        "branch_count": len(branches),
+        "covered_receptors": sorted(set(covered)),
+        "has_database_specific_warning": has_database_specific_warning,
+        "field_question_coverage": round(field_hits / len(field_terms), 3),
+    }
+
+
 def write_summary(out_dir: Path, results: list[dict[str, Any]]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "e2e_results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -487,6 +892,8 @@ def write_summary(out_dir: Path, results: list[dict[str, Any]]) -> None:
             handle,
             fieldnames=[
                 "model",
+                "scenario",
+                "thinking_level",
                 "batch_size",
                 "ok",
                 "score",
@@ -496,12 +903,18 @@ def write_summary(out_dir: Path, results: list[dict[str, Any]]) -> None:
                 "review_rejected",
                 "unrelated_rejected",
                 "ranking_ok",
+                "selected_coverage",
+                "rejection_coverage",
+                "receptor_coverage",
+                "criterion_score_coverage",
+                "evidence_coverage",
+                "rationale_coverage",
                 "error",
             ],
         )
         writer.writeheader()
         for result in results:
-            for row in result.get("screening") or []:
+            for row in [*(result.get("screening") or []), *(result.get("dopamine_series_screening") or [])]:
                 writer.writerow({key: row.get(key) for key in writer.fieldnames} | {"model": result["model"]})
     lines = [
         "# Research Agent E2E Eval",
@@ -512,16 +925,26 @@ def write_summary(out_dir: Path, results: list[dict[str, Any]]) -> None:
         "",
     ]
     for result in results:
-        planner = result.get("planner") or {}
+        planner_evals = result.get("planner_evals") or [result.get("planner") or {}]
         full = result.get("full_execution") or {}
         best_batch = best_screening_batch(result.get("screening") or [])
+        best_series_batch = best_screening_batch(result.get("dopamine_series_screening") or [])
         lines.extend(
             [
                 f"### {result['model']}",
                 "",
                 f"- Profile: `{result.get('profile')}`",
-                f"- Planner: ok=`{planner.get('ok')}` elapsed=`{planner.get('elapsed_s')}` score=`{planner.get('plan_quality_score')}`",
-                f"- Best screening batch: `{best_batch.get('batch_size')}` score=`{best_batch.get('score')}` elapsed=`{best_batch.get('elapsed_s')}`",
+                f"- Thinking level: `{result.get('thinking_level')}`",
+                *[
+                    (
+                        f"- Planner `{planner.get('prompt_name')}`: ok=`{planner.get('ok')}` "
+                        f"elapsed=`{planner.get('elapsed_s')}` score=`{planner.get('plan_quality_score')}` "
+                        f"series_coverage=`{(planner.get('dopamine_series_metrics') or {}).get('series_coverage')}`"
+                    )
+                    for planner in planner_evals
+                ],
+                f"- Best residue triage batch: `{best_batch.get('batch_size')}` score=`{best_batch.get('score')}` elapsed=`{best_batch.get('elapsed_s')}`",
+                f"- Best D1-D5 screening batch: `{best_series_batch.get('batch_size')}` score=`{best_series_batch.get('score')}` elapsed=`{best_series_batch.get('elapsed_s')}`",
                 f"- Full execution: ok=`{full.get('ok')}` elapsed=`{full.get('elapsed_s')}` selected=`{full.get('selected_candidate_ids')}` pdf_alpha123=`{full.get('pdf_contains_alpha123')}`",
                 "",
             ]

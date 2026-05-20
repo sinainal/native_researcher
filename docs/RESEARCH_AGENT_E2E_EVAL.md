@@ -41,6 +41,64 @@ Screening by batch size:
 | `gemma-4-26B-A4B-it-UD-IQ4_NL` | 1.0 / 4.664s | 1.0 / 4.050s | 1.0 / 3.918s | 1.0 / 3.730s |
 | `Qwen3.6-35B-A3B-IQ3_S-merged` | 1.0 / 4.878s | 1.0 / 3.249s | 1.0 / 2.434s | 1.0 / 2.042s |
 
+## 2026-05-20 Thinking Mode And D1-D5 Series Eval
+
+Prompt improvements added after the first eval:
+
+- Complete receptor/protein/gene series requests should become explicit per-member branches.
+- Branch queries should focus on target aliases, while shared method/evidence terms belong in `shared_query_concepts`.
+- Planner should avoid disease-model or organism expansions unless the user asks for them.
+- Criteria should remain short and auditable: target match, primary study type, intervention/exposure match, and requested evidence type.
+- Extraction questions should capture subtype, ligand or perturbation, assay/model, endpoint, direction of effect, evidence quote, and uncertainty.
+
+Thinking-mode command:
+
+```bash
+.venv/bin/python scripts/research_agent_e2e_eval.py \
+  --models gemma-4-26B-A4B-it-UD-IQ4_NL,Qwen3.6-35B-A3B-IQ3_S-merged \
+  --batch-sizes 1,2,3,5 \
+  --thinking-level on \
+  --out output/evals/research_agent_e2e/thinking_dopamine_series
+```
+
+Strict D1-D5 screening rerun, with rationale/evidence coverage included in score:
+
+```bash
+.venv/bin/python scripts/research_agent_e2e_eval.py \
+  --models gemma-4-26B-A4B-it-UD-IQ4_NL,Qwen3.6-35B-A3B-IQ3_S-merged \
+  --batch-sizes 3,5 \
+  --thinking-level on \
+  --skip-planner \
+  --skip-pdf-model \
+  --out output/evals/research_agent_e2e/thinking_dopamine_series_strict
+```
+
+Planner quality highlights:
+
+| Model | Prompt | Time | Branches | D1-D5 coverage | Extraction field coverage | Manual read |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Gemma IQ4_NL | nanoplastic/dopamine | 89.306s | 6 | 1.0 | 0.714 | Over-split into D1-D5 plus a general dopaminergic branch even though the prompt was nanoplastic-focused. |
+| Gemma IQ4_NL | D1-D5 series | 68.870s | 5 | 1.0 | 0.857 | Best plan shape: one clean branch per receptor, target-only queries, useful extraction questions. |
+| Qwen IQ3_S | nanoplastic/dopamine | 158.215s | 1 | 0.0 | 0.857 | Bad plan shape: collapsed to a single placeholder-like branch, despite reasonable extraction questions. |
+| Qwen IQ3_S | D1-D5 series | 165.897s | 5 | 1.0 | 0.714 | Clean D1-D5 branch coverage, but slower than Gemma. |
+
+Strict D1-D5 screening highlights:
+
+| Model | Batch | Score | Time | Selected D1-D5 | Rejected negatives | Evidence coverage | Rationale coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Gemma IQ4_NL | 3 | 1.0 | 49.261s | 1.0 | 1.0 | 1.0 | 1.0 |
+| Gemma IQ4_NL | 5 | 1.0 | 44.978s | 1.0 | 1.0 | 1.0 | 1.0 |
+| Qwen IQ3_S | 3 | 0.875 | 98.962s | 1.0 | 1.0 | 1.0 | 0.0 |
+| Qwen IQ3_S | 5 | 0.875 | 55.181s | 1.0 | 1.0 | 1.0 | 0.0 |
+
+Interpretation:
+
+- Thinking mode is much slower than no-thinking mode for both models.
+- Gemma IQ4_NL is currently the stronger thinking-mode planner and produces auditable screening rationales.
+- Qwen IQ3_S still selects and rejects the correct candidates, but in D1-D5 screening it omits rationale text, so it is less useful for explainable/inspectable screening.
+- Batch 5 remains promising for compact screening, but Qwen had unstable tool-call behavior in one thinking-mode batch-2 residue run and one batch-1 D1-D5 run.
+- Browser-driven UI execution is intentionally not part of this eval yet. It should be added as a later Playwright smoke test for autoprocess on/off and criteria on/off paths.
+
 ## Interpretation
 
 - Both target local models can complete the staged Research Agent flow, abstract screening, and full-text extraction fixture.

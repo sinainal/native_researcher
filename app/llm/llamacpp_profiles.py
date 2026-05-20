@@ -93,6 +93,19 @@ LLAMACPP_SERVER_PROFILES: dict[str, LlamaCppServerProfile] = {
         fit_target=None,
         no_cont_batching=True,
     ),
+    "gemma4-q4km-safe": LlamaCppServerProfile(
+        id="gemma4-q4km-safe",
+        label="Gemma 4 26B Q4_K_M safe",
+        description="Gemma 4 Q4_K_M full-GPU profile using the same conservative runtime as IQ4_NL.",
+        context=65536,
+        batch=1024,
+        ubatch=256,
+        n_gpu_layers="all",
+        cache_k="f16",
+        cache_v="f16",
+        fit_target=None,
+        no_cont_batching=True,
+    ),
 }
 
 

@@ -37,22 +37,13 @@ from app.services.local_llamacpp_supervisor import (
     probe_llamacpp_server,
     stop_local_llamacpp_servers,
 )
-
-router = APIRouter(prefix="/app", tags=["app-settings"])
-
-DEFAULT_GEMMA4_LLAMA_MODEL = "gemma-4-26B-A4B-it-UD-IQ4_NL"
-DEFAULT_GEMMA4_LLAMA_MODEL_PATH = Path("/home/sina/Downloads/LLMs/LLm test/models/gemma4-unsloth/gemma-4-26B-A4B-it-UD-IQ4_NL.gguf")
-DEFAULT_GEMMA4_LLAMA_EXECUTABLE = Path("/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-cuda130/bin/llama-server")
-DEFAULT_GEMMA4_LLAMA_LIBRARY_PATHS = [
-    Path("/home/sina/Downloads/LLMs/LLm test/llama.cpp-latest/build-cuda130/bin"),
-    Path("/home/sina/Downloads/LLMs/cuda130/lib"),
-    Path("/usr/local/lib/ollama/cuda_v13"),
-    Path("/usr/local/lib/ollama"),
-]
-DEFAULT_GEMMA4_LLAMA_SERVER_ARGS = (
-    build_llamacpp_server_args("gemma4-iq4nl-safe", alias=DEFAULT_GEMMA4_LLAMA_MODEL)
+from app.services.llamacpp_model_discovery import (
+    discover_llamacpp_model_files,
+    merge_llamacpp_models,
+    resolve_llamacpp_model_path,
 )
 
+router = APIRouter(prefix="/app", tags=["app-settings"])
 
 def _read_value(path: Path) -> str:
     try:
@@ -85,14 +76,6 @@ def _read_bool_value(path: Path, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return default
-
-
-def _existing_path(path: Path) -> str:
-    return str(path) if path.exists() else ""
-
-
-def _default_gemma4_library_path() -> str:
-    return ":".join(str(path) for path in DEFAULT_GEMMA4_LLAMA_LIBRARY_PATHS if path.exists())
 
 
 def _normalize_search_resource(value: str | None, default: str) -> str:
@@ -487,13 +470,9 @@ def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
 
 def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
     settings = request.app.state.settings
-    default_model_path = _existing_path(DEFAULT_GEMMA4_LLAMA_MODEL_PATH)
-    default_executable = _existing_path(DEFAULT_GEMMA4_LLAMA_EXECUTABLE)
-    default_library_path = _default_gemma4_library_path()
     server_args = (
         _read_value(settings.llamacpp_server_args_path)
         or str(getattr(settings, "llamacpp_server_args", "") or "")
-        or (DEFAULT_GEMMA4_LLAMA_SERVER_ARGS if default_model_path and default_executable else "")
     )
     return LlamaCppSettingsPayload(
         llamacpp_base_url=_normalize_llamacpp_base_url(
@@ -502,16 +481,13 @@ def _current_llamacpp_payload(request: Request) -> LlamaCppSettingsPayload:
         ),
         llamacpp_model=_read_value(settings.llamacpp_model_name_path)
         or str(getattr(settings, "llamacpp_model", "") or "")
-        or (DEFAULT_GEMMA4_LLAMA_MODEL if default_model_path else "local"),
+        or "local",
         llamacpp_executable=_read_value(settings.llamacpp_executable_path)
-        or str(getattr(settings, "llamacpp_executable", "") or "")
-        or default_executable,
+        or str(getattr(settings, "llamacpp_executable", "") or ""),
         llamacpp_model_path=_read_value(settings.llamacpp_model_path_path)
-        or str(getattr(settings, "llamacpp_model_path", "") or "")
-        or default_model_path,
+        or str(getattr(settings, "llamacpp_model_path", "") or ""),
         llamacpp_library_path=_read_value(settings.llamacpp_library_path_path)
-        or str(getattr(settings, "llamacpp_library_path", "") or "")
-        or default_library_path,
+        or str(getattr(settings, "llamacpp_library_path", "") or ""),
         llamacpp_server_args=server_args,
         llamacpp_profile=detect_llamacpp_profile(server_args),
         llamacpp_auto_start=_read_bool_value(
@@ -872,6 +848,7 @@ async def get_llamacpp_settings(request: Request) -> LlamaCppStatusResponse:
         payload.llamacpp_base_url,
         request_user_agent=settings.request_user_agent,
     )
+    models = merge_llamacpp_models(discover_llamacpp_model_files(settings), models, payload)
     return LlamaCppStatusResponse(
         llamacpp_base_url=payload.llamacpp_base_url,
         llamacpp_model=payload.llamacpp_model,
@@ -907,7 +884,8 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         ),
         llamacpp_model=payload.llamacpp_model.strip() or "local",
         llamacpp_executable=payload.llamacpp_executable.strip(),
-        llamacpp_model_path=payload.llamacpp_model_path.strip(),
+        llamacpp_model_path=payload.llamacpp_model_path.strip()
+        or resolve_llamacpp_model_path(payload.llamacpp_model.strip(), settings),
         llamacpp_library_path=payload.llamacpp_library_path.strip(),
         llamacpp_server_args=server_args,
         llamacpp_profile=detect_llamacpp_profile(server_args),
@@ -953,6 +931,7 @@ async def update_llamacpp_settings(payload: LlamaCppSettingsPayload, request: Re
         normalized_payload.llamacpp_base_url,
         request_user_agent=settings.request_user_agent,
     )
+    models = merge_llamacpp_models(discover_llamacpp_model_files(settings), models, normalized_payload)
     warmup_error = None
     if normalized_payload.warmup and connected:
         warmup_error = await _llamacpp_warmup(

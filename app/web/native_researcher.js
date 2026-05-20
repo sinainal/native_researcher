@@ -518,10 +518,23 @@ const llamaCppProfiles = {
     fitTarget: "",
     noContBatching: true,
   },
+  "gemma4-q4km-safe": {
+    context: "65536",
+    batch: "1024",
+    ubatch: "256",
+    cpuMoe: "",
+    cacheK: "f16",
+    cacheV: "f16",
+    cacheRam: "0",
+    reasoning: "off",
+    reasoningBudget: "-1",
+    fitTarget: "",
+    noContBatching: true,
+  },
 };
 
 function llamaCppProfileArgs(profile) {
-  return [
+  const args = [
     "-c", profile.context,
     "-b", profile.batch,
     "-ub", profile.ubatch,
@@ -663,7 +676,10 @@ function assistantModelDefaultValue() {
 function isAssistantModelVisible(model) {
   const normalized = String(model || "").trim();
   if (!normalized) return false;
-  return Boolean(runtime.assistantModelVisibility?.[normalized]);
+  if (Object.prototype.hasOwnProperty.call(runtime.assistantModelVisibility || {}, normalized)) {
+    return Boolean(runtime.assistantModelVisibility?.[normalized]);
+  }
+  return isLocalAssistantModel(normalized);
 }
 
 function setAssistantModelVisibility(model, visible) {
@@ -729,25 +745,47 @@ function assistantLocalModelItems() {
 }
 
 function assistantLlamaCppModelItems() {
-  const names = new Set();
+  const byName = new Map();
   const configured = String(runtime.llamacppModel || "local").trim();
-  if (configured) names.add(configured);
+  if (configured) {
+    byName.set(configured, {
+      id: configured,
+      path: runtime.llamacppModelPath || "",
+      profile: runtime.llamacppProfile || "",
+      running: false,
+    });
+  }
   for (const model of Array.isArray(runtime.llamacppModels) ? runtime.llamacppModels : []) {
     const name = String(model?.id || "").trim();
-    if (name) names.add(name);
+    if (!name) continue;
+    byName.set(name, {
+      ...(byName.get(name) || {}),
+      id: name,
+      path: String(model?.path || byName.get(name)?.path || "").trim(),
+      profile: String(model?.profile || byName.get(name)?.profile || "").trim(),
+      size: Number(model?.size || byName.get(name)?.size || 0),
+      running: Boolean(model?.running || byName.get(name)?.running),
+    });
   }
-  return [...names]
-    .sort((left, right) => left.localeCompare(right))
-    .map((name) => {
+  return [...byName.values()]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((model) => {
+      const name = model.id;
       const value = `llamacpp:${name}`;
+      const sizeLabel = Number.isFinite(model.size) && model.size > 0
+        ? ` (${(model.size / (1024 * 1024 * 1024)).toFixed(1)} GB)`
+        : "";
       return {
         value,
-        label: `llama.cpp · ${name}`,
+        label: `llama.cpp · ${name}${sizeLabel}`,
         provider: "local",
         providerLabel: "Local",
-        available: runtime.llamacppConnected || name === configured,
+        available: Boolean(model.path) || runtime.llamacppConnected || name === configured,
+        running: Boolean(model.running),
         visible: isAssistantModelVisible(value),
         modelName: name,
+        modelPath: model.path || "",
+        profile: model.profile || "",
       };
     });
 }
@@ -1916,6 +1954,9 @@ function renderSettingsPanel() {
     if (runtime.ollamaConnected || runtime.llamacppConnected) {
       const localCount = assistantLocalModelItems().length + assistantLlamaCppModelItems().length;
       els.availableModelsStatus.textContent = `${localCount} local model${localCount === 1 ? "" : "s"} configured. Toggle any Gemini preset, Ollama model, or llama.cpp model to show it in the assistant selector.`;
+    } else if (assistantLlamaCppModelItems().length) {
+      const localCount = assistantLlamaCppModelItems().length;
+      els.availableModelsStatus.textContent = `${localCount} llama.cpp model${localCount === 1 ? "" : "s"} detected from disk. Selecting one will start the configured local server.`;
     } else {
       els.availableModelsStatus.textContent = "Only the Gemini presets are currently available. Connect Ollama or llama.cpp to use local models.";
     }
@@ -2408,8 +2449,22 @@ async function selectAssistantModel(requestedModel) {
   if (isLlamaCppAssistantModel(normalized)) {
     const localModel = normalized.slice("llamacpp:".length).trim();
     if (!localModel) return;
+    const selectedItem = catalogItem || assistantLlamaCppModelItems().find((item) => item.value === normalized);
     runtime.llamacppWarmupError = "";
     runtime.llamacppModel = localModel;
+    if (selectedItem?.modelPath) {
+      runtime.llamacppModelPath = selectedItem.modelPath;
+      if (els.llamacppModelPathInput) els.llamacppModelPathInput.value = runtime.llamacppModelPath;
+    }
+    if (selectedItem?.profile) {
+      runtime.llamacppProfile = selectedItem.profile;
+      if (els.llamacppProfileInput) els.llamacppProfileInput.value = runtime.llamacppProfile;
+      const profile = llamaCppProfiles[runtime.llamacppProfile];
+      if (profile) {
+        runtime.llamacppServerArgs = llamaCppProfileArgs(profile);
+        if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs;
+      }
+    }
     setAssistantModelLoading(true, normalized);
     runtime.assistantModel = normalized;
     ensureAssistantModelVisible(runtime.assistantModel);
@@ -2424,6 +2479,8 @@ async function selectAssistantModel(requestedModel) {
       );
       const payload = await saveLlamaCppSettings({
         llamacpp_model: localModel,
+        llamacpp_model_path: runtime.llamacppModelPath,
+        llamacpp_profile: runtime.llamacppProfile,
         llamacpp_server_args: runtime.llamacppServerArgs,
         start: Boolean(runtime.llamacppAutoStart),
         restart: true,

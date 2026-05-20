@@ -69,6 +69,10 @@ class LlamaCppSettingsPayload(BaseModel):
 class LlamaCppModelInfo(BaseModel):
     id: str
     object: str | None = None
+    path: str | None = None
+    size: int | None = None
+    profile: str | None = None
+    running: bool = False
 
 
 class LlamaCppProfileInfo(BaseModel):

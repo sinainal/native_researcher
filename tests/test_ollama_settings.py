@@ -174,6 +174,50 @@ def test_llamacpp_settings_accepts_named_qwen_profile(monkeypatch) -> None:
     asyncio.run(runner())
 
 
+def test_llamacpp_settings_discovers_local_gguf_models(monkeypatch) -> None:
+    async def runner() -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            model_root = temp_root / "LLMs"
+            model_root.mkdir()
+            qwen_model = model_root / "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"
+            gemma_model = model_root / "gemma-4-26B-A4B-it-UD-IQ4_NL.gguf"
+            vocab_file = model_root / "ggml-vocab-qwen.gguf"
+            qwen_model.write_bytes(b"GGUF")
+            gemma_model.write_bytes(b"GGUF")
+            vocab_file.write_bytes(b"GGUF")
+            qwen_model.open("r+b").truncate(2 * 1024 * 1024 * 1024)
+            gemma_model.open("r+b").truncate(2 * 1024 * 1024 * 1024)
+            vocab_file.open("r+b").truncate(2 * 1024 * 1024 * 1024)
+
+            settings = _build_settings(temp_root)
+            app = create_app(
+                settings=settings,
+                pubmed_service=FakePubMedService(),
+                pdf_service=FakePDFService(),
+                helper_service=FakeHelperService(),
+                batch_llm_service=FakeBatchLLMService(),
+            )
+            monkeypatch.setenv("LOCAL_LLM_MODEL_ROOTS", str(model_root))
+            monkeypatch.setattr("app.api.routes.app_settings._probe_llamacpp", _fake_llamacpp_probe_success)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.get("/app/llamacpp")
+                assert response.status_code == 200
+                payload = response.json()
+                model_ids = [item["id"] for item in payload["models"]]
+                assert "Qwen3.6-35B-A3B-UD-IQ4_NL" in model_ids
+                assert "gemma-4-26B-A4B-it-UD-IQ4_NL" in model_ids
+                assert "ggml-vocab-qwen" not in model_ids
+                qwen_item = next(item for item in payload["models"] if item["id"] == "Qwen3.6-35B-A3B-UD-IQ4_NL")
+                assert qwen_item["path"] == str(qwen_model.resolve())
+                assert qwen_item["profile"] == "qwen36-iq4nl-safe"
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
 def test_ollama_settings_warms_selected_model(monkeypatch) -> None:
     async def runner() -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

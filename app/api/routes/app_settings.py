@@ -22,7 +22,6 @@ from app.schemas.settings import (
     OllamaSettingsPayload,
     OllamaStatusResponse,
 )
-from app.utils.rate_limit import AsyncRateLimiter
 from app.llm.ollama import ollama_warmup
 from app.llm.llamacpp import llamacpp_chat
 from app.llm.llamacpp_profiles import (
@@ -37,6 +36,14 @@ from app.services.local_llamacpp_supervisor import (
     probe_llamacpp_server,
     stop_local_llamacpp_servers,
 )
+from app.services.app_settings_service import (
+    app_settings_log_context,
+    apply_app_runtime_settings,
+    current_app_settings_payload,
+    normalize_pdf_downloader_mode,
+    normalize_search_resource,
+    write_app_settings_payload,
+)
 from app.services.llamacpp_model_discovery import (
     discover_llamacpp_model_files,
     merge_llamacpp_models,
@@ -50,22 +57,6 @@ from app.services.runtime_settings_store import (
 )
 
 router = APIRouter(prefix="/app", tags=["app-settings"])
-
-def _normalize_search_resource(value: str | None, default: str) -> str:
-    normalized = (value or "").strip().lower()
-    if normalized in {"openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"}:
-        return normalized
-    return default
-
-
-def _normalize_pdf_downloader_mode(value: str | None, default: str) -> str:
-    normalized = (value or "").strip().lower()
-    if normalized in {"pdf_xml", "best", "pdf", "xml", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
-        if normalized in {"best", "legacy", "article_downloader", "hybrid", "final_method", "perfect"}:
-            return "pdf_xml"
-        return normalized
-    return default
-
 
 def _normalize_ollama_base_url(value: str | None, default: str) -> str:
     normalized = (value or "").strip() or default.strip()
@@ -352,80 +343,6 @@ async def _probe_ollama_with_start(
         return False, None, [], last_error or "Ollama could not be started."
 
 
-def _apply_runtime_settings(request: Request, payload: AppAPIKeysPayload) -> None:
-    settings = request.app.state.settings
-    pubmed_rps = 10.0 if payload.ncbi_api_key.strip() else 3.0
-    object.__setattr__(settings, "assistant_api_key", payload.assistant_api_key.strip() or None)
-    object.__setattr__(settings, "ncbi_api_key", payload.ncbi_api_key.strip() or None)
-    object.__setattr__(settings, "unpaywall_email", payload.unpaywall_email.strip() or None)
-    object.__setattr__(settings, "openalex_api_key", payload.openalex_api_key.strip() or None)
-    object.__setattr__(settings, "core_api_key", payload.core_api_key.strip() or None)
-    object.__setattr__(settings, "pubmed_oa_only", payload.pubmed_oa_only)
-    object.__setattr__(settings, "pdf_unpaywall_fallback_enabled", payload.pdf_unpaywall_fallback_enabled)
-    object.__setattr__(settings, "pdf_core_fallback_enabled", payload.pdf_core_fallback_enabled)
-    object.__setattr__(settings, "pdf_arxiv_fallback_enabled", payload.pdf_arxiv_fallback_enabled)
-    object.__setattr__(
-        settings,
-        "ai_primary_search_resource",
-        _normalize_search_resource(payload.ai_primary_search_resource, "pubmed"),
-    )
-    object.__setattr__(
-        settings,
-        "pdf_downloader_mode",
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "pdf_xml"),
-    )
-    object.__setattr__(settings, "pubmed_requests_per_second", pubmed_rps)
-
-    pubmed_service = getattr(request.app.state, "pubmed_service", None)
-    client = getattr(pubmed_service, "client", None)
-    if client is not None:
-        client.rate_limiter = AsyncRateLimiter(pubmed_rps)
-
-
-def _current_payload(request: Request) -> AppAPIKeysPayload:
-    settings = request.app.state.settings
-    return AppAPIKeysPayload(
-        assistant_api_key=_read_value(settings.assistant_api_key_path)
-        or str(getattr(settings, "assistant_api_key", "") or ""),
-        ncbi_api_key=_read_value(settings.ncbi_api_key_path) or str(getattr(settings, "ncbi_api_key", "") or ""),
-        unpaywall_email=_read_value(settings.unpaywall_email_path)
-        or str(getattr(settings, "unpaywall_email", "") or ""),
-        openalex_api_key=_read_value(settings.openalex_api_key_path)
-        or str(getattr(settings, "openalex_api_key", "") or ""),
-        core_api_key=_read_value(settings.core_api_key_path) or str(getattr(settings, "core_api_key", "") or ""),
-        pubmed_oa_only=_read_bool_value(
-            settings.pubmed_oa_only_path,
-            bool(getattr(settings, "pubmed_oa_only", True)),
-        ),
-        pdf_unpaywall_fallback_enabled=_read_bool_value(
-            settings.pdf_unpaywall_fallback_enabled_path,
-            bool(getattr(settings, "pdf_unpaywall_fallback_enabled", True)),
-        ),
-        pdf_core_fallback_enabled=_read_bool_value(
-            settings.pdf_core_fallback_enabled_path,
-            bool(getattr(settings, "pdf_core_fallback_enabled", False)),
-        ),
-        pdf_arxiv_fallback_enabled=_read_bool_value(
-            settings.pdf_arxiv_fallback_enabled_path,
-            bool(getattr(settings, "pdf_arxiv_fallback_enabled", False)),
-        ),
-        ai_primary_search_resource=_normalize_search_resource(
-            _read_value(settings.ai_primary_search_resource_path),
-            _normalize_search_resource(
-                getattr(settings, "ai_primary_search_resource", "pubmed"),
-                "pubmed",
-            ),
-        ),
-        pdf_downloader_mode=_normalize_pdf_downloader_mode(
-            _read_value(settings.pdf_downloader_mode_path),
-            _normalize_pdf_downloader_mode(
-                getattr(settings, "pdf_downloader_mode", "pdf_xml"),
-                "pdf_xml",
-            ),
-        ),
-    )
-
-
 def _current_ollama_payload(request: Request) -> OllamaSettingsPayload:
     settings = request.app.state.settings
     return OllamaSettingsPayload(
@@ -651,50 +568,22 @@ async def _probe_ollama(base_url: str, *, request_user_agent: str) -> tuple[bool
 
 @router.get("/api-keys", response_model=AppAPIKeysPayload)
 async def get_api_keys(request: Request) -> AppAPIKeysPayload:
-    payload = _current_payload(request)
-    _apply_runtime_settings(request, payload)
+    payload = current_app_settings_payload(request.app.state.settings)
+    apply_app_runtime_settings(request.app.state, payload)
     return payload
 
 
 @router.put("/api-keys", response_model=AppAPIKeysPayload)
 async def update_api_keys(payload: AppAPIKeysPayload, request: Request) -> AppAPIKeysPayload:
     settings = request.app.state.settings
-    _write_value(settings.assistant_api_key_path, payload.assistant_api_key)
-    _write_value(settings.ncbi_api_key_path, payload.ncbi_api_key)
-    _write_value(settings.unpaywall_email_path, payload.unpaywall_email)
-    _write_value(settings.openalex_api_key_path, payload.openalex_api_key)
-    _write_value(settings.core_api_key_path, payload.core_api_key)
-    _write_bool_value(settings.pubmed_oa_only_path, payload.pubmed_oa_only)
-    _write_bool_value(settings.pdf_unpaywall_fallback_enabled_path, payload.pdf_unpaywall_fallback_enabled)
-    _write_bool_value(settings.pdf_core_fallback_enabled_path, payload.pdf_core_fallback_enabled)
-    _write_bool_value(settings.pdf_arxiv_fallback_enabled_path, payload.pdf_arxiv_fallback_enabled)
-    _write_value(
-        settings.ai_primary_search_resource_path,
-        _normalize_search_resource(payload.ai_primary_search_resource, "pubmed"),
-    )
-    _write_value(
-        settings.pdf_downloader_mode_path,
-        _normalize_pdf_downloader_mode(payload.pdf_downloader_mode, "pdf_xml"),
-    )
-    next_payload = _current_payload(request)
-    _apply_runtime_settings(request, next_payload)
+    write_app_settings_payload(settings, payload)
+    next_payload = current_app_settings_payload(settings)
+    apply_app_runtime_settings(request.app.state, next_payload)
     request.app.state.app_event_log_service.log(
         "info",
         "api_keys_updated",
         "Application API keys were updated.",
-        context={
-            "assistant_api_key": bool(next_payload.assistant_api_key),
-            "ncbi_api_key": bool(next_payload.ncbi_api_key),
-            "unpaywall_email": bool(next_payload.unpaywall_email),
-            "openalex_api_key": bool(next_payload.openalex_api_key),
-            "core_api_key": bool(next_payload.core_api_key),
-            "pubmed_oa_only": next_payload.pubmed_oa_only,
-            "ai_primary_search_resource": next_payload.ai_primary_search_resource,
-            "pdf_downloader_mode": next_payload.pdf_downloader_mode,
-            "pdf_unpaywall_fallback_enabled": next_payload.pdf_unpaywall_fallback_enabled,
-            "pdf_core_fallback_enabled": next_payload.pdf_core_fallback_enabled,
-            "pdf_arxiv_fallback_enabled": next_payload.pdf_arxiv_fallback_enabled,
-        },
+        context=app_settings_log_context(next_payload),
     )
     return next_payload
 

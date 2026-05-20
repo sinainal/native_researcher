@@ -165,6 +165,9 @@ const els = {
   assistantOllamaThinkingLabel: document.getElementById("assistantOllamaThinkingLabel"),
   assistantOllamaThinkingMenu: document.getElementById("assistantOllamaThinkingMenu"),
   ollamaStatus: document.getElementById("ollamaStatus"),
+  modelGeminiSummary: document.getElementById("modelGeminiSummary"),
+  modelOllamaSummary: document.getElementById("modelOllamaSummary"),
+  modelLlamaCppSummary: document.getElementById("modelLlamaCppSummary"),
   llamacppBaseUrlInput: document.getElementById("llamacppBaseUrlInput"),
   llamacppModelInput: document.getElementById("llamacppModelInput"),
   llamacppProfileInput: document.getElementById("llamacppProfileInput"),
@@ -187,6 +190,7 @@ const els = {
   llamacppStartBtn: document.getElementById("llamacppStartBtn"),
   llamacppSaveBtn: document.getElementById("llamacppSaveBtn"),
   llamacppStatus: document.getElementById("llamacppStatus"),
+  llamacppDetectedModels: document.getElementById("llamacppDetectedModels"),
   availableModelsList: document.getElementById("availableModelsList"),
   availableModelsStatus: document.getElementById("availableModelsStatus"),
   modelSettingsOverlay: document.getElementById("modelSettingsOverlay"),
@@ -839,6 +843,41 @@ function renderAvailableModelsMarkup() {
           : '<div class="native-model-empty">No llama.cpp model configured yet.</div>'
       }
     </div>`;
+}
+
+function renderDetectedLlamaCppModelsMarkup() {
+  const models = (Array.isArray(runtime.llamacppModels) ? runtime.llamacppModels : [])
+    .filter((model) => String(model?.path || "").trim())
+    .sort((left, right) => String(left.id || "").localeCompare(String(right.id || "")));
+  if (!models.length) return "";
+  const active = String(runtime.llamacppModel || "").trim();
+  return `
+    <div class="native-detected-models-head">
+      <span>Detected GGUF models</span>
+      <small>${models.length} found from configured roots</small>
+    </div>
+    <div class="native-detected-models-list">
+      ${models.map((model) => {
+        const id = String(model.id || "").trim();
+        const path = String(model.path || "").trim();
+        const profile = String(model.profile || "custom").trim();
+        const size = Number(model.size || 0);
+        const sizeLabel = Number.isFinite(size) && size > 0 ? `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB` : "GGUF";
+        return `
+          <button class="native-detected-model" type="button"
+            data-llamacpp-model="${escapeHtml(id)}"
+            data-llamacpp-path="${escapeHtml(path)}"
+            data-llamacpp-profile="${escapeHtml(profile)}">
+            <span class="native-detected-model-main">
+              <strong>${escapeHtml(id)}</strong>
+              <small>${escapeHtml(sizeLabel)}${profile && profile !== "custom" ? ` · ${escapeHtml(profile)}` : ""}</small>
+            </span>
+            <span class="native-detected-model-action">${id === active ? "Selected" : "Use"}</span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
 }
 
 function assistantModelOptions() {
@@ -1883,6 +1922,23 @@ function renderSettingsPanel() {
     ].join(" · ");
     els.modelSettingsSummary.textContent = `${assistantModelDisplayLabel(selectedModel) || selectedModel} selected · ${visibleGemini} Gemini visible · ${visibleLocal} local visible · ${localState}.`;
   }
+  if (els.modelGeminiSummary) {
+    els.modelGeminiSummary.textContent = runtime.apiKey ? "API key saved" : "API key missing";
+  }
+  if (els.modelOllamaSummary) {
+    const count = Array.isArray(runtime.ollamaModels) ? runtime.ollamaModels.length : 0;
+    els.modelOllamaSummary.textContent = runtime.ollamaConnected ? `${count} model${count === 1 ? "" : "s"} available` : "Disconnected";
+  }
+  if (els.modelLlamaCppSummary) {
+    const detected = (Array.isArray(runtime.llamacppModels) ? runtime.llamacppModels : []).filter((model) => model?.path).length;
+    if (runtime.llamacppConnected) {
+      els.modelLlamaCppSummary.textContent = `Connected${runtime.llamacppStarted ? " · started here" : ""}`;
+    } else if (detected) {
+      els.modelLlamaCppSummary.textContent = `${detected} local model${detected === 1 ? "" : "s"} detected`;
+    } else {
+      els.modelLlamaCppSummary.textContent = "Disconnected";
+    }
+  }
   if (els.researchPlannerModeInput) {
     els.researchPlannerModeInput.value = runtime.researchPlannerMode === "legacy" ? "legacy" : "staged";
   }
@@ -1922,6 +1978,11 @@ function renderSettingsPanel() {
   if (els.llamacppModelPathInput) els.llamacppModelPathInput.value = runtime.llamacppModelPath || "";
   if (els.llamacppLibraryPathInput) els.llamacppLibraryPathInput.value = runtime.llamacppLibraryPath || "";
   if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs || "";
+  if (els.llamacppDetectedModels) {
+    const markup = renderDetectedLlamaCppModelsMarkup();
+    els.llamacppDetectedModels.hidden = !markup;
+    els.llamacppDetectedModels.innerHTML = markup;
+  }
   if (els.llamacppAutoStartToggle) els.llamacppAutoStartToggle.checked = Boolean(runtime.llamacppAutoStart);
   const llamaArgs = parseLlamaCppArgs(runtime.llamacppServerArgs || "");
   if (els.llamacppProfileInput) els.llamacppProfileInput.value = llamaArgs.profile;
@@ -7783,6 +7844,27 @@ function bindEvents() {
     } finally {
       if (els.llamacppStartBtn) els.llamacppStartBtn.disabled = false;
     }
+  });
+  els.llamacppDetectedModels?.addEventListener("click", (event) => {
+    const button = event.target.closest(".native-detected-model[data-llamacpp-model]");
+    if (!button) return;
+    runtime.llamacppModel = String(button.dataset.llamacppModel || "local").trim() || "local";
+    runtime.llamacppModelPath = String(button.dataset.llamacppPath || "").trim();
+    runtime.llamacppProfile = String(button.dataset.llamacppProfile || "custom").trim() || "custom";
+    const profile = llamaCppProfiles[runtime.llamacppProfile];
+    if (profile) {
+      runtime.llamacppServerArgs = llamaCppProfileArgs(profile);
+    }
+    if (els.llamacppModelInput) els.llamacppModelInput.value = runtime.llamacppModel;
+    if (els.llamacppModelPathInput) els.llamacppModelPathInput.value = runtime.llamacppModelPath;
+    if (els.llamacppProfileInput) els.llamacppProfileInput.value = runtime.llamacppProfile;
+    if (els.llamacppServerArgsInput) els.llamacppServerArgsInput.value = runtime.llamacppServerArgs;
+    renderSettingsPanel();
+    trackAppEvent("info", "llamacpp_detected_model_selected", "Detected llama.cpp model selected from settings.", {
+      llamacpp_model: runtime.llamacppModel,
+      profile: runtime.llamacppProfile,
+      model_path_configured: Boolean(runtime.llamacppModelPath),
+    });
   });
   els.availableModelsList?.addEventListener("change", (event) => {
     const input = event.target.closest('input[type="checkbox"][data-model]');

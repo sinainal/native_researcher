@@ -2,6 +2,29 @@
 
 This document records the local end-to-end evaluation flow for the Research Agent. It is meant to catch control-flow, model-output, screening, and PDF-extraction regressions before changing the agent architecture further.
 
+## Standard CLI Smoke Flow
+
+Use this first when checking whether the local Research Agent planner still works with the main local models:
+
+```bash
+./cli_test.sh -prompt "Create a research execution plan for dopamine D1-D5 receptor subtype evidence."
+```
+
+Defaults:
+
+- Runs sequentially, not in parallel: `qwen-iq4nl` first, then `gemma-iq4nl`.
+- Uses `thinking=on`.
+- Starts each llama.cpp model with its discovered profile, writes outputs to `output/cli_test/latest/`, then stops the local server before moving to the next model.
+- `--dry-run` resolves models and writes the test plan without loading a model.
+
+Useful variants:
+
+```bash
+./cli_test.sh --dry-run -prompt "D1-D5 smoke"
+./cli_test.sh -prompt "D1-D5 smoke" --models qwen-iq4nl --out output/cli_test/qwen_only
+./cli_test.sh -prompt "D1-D5 smoke" --models qwen-iq4nl,gemma-iq4nl --thinking low
+```
+
 ## Current Eval Flow
 
 Script:

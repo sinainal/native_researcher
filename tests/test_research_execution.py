@@ -19,7 +19,7 @@ from app.schemas.pdf import PDFDownloadResponse, PDFDownloadResult
 from app.schemas.pdf_extraction import PDFExtractionRequest
 from app.schemas.pubmed import PubMedSearchMeta, PubMedSearchResponse
 from app.schemas.research_execution import ResearchPlanExecuteRequest, ResearchScreeningTrace
-from app.services.pdf_extraction_service import PDFExtractionService
+from app.services.pdf_extraction_service import PDFExtractionService, build_question_focused_context, parse_json_items
 from app.services.research_pdf_pipeline_service import research_plan_questions
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.research_plan_payload_service import build_execution_plan
@@ -133,6 +133,33 @@ def test_research_pdf_pipeline_prefers_structured_question_specs() -> None:
     }
 
     assert research_plan_questions(plan) == ["Which residue is reported?"]
+
+
+def test_pdf_context_builder_keeps_question_relevant_snippets() -> None:
+    text = " ".join(
+        [
+            "Background sentence about unrelated receptor biology.",
+            *(f"Filler sentence {index} about methods and controls." for index in range(200)),
+            "The interacted residue Tyr123 directly contacts dopamine in the binding pocket.",
+            "Mutation of Tyr123 reduced dopamine binding in the receptor assay.",
+        ]
+    )
+
+    context = build_question_focused_context(
+        text,
+        ["Which interacted residue contacts dopamine?"],
+        article_title="Dopamine receptor binding",
+        max_chars=600,
+    )
+
+    assert len(context) <= 600
+    assert "Tyr123" in context
+
+
+def test_pdf_json_parser_accepts_unescaped_newline_in_string() -> None:
+    parsed = parse_json_items('[{"question":"q","answer":"line one\nline two","confidence":0.8,"evidence":[]}]')
+
+    assert parsed[0]["answer"] == "line one\nline two"
 
 
 class FakePDFService:
@@ -320,6 +347,67 @@ def test_pdf_extraction_reads_downloaded_xml_and_answers_questions(tmp_path) -> 
         )
         assert response.success_count == 1
         assert "Alpha123" in response.results[0].answers[0].answer
+
+    asyncio.run(runner())
+
+
+def test_pdf_extraction_retries_local_model_with_compact_context(monkeypatch, tmp_path) -> None:
+    xml_path = tmp_path / "paper.xml"
+    xml_path.write_text(
+        "<article><body>"
+        + "".join(f"<p>Background filler sentence {index}.</p>" for index in range(500))
+        + "<p>Residue Gamma789 contacts dopamine in the receptor pocket.</p>"
+        + "</body></article>",
+        encoding="utf-8",
+    )
+
+    class XMLPDFService:
+        async def download_articles(self, payload):  # noqa: ANN001
+            article = payload.articles[0]
+            return PDFDownloadResponse(
+                total=1,
+                success_count=1,
+                failed_count=0,
+                results=[PDFDownloadResult(article=article, success=True, file_path=str(xml_path), content_kind="xml_fulltext")],
+            )
+
+    calls: list[int] = []
+
+    async def fake_llamacpp_chat(**kwargs):  # noqa: ANN001
+        prompt = json.loads(kwargs["messages"][1]["content"])
+        calls.append(len(prompt["full_text"]))
+        if len(calls) == 1:
+            raise RuntimeError("simulated context overflow")
+        return {
+            "message": {
+                "content": json.dumps(
+                    [
+                        {
+                            "question": "Which residue contacts dopamine?",
+                            "answer": "Gamma789 contacts dopamine.",
+                            "confidence": 0.9,
+                            "evidence": [{"quote": "Residue Gamma789 contacts dopamine", "confidence": 0.9}],
+                        }
+                    ]
+                )
+            }
+        }
+
+    monkeypatch.setattr("app.services.pdf_extraction_service.llamacpp_chat", fake_llamacpp_chat)
+
+    async def runner() -> None:
+        service = PDFExtractionService(pdf_service=XMLPDFService())
+        response = await service.extract(
+            PDFExtractionRequest(
+                articles=[{"title": "Residue paper", "year": "2024", "doi": "10.1/retry"}],
+                questions=["Which residue contacts dopamine?"],
+                model="llamacpp:test-model",
+            )
+        )
+        assert response.success_count == 1
+        assert len(calls) == 2
+        assert calls[1] <= 9_000
+        assert "Gamma789" in response.results[0].answers[0].answer
 
     asyncio.run(runner())
 

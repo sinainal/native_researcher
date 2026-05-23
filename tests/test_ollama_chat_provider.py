@@ -396,6 +396,8 @@ def test_research_agent_ollama_stream_creates_plan(monkeypatch) -> None:
         assert fake_ollama_chat_stream.calls == 3
         assert kwargs["tools"][0]["function"]["name"] == "create_extraction_plan"
         assert "ExtractionPlannerAgent" in kwargs["messages"][0]["content"]
+        assert "Create 1-3 extraction questions" in kwargs["messages"][0]["content"]
+        assert "do not expand one requested fact into a generic checklist" in kwargs["messages"][0]["content"]
         yield {
             "message": {
                 "tool_calls": [

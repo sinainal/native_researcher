@@ -1649,8 +1649,10 @@ class HelperAIService:
                         "Put shared method/evidence concepts in shared_query_concepts instead of repeating them in every branch. "
                         "Do not add disease-model terms, organisms, or mechanisms that the user did not request. "
                         "For CriteriaPlannerAgent, produce a small auditable rubric with required target match, primary study type, intervention/exposure match, and requested evidence type. "
-                        "For ExtractionPlannerAgent, write data-oriented questions that can be answered from full text. "
-                        "Extraction questions should capture target subtype, intervention or ligand, assay/model, measured endpoint, effect direction, evidence quote, and uncertainty when relevant. "
+                        "For ExtractionPlannerAgent, preserve the user's requested information need; do not expand one requested fact into a generic checklist. "
+                        "Create 1-3 extraction questions unless the user explicitly asks for more fields. "
+                        "If the user asks for one thing, such as interacted residues, make one direct question for that thing. "
+                        "Put supporting detail such as target, assay, model, endpoint, quote, and uncertainty in extraction_fields or evidence_requirements only when it is relevant to the user's request. "
                         "Use only two answer formats: exact_text for direct quoted phrases/sentences, or factual_answer for a concise extracted fact."
                     ),
                 },
@@ -2400,8 +2402,16 @@ class HelperAIService:
                     },
                     "description": "Precise full-text questions. exact_text requires a direct quote; factual_answer requires a concise fact from the paper.",
                 },
-                "extraction_fields": {"type": "array", "items": {"type": "string"}},
-                "evidence_requirements": {"type": "array", "items": {"type": "string"}},
+                "extraction_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional columns/details to record beside answers. Do not turn every field into a separate question.",
+                },
+                "evidence_requirements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Evidence rules for answering, such as quote/page/section requirements.",
+                },
                 "notes": {"type": "string"},
             },
             "required": ["extraction_questions"],
@@ -3092,15 +3102,7 @@ class HelperAIService:
         extraction_questions = [item["question"] for item in extraction_question_specs]
         extraction_fields = self._as_string_list(
             args.get("extraction_fields"),
-            fallback=[
-                "paper_id",
-                "question",
-                "answer_format",
-                "answer",
-                "evidence_quote",
-                "page_or_section",
-                "confidence",
-            ],
+            fallback=["paper_id", "question", "answer", "evidence_quote", "page_or_section", "confidence"],
         )
         evidence_requirements = self._as_string_list(
             args.get("evidence_requirements"),

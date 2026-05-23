@@ -21,7 +21,8 @@ from app.schemas.pdf_extraction import (
     PDFExtractionResult,
 )
 
-MAX_FULL_TEXT_CHARS = 180_000
+MAX_FULL_TEXT_CHARS = 28_000
+MAX_RETRY_TEXT_CHARS = 9_000
 
 
 class PDFExtractionService:
@@ -114,46 +115,60 @@ class PDFExtractionService:
         if not model:
             return deterministic_pdf_answers(text, questions)
         model_target = resolve_chat_model_target(model, settings=self.settings)
-        prompt = json.dumps(
-            {
-                "task": (
-                    "Answer the questions using only the provided full text. Return JSON list only. "
-                    "Keep each answer under 80 words and include at most 3 evidence items per question."
-                ),
-                "required_shape": {
-                    "question": "string",
-                    "answer": "string",
-                    "confidence": 0.0,
-                    "evidence": [{"quote": "short exact quote", "page": None, "section": "string", "confidence": 0.0}],
-                },
-                "article": {
-                    "title": article.title,
-                    "year": article.year,
-                    "doi": article.doi,
-                    "pmid": article.pmid,
-                    "pmc_id": article.pmc_id,
-                },
-                "questions": questions,
-                "extraction_fields": extraction_fields,
-                "full_text": text[:MAX_FULL_TEXT_CHARS],
-            },
-            ensure_ascii=False,
+        text_context = build_question_focused_context(
+            text,
+            questions,
+            article_title=article.title,
+            max_chars=MAX_FULL_TEXT_CHARS,
+        )
+        prompt = _pdf_answer_prompt(
+            article,
+            questions,
+            extraction_fields=extraction_fields,
+            full_text=text_context,
         )
         if model_target.provider in {"ollama", "llamacpp"}:
             local_chat = llamacpp_chat if model_target.provider == "llamacpp" else ollama_chat
             base_url_attr = "llamacpp_base_url" if model_target.provider == "llamacpp" else "ollama_base_url"
             default_base_url = "http://localhost:8098" if model_target.provider == "llamacpp" else "http://localhost:11434"
-            response = await local_chat(
-                base_url=str(getattr(self.settings, base_url_attr, default_base_url) or default_base_url),
-                model=model_target.model_name,
-                messages=[
-                    {"role": "system", "content": "You extract evidence from full-text papers. Return JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                tools=None,
-                thinking_level=thinking_level,
-                request_user_agent=str(getattr(self.settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1"),
-            )
+            try:
+                response = await local_chat(
+                    base_url=str(getattr(self.settings, base_url_attr, default_base_url) or default_base_url),
+                    model=model_target.model_name,
+                    messages=[
+                        {"role": "system", "content": "You extract evidence from full-text papers. Return JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    tools=None,
+                    thinking_level=thinking_level,
+                    request_user_agent=str(getattr(self.settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1"),
+                )
+            except Exception:
+                retry_context = build_question_focused_context(
+                    text,
+                    questions,
+                    article_title=article.title,
+                    max_chars=MAX_RETRY_TEXT_CHARS,
+                )
+                response = await local_chat(
+                    base_url=str(getattr(self.settings, base_url_attr, default_base_url) or default_base_url),
+                    model=model_target.model_name,
+                    messages=[
+                        {"role": "system", "content": "You extract evidence from full-text papers. Return JSON only."},
+                        {
+                            "role": "user",
+                            "content": _pdf_answer_prompt(
+                                article,
+                                questions,
+                                extraction_fields=extraction_fields,
+                                full_text=retry_context,
+                            ),
+                        },
+                    ],
+                    tools=None,
+                    thinking_level="off",
+                    request_user_agent=str(getattr(self.settings, "request_user_agent", "NativeResearcher/0.1") or "NativeResearcher/0.1"),
+                )
             raw_text = str((response.get("message") or {}).get("content") or "")
         else:
             if len((api_key or "").strip()) < 10:
@@ -173,7 +188,46 @@ class PDFExtractionService:
                 return str(getattr(response, "text", None) or "")
 
             raw_text = await asyncio.to_thread(_generate)
-        return normalize_pdf_answer_items(parse_json_items(raw_text), questions)
+        try:
+            return normalize_pdf_answer_items(parse_json_items(raw_text), questions)
+        except Exception:
+            return deterministic_pdf_answers(text_context, questions)
+
+
+def _pdf_answer_prompt(
+    article: ArticleReference,
+    questions: list[str],
+    *,
+    extraction_fields: list[str],
+    full_text: str,
+) -> str:
+    return json.dumps(
+        {
+            "task": (
+                "Answer the questions using only the provided full text. Return JSON list only. "
+                "Return exactly one object per question in the same order. "
+                "Keep each answer under 80 words and include at most 3 evidence items per question. "
+                "If the context does not answer a question, say so with confidence 0."
+            ),
+            "required_shape": {
+                "question": "string",
+                "answer": "string",
+                "confidence": 0.0,
+                "evidence": [{"quote": "short exact quote", "page": None, "section": "string", "confidence": 0.0}],
+            },
+            "article": {
+                "title": article.title,
+                "year": article.year,
+                "doi": article.doi,
+                "pmid": article.pmid,
+                "pmc_id": article.pmc_id,
+            },
+            "questions": questions,
+            "extraction_fields": extraction_fields,
+            "full_text": full_text,
+        },
+        ensure_ascii=False,
+    )
 
 
 def extract_text_from_artifact(path: Path) -> str:
@@ -211,6 +265,43 @@ def extract_pdf_text(path: Path) -> str:
     return "\n\n".join(pages).strip()
 
 
+def build_question_focused_context(
+    text: str,
+    questions: list[str],
+    *,
+    article_title: str | None = None,
+    max_chars: int = MAX_FULL_TEXT_CHARS,
+) -> str:
+    clean_text = re.sub(r"\s+", " ", text or "").strip()
+    if len(clean_text) <= max_chars:
+        return clean_text
+    terms = _context_terms(" ".join([article_title or "", *questions]))
+    if not terms:
+        return clean_text[:max_chars].rstrip()
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", clean_text) if sentence.strip()]
+    ranked: list[tuple[float, int, str]] = []
+    for index, sentence in enumerate(sentences):
+        lower = sentence.lower()
+        hits = sum(1 for term in terms if term in lower)
+        if hits:
+            ranked.append((hits / max(1, len(sentence) / 500), index, sentence))
+    selected: list[tuple[int, str]] = []
+    used_indexes: set[int] = set()
+    for _score, index, _sentence in sorted(ranked, reverse=True):
+        for neighbor in (index - 1, index, index + 1):
+            if 0 <= neighbor < len(sentences) and neighbor not in used_indexes:
+                used_indexes.add(neighbor)
+                selected.append((neighbor, sentences[neighbor]))
+        if sum(len(item[1]) + 2 for item in selected) >= max_chars:
+            break
+    if not selected:
+        return clean_text[:max_chars].rstrip()
+    context = " ".join(sentence for _index, sentence in sorted(selected))
+    if len(context) < max_chars // 3:
+        context = f"{clean_text[: max_chars // 3].rstrip()} {context}".strip()
+    return context[:max_chars].rstrip()
+
+
 def deterministic_pdf_answers(text: str, questions: list[str]) -> list[PDFExtractionAnswer]:
     lower_text = text.lower()
     sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -246,12 +337,64 @@ def parse_json_items(raw_text: str) -> list[Any]:
     starts = [index for index in (cleaned.find("["), cleaned.find("{")) if index >= 0]
     if starts:
         cleaned = cleaned[min(starts):]
-    parsed = json.JSONDecoder().raw_decode(cleaned)[0]
+    cleaned = _escape_json_control_chars(cleaned)
+    parsed = json.JSONDecoder(strict=False).raw_decode(cleaned)[0]
     if isinstance(parsed, dict):
         parsed = parsed.get("items") or parsed.get("answers") or [parsed]
     if not isinstance(parsed, list):
         raise RuntimeError("PDF extraction model did not return a JSON list.")
     return parsed
+
+
+def _context_terms(value: str) -> list[str]:
+    stopwords = {
+        "answer",
+        "article",
+        "confidence",
+        "direct",
+        "evidence",
+        "extract",
+        "full",
+        "paper",
+        "question",
+        "reported",
+        "specific",
+        "text",
+        "what",
+        "which",
+    }
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", value.lower()):
+        if term in stopwords or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms[:32]
+
+
+def _escape_json_control_chars(value: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in value:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            out.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            out.append(char)
+            in_string = not in_string
+            continue
+        if in_string and ord(char) < 32:
+            out.append("\\n" if char in {"\n", "\r"} else " ")
+            continue
+        out.append(char)
+    return "".join(out)
 
 
 def normalize_pdf_answer_items(items: list[Any], questions: list[str]) -> list[PDFExtractionAnswer]:

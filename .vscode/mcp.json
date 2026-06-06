@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "native-researcher": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd \"/home/sina/Downloads/autoresearcher/native_researcher\" && exec .venv/bin/python -m app.mcp_server --base-url http://127.0.0.1:8002 --auto-start"
+      ]
+    }
+  }
+}

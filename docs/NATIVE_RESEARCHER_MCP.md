@@ -13,6 +13,7 @@ The MCP exposes high-level research actions only:
 - `native_project`: list, create, read, or inspect projects
 - `native_research`: execute plans, plan-and-execute, and inspect run traces
 - `native_pdf`: resolve, download, or extract answers from PDFs/full text
+- `native_browser`: open, inspect, snapshot, or send a Research Agent message in a visible local browser
 
 It does not expose shell, git, arbitrary filesystem, or source-code tools.
 
@@ -62,3 +63,20 @@ server from the MCP panel.
 6. `native_research {"action":"execute_plan","plan":{...}}`.
 7. `native_research {"action":"latest","response":"full"}` for run details.
 8. `native_pdf {"action":"extract","articles":[...],"questions":[...]}` for full-text evidence.
+
+## Visible browser
+
+Use `native_browser` when the user should see Native Researcher operating on
+the local desktop:
+
+```json
+{"action":"open"}
+```
+
+The tool delegates to `tools/live_browser.py`, opens a headed Chromium window,
+and reuses Chrome DevTools Protocol at `http://127.0.0.1:9223`. It can also run:
+
+- `{"action":"status"}`
+- `{"action":"snapshot"}`
+- `{"action":"send_agent","message":"Create a research plan for ..."}`
+- `{"action":"close"}`

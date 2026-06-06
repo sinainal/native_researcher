@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from io import BytesIO
 
 from app import mcp_server
@@ -153,6 +154,7 @@ def test_mcp_lists_research_tools() -> None:
         "native_project",
         "native_research",
         "native_pdf",
+        "native_browser",
     ]
 
 
@@ -224,6 +226,26 @@ def test_pdf_extract_calls_pdf_pipeline() -> None:
     )
     assert payload["facts"]["success_count"] == 1
     assert payload["facts"]["questions"] == ["Was docking performed?"]
+
+
+def test_browser_tool_delegates_to_live_browser(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"ok": True, "status": "opened", "cdp_url": "http://127.0.0.1:9223"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(mcp_server.subprocess, "run", fake_run)
+    payload = tool_payload(call_tool(make_server(), "native_browser", {"action": "open"}))
+
+    assert payload["facts"]["status"] == "opened"
+    assert calls[0][-1] == "open"
+    assert "tools/live_browser.py" in calls[0][1]
 
 
 def test_mcp_exposes_setup_guide_resource() -> None:

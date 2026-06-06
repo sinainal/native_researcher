@@ -181,6 +181,26 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "native_browser",
+        "description": "Open and control the visible local Native Researcher browser via the repo live-browser helper.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["open", "status", "snapshot", "send_agent", "close"]},
+                "url": {"type": "string"},
+                "message": {"type": "string"},
+                "model": {"type": "string"},
+                "cdp_url": {"type": "string"},
+                "timeout": {"type": "number", "minimum": 1, "maximum": 600},
+                "stop_after_user": {"type": "boolean"},
+                "stop_delay": {"type": "number", "minimum": 0, "maximum": 30},
+                "response": {"type": "string", "enum": ["summary", "full"]},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 GUIDE_URI = "native-researcher://guide/mcp"
@@ -200,6 +220,7 @@ tools.
 5. `native_research` with `execute_plan` or `plan_and_execute`.
 6. `native_research` with `latest` or `detail` to inspect run traces.
 7. `native_pdf` with `extract` for selected articles when full-text evidence is needed.
+8. `native_browser` with `open` if the user should see the local UI while the agent works.
 
 ## VS Code manual setup
 
@@ -304,6 +325,8 @@ class NativeResearcherMCPServer:
             payload = self._research(args)
         elif name == "native_pdf":
             payload = self._pdf(args)
+        elif name == "native_browser":
+            payload = self._browser(args)
         else:
             raise ValueError(f"Unknown tool: {name}")
         return {
@@ -546,6 +569,52 @@ class NativeResearcherMCPServer:
             raise ValueError(f"Unknown pdf action: {action}")
         facts = result if response == "full" else _compact_pdf_result(action, result)
         return {"ok": True, "action": f"pdf.{action}", "facts": facts}
+
+    def _browser(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "status")
+        response = str(args.get("response") or "summary")
+        script = PROJECT_ROOT / "tools" / "live_browser.py"
+        if not script.exists():
+            raise RuntimeError(f"Live browser helper not found: {script}")
+        command = [sys.executable, str(script)]
+        if args.get("url"):
+            command.extend(["--url", str(args["url"])])
+        else:
+            command.extend(["--url", f"{self.base_url}/native_researcher"])
+        if args.get("cdp_url"):
+            command.extend(["--cdp-url", str(args["cdp_url"])])
+        if args.get("model"):
+            command.extend(["--model", str(args["model"])])
+        if args.get("timeout"):
+            command.extend(["--timeout", str(float(args["timeout"]))])
+        if action == "send_agent":
+            command.append("send-agent")
+            command.append(_required_str(args, "message"))
+            if bool(args.get("stop_after_user", False)):
+                command.append("--stop-after-user")
+            if args.get("stop_delay") is not None:
+                command.extend(["--stop-delay", str(float(args["stop_delay"]))])
+        else:
+            command.append(action.replace("_", "-"))
+        completed = subprocess.run(
+            command,
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=float(args.get("timeout") or 60.0) + 15.0,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return {
+                "ok": False,
+                "action": f"browser.{action}",
+                "error": (completed.stderr or completed.stdout or "").strip()[:2000],
+                "facts": {"returncode": completed.returncode},
+            }
+        payload = _loads_json_or_text(completed.stdout)
+        facts = payload if response == "full" or not isinstance(payload, dict) else _compact_browser_payload(payload)
+        return {"ok": True, "action": f"browser.{action}", "facts": facts}
 
     def _ensure_project_id(self, args: dict[str, Any]) -> str:
         if args.get("project_id"):
@@ -811,6 +880,40 @@ def _compact_pdf_result(action: str, result: dict[str, Any]) -> dict[str, Any]:
         "results": result.get("results", [])[:10],
         "meta": result.get("meta", {}),
     }
+
+
+def _loads_json_or_text(text: str) -> dict[str, Any] | str:
+    stripped = text.strip()
+    if not stripped:
+        return {}
+    try:
+        payload = json.loads(stripped)
+        return payload if isinstance(payload, dict) else {"value": payload}
+    except json.JSONDecodeError:
+        return stripped
+
+
+def _compact_browser_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        "ok": payload.get("ok"),
+        "status": payload.get("status"),
+        "pid": payload.get("pid"),
+        "pid_alive": payload.get("pid_alive"),
+        "cdp_ready": payload.get("cdp_ready"),
+        "cdp_url": payload.get("cdp_url"),
+        "url": payload.get("url"),
+        "title": payload.get("title"),
+        "assistantMode": payload.get("assistantMode"),
+        "model": payload.get("model"),
+        "planCards": payload.get("planCards"),
+        "queryHistoryItems": payload.get("queryHistoryItems"),
+        "tableRows": payload.get("tableRows"),
+        "snapshot_file": payload.get("snapshot_file"),
+    }
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    if messages:
+        compact["messages"] = messages[-5:]
+    return {key: value for key, value in compact.items() if value is not None}
 
 
 def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:

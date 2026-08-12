@@ -22,6 +22,16 @@ class PubMedSearchRequest(BaseModel):
     article_type: str | None = Field(default=None, min_length=1, max_length=200)
     use_cache: bool = True
     preferred_source: SearchResource = "openalex"
+    # None preserves the installation-wide default. False enables a broad
+    # discovery pass without changing the default OA-first workflow.
+    oa_only: bool | None = None
+    relevance_groups: list[list[str]] = Field(default_factory=list, max_length=12)
+    require_all_relevance_groups: bool = False
+    require_relevance_cooccurrence: bool = False
+    relevance_exclude_terms: list[str] = Field(default_factory=list, max_length=50)
+
+    def resolved_oa_only(self, default: bool) -> bool:
+        return default if self.oa_only is None else self.oa_only
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "PubMedSearchRequest":
@@ -31,6 +41,9 @@ class PubMedSearchRequest(BaseModel):
             and self.year_start > self.year_end
         ):
             raise ValueError("year_start cannot be greater than year_end")
+        for group in self.relevance_groups:
+            if not group or not any(str(term).strip() for term in group):
+                raise ValueError("relevance_groups cannot contain an empty group")
         return self
 
 

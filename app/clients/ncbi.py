@@ -41,6 +41,7 @@ class NcbiClient:
         batch_size: int | None,
         min_cite: int | None = None,
         article_type: str | None = None,
+        oa_only: bool | None = None,
     ) -> PubMedFetchResult:
         started = time.perf_counter()
         request_count = 0
@@ -54,7 +55,7 @@ class NcbiClient:
             query,
             year_start,
             year_end,
-            oa_only=self.settings.pubmed_oa_only,
+            oa_only=self.settings.pubmed_oa_only if oa_only is None else oa_only,
         )
         oa_only = pubmed_query_has_oa_filter(full_query)
 

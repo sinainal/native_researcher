@@ -16,11 +16,34 @@ import httpx
 
 from app.services.native_mcp_client import NativeResearcherClient
 
-SERVER_INFO = {"name": "native-researcher", "version": "0.1.0"}
+SERVER_INFO = {"name": "native-researcher", "version": "0.2.0"}
 DEFAULT_BASE_URL = "http://127.0.0.1:8002"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRACE_PATH = os.getenv("NATIVE_RESEARCHER_MCP_TRACE", "").strip()
 SEARCH_SOURCES = ["openalex", "pubmed", "europe_pmc", "pmc", "core", "arxiv"]
+SERVER_INSTRUCTIONS = (
+    "Use native_sources before planning to inspect database availability. "
+    "Use native_questions and native_plan for systematic research, then native_research to execute and screen. "
+    "Keep the configured OA-only default for downloadable-first searches; set native_search oa_only=false only for broad discovery. "
+    "Use relevance groups, strict cooccurrence, and exclusions for deterministic prefiltering, but use native_research semantic screening for relation-level relevance. "
+    "Native_search results remain unscreened candidates and may include false positives. "
+    "Use native_pdf only after selecting relevant articles. Never treat search rank as evidence quality."
+)
+
+
+def _redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if any(marker in normalized for marker in ("api_key", "apikey", "token", "secret", "password")):
+                redacted[key] = "***" if item else item
+            else:
+                redacted[key] = _redact_secrets(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
 
 
 def _trace(event: str, payload: Any) -> None:
@@ -28,7 +51,13 @@ def _trace(event: str, payload: Any) -> None:
         return
     try:
         with open(TRACE_PATH, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": round(time.time(), 3), "event": event, "payload": payload}, ensure_ascii=False) + "\n")
+            fh.write(
+                json.dumps(
+                    {"ts": round(time.time(), 3), "event": event, "payload": _redact_secrets(payload)},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     except Exception:
         return
 
@@ -94,7 +123,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "native_search",
-        "description": "Run a direct live search against one database: PubMed, PMC, Europe PMC, OpenAlex, CORE, or arXiv.",
+        "description": "Run a direct live candidate search against one database. Supports per-search OA override and lexical relevance prefiltering; relation-level relevance still requires native_research screening.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -105,6 +134,30 @@ TOOLS: list[dict[str, Any]] = [
                 "year_end": {"type": "integer", "minimum": 1000, "maximum": 9999},
                 "min_cite": {"type": "integer", "minimum": 0},
                 "article_type": {"type": "string"},
+                "oa_only": {
+                    "type": "boolean",
+                    "description": "Override the OA-only default for this search. Omit to keep the configured default; use false for broad discovery.",
+                },
+                "relevance_groups": {
+                    "type": "array",
+                    "description": "Concept groups used to rerank results. Terms within a group are aliases (OR); groups are separate required concepts.",
+                    "items": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "maxItems": 12,
+                },
+                "require_all_relevance_groups": {
+                    "type": "boolean",
+                    "description": "When true, return only records whose title/abstract/keywords match every relevance group.",
+                },
+                "require_relevance_cooccurrence": {
+                    "type": "boolean",
+                    "description": "Strict mode: require all concept groups in the same title, sentence, or metadata passage.",
+                },
+                "relevance_exclude_terms": {
+                    "type": "array",
+                    "description": "Discard records containing any topic-specific exclusion phrase, such as polydopamine or sensor.",
+                    "items": {"type": "string"},
+                    "maxItems": 50,
+                },
                 "use_cache": {"type": "boolean"},
                 "response": {"type": "string", "enum": ["summary", "full"]},
             },
@@ -273,6 +326,7 @@ class NativeResearcherMCPServer:
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}, "resources": {}},
                         "serverInfo": SERVER_INFO,
+                        "instructions": SERVER_INSTRUCTIONS,
                     },
                 )
             if method == "notifications/initialized":
@@ -448,7 +502,17 @@ class NativeResearcherMCPServer:
             "max_results": _bounded_int(args.get("max_results"), default=20, minimum=1, maximum=5000),
             "use_cache": bool(args.get("use_cache", True)),
         }
-        for optional in ("year_start", "year_end", "min_cite", "article_type"):
+        for optional in (
+            "year_start",
+            "year_end",
+            "min_cite",
+            "article_type",
+            "oa_only",
+            "relevance_groups",
+            "require_all_relevance_groups",
+            "require_relevance_cooccurrence",
+            "relevance_exclude_terms",
+        ):
             if args.get(optional) is not None:
                 payload[optional] = args[optional]
         result = self.client.search(payload)
@@ -651,6 +715,9 @@ class NativeResearcherMCPServer:
         env = os.environ.copy()
         env["HOST"] = host
         env["PORT"] = port
+        # MCP must connect to the requested URL. Silently moving the backend to
+        # another port leaves a healthy but unreachable orphan process.
+        env["MAX_PORT_SCAN"] = "0"
         log_path = PROJECT_ROOT / "logs" / "native_researcher_mcp_backend.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "ab") as log_fh:
@@ -914,14 +981,6 @@ def _compact_browser_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if messages:
         compact["messages"] = messages[-5:]
     return {key: value for key, value in compact.items() if value is not None}
-
-
-def _redact_secrets(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = dict(payload)
-    for key in list(redacted):
-        if "key" in key.lower() or "token" in key.lower():
-            redacted[key] = "***" if redacted[key] else ""
-    return redacted
 
 
 def _read_message(stream: Any) -> tuple[dict[str, Any], str] | None:

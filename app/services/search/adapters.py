@@ -48,6 +48,7 @@ class PubMedSearchAdapter(BaseSearchAdapter):
             batch_size=request.batch_size,
             min_cite=request.min_cite,
             article_type=request.article_type,
+            oa_only=request.resolved_oa_only(self.client.settings.pubmed_oa_only),
         )
         return SearchResult(
             articles=result.articles,
@@ -77,7 +78,7 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
             ),
         }
         filters: list[str] = []
-        if self.settings.pubmed_oa_only:
+        if request.resolved_oa_only(self.settings.pubmed_oa_only):
             filters.append("is_oa:true")
         if request.year_start:
             filters.append(f"from_publication_date:{request.year_start}-01-01")
@@ -135,7 +136,8 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
 
     def _article_from_openalex(self, index: int, raw: dict[str, Any]) -> Article:
         doi = str(raw.get("doi") or "").replace("https://doi.org/", "") or None
-        primary_location = raw.get("primary_location") or raw.get("best_oa_location") or {}
+        primary_location = raw.get("primary_location") or {}
+        best_oa_location = raw.get("best_oa_location") or {}
         source = primary_location.get("source") if isinstance(primary_location, dict) else {}
         authors = []
         for authorship in raw.get("authorships", []) or []:
@@ -166,8 +168,18 @@ class OpenAlexSearchAdapter(BaseSearchAdapter):
             related_articles=related,
             reference_count=int(raw.get("referenced_works_count") or 0),
             doi=doi,
-            oa_pdf_url=((primary_location or {}).get("pdf_url") if isinstance(primary_location, dict) else None),
-            landing_page_url=((primary_location or {}).get("landing_page_url") if isinstance(primary_location, dict) else None),
+            oa_pdf_url=(
+                (best_oa_location or {}).get("pdf_url")
+                if isinstance(best_oa_location, dict)
+                else None
+            )
+            or ((primary_location or {}).get("pdf_url") if isinstance(primary_location, dict) else None),
+            landing_page_url=(
+                (primary_location or {}).get("landing_page_url")
+                if isinstance(primary_location, dict)
+                else None
+            )
+            or ((best_oa_location or {}).get("landing_page_url") if isinstance(best_oa_location, dict) else None),
         )
 
 
@@ -183,7 +195,7 @@ class EuropePMCSearchAdapter(BaseSearchAdapter):
         await self.rate_limiter.wait()
         await asyncio.sleep(0.05 + random.uniform(0.0, 0.03))
         query = request.query.strip()
-        if self.settings.pubmed_oa_only:
+        if request.resolved_oa_only(self.settings.pubmed_oa_only):
             query = f"({query}) AND OPEN_ACCESS:y"
         params = {
             "query": query,
@@ -246,8 +258,6 @@ class PMCSearchAdapter(BaseSearchAdapter):
         self.rate_limiter = AsyncRateLimiter(settings.pubmed_requests_per_second)
 
     async def search(self, request: PubMedSearchRequest, *, max_results: int) -> SearchResult:
-        await self.rate_limiter.wait()
-        await asyncio.sleep(0.08 + random.uniform(0.0, 0.04))
         params = {
             "db": "pmc",
             "term": request.query.strip(),
@@ -256,8 +266,7 @@ class PMCSearchAdapter(BaseSearchAdapter):
             "sort": "relevance",
         }
         try:
-            search_response = await self.http_client.get("/esearch.fcgi", params=self._augment_params(params))
-            search_response.raise_for_status()
+            search_response = await self._request_with_retry("/esearch.fcgi", params)
             search_payload = search_response.json() or {}
             search_result = search_payload.get("esearchresult") or {}
             id_list = search_result.get("idlist") or []
@@ -266,19 +275,15 @@ class PMCSearchAdapter(BaseSearchAdapter):
             return SearchResult(articles=[], request_count=1)
         if not id_list:
             return SearchResult(articles=[], request_count=1, total_results_found=total_results)
-        await self.rate_limiter.wait()
         try:
-            fetch_response = await self.http_client.get(
+            fetch_response = await self._request_with_retry(
                 "/efetch.fcgi",
-                params=self._augment_params(
-                    {
-                        "db": "pmc",
-                        "id": ",".join(str(item) for item in id_list),
-                        "retmode": "xml",
-                    }
-                ),
+                {
+                    "db": "pmc",
+                    "id": ",".join(str(item) for item in id_list),
+                    "retmode": "xml",
+                },
             )
-            fetch_response.raise_for_status()
         except httpx.HTTPError:
             return SearchResult(articles=[], request_count=2, total_results_found=total_results)
         return SearchResult(
@@ -286,6 +291,34 @@ class PMCSearchAdapter(BaseSearchAdapter):
             request_count=2,
             total_results_found=total_results,
         )
+
+    async def _request_with_retry(
+        self,
+        path: str,
+        params: dict[str, str | int],
+        *,
+        attempts: int = 3,
+    ) -> httpx.Response:
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(attempts):
+            await self.rate_limiter.wait()
+            await asyncio.sleep(0.08 + random.uniform(0.0, 0.04))
+            try:
+                response = await self.http_client.get(path, params=self._augment_params(params))
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                retryable = exc.response.status_code in {408, 425, 429, 500, 502, 503, 504}
+                if not retryable or attempt + 1 >= attempts:
+                    raise
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    raise
+            await asyncio.sleep(0.75 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def _augment_params(self, params: dict[str, str | int]) -> dict[str, str | int]:
         if self.settings.ncbi_api_key:
@@ -298,11 +331,19 @@ class PMCSearchAdapter(BaseSearchAdapter):
         root = ET.fromstring(xml_text)
         articles: list[Article] = []
         for index, article in enumerate(root.findall(".//article"), start=1):
-            title = "".join(article.findtext(".//article-title") or "").strip() or "Title not available"
+            title_node = article.find(".//article-title")
+            title = (
+                " ".join("".join(title_node.itertext()).split())
+                if title_node is not None
+                else ""
+            ) or "Title not available"
             journal = (article.findtext(".//journal-title") or "").strip() or None
             year = (article.findtext(".//pub-date/year") or "").strip() or None
-            abstract_parts = [part.text or "" for part in article.findall(".//abstract//p")]
-            abstract = " ".join(part.strip() for part in abstract_parts if part.strip())
+            abstract_parts = [
+                " ".join("".join(part.itertext()).split())
+                for part in article.findall(".//abstract//p")
+            ]
+            abstract = " ".join(part for part in abstract_parts if part)
             doi = None
             pmc_id = None
             pmid = ""
@@ -313,7 +354,7 @@ class PMCSearchAdapter(BaseSearchAdapter):
                     continue
                 if id_type == "doi":
                     doi = value
-                elif id_type == "pmc":
+                elif id_type in {"pmc", "pmcid"}:
                     pmc_id = value if value.startswith("PMC") else f"PMC{value}"
                 elif id_type == "pmid":
                     pmid = value
@@ -352,7 +393,7 @@ class CoreSearchAdapter(BaseSearchAdapter):
         }
         page_size = min(max(max_results * 2, 25), 100)
         query = self._build_core_query(request)
-        max_pages = 4 if (request.year_start is not None or request.year_end is not None or self.settings.pubmed_oa_only) else 6
+        max_pages = 4 if (request.year_start is not None or request.year_end is not None or request.resolved_oa_only(self.settings.pubmed_oa_only)) else 6
         request_count = 0
         total_results: int | None = None
         articles: list[Article] = []
@@ -417,7 +458,7 @@ class CoreSearchAdapter(BaseSearchAdapter):
         year_filter = self._core_year_filter(request.year_start, request.year_end)
         if year_filter:
             parts.append(year_filter)
-        if self.settings.pubmed_oa_only:
+        if request.resolved_oa_only(self.settings.pubmed_oa_only):
             parts.append("fullText:true")
         return " AND ".join(part for part in parts if part)
 
@@ -677,7 +718,9 @@ class ArxivSearchAdapter(BaseSearchAdapter):
         if not normalized:
             return "all:*"
         lowered = normalized.lower()
-        if any(token in lowered for token in ("all:", "ti:", "au:", "abs:", "cat:", "and", "or", "not")):
+        has_field_syntax = bool(re.search(r"(?:^|\s)(?:all|ti|au|abs|cat):", lowered))
+        has_boolean_syntax = bool(re.search(r"\b(?:and|or|not)\b", lowered))
+        if has_field_syntax or has_boolean_syntax:
             return normalized
         terms = [term for term in re.findall(r"[a-z0-9]+", lowered) if term]
         if not terms:

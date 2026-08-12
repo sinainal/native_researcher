@@ -8,8 +8,10 @@ import httpx
 
 from app.clients.ncbi import NcbiClient, build_pubmed_query
 from app.core.config import Settings
+from app.schemas.article import Article
 from app.schemas.pubmed import PubMedSearchRequest
 from app.services.pubmed_service import PubMedService
+from app.services.search.adapters import ArxivSearchAdapter
 from app.utils.cache import TTLCache
 
 
@@ -123,6 +125,71 @@ def test_build_pubmed_query_applies_oa_filter_only_once() -> None:
     assert build_pubmed_query("serotonin receptor", None, None, oa_only=True) == (
         "(serotonin receptor) AND free full text[sb]"
     )
+
+
+def test_relevance_groups_filter_and_rank_exact_concept_matches() -> None:
+    request = PubMedSearchRequest(
+        query="broad query",
+        relevance_groups=[["dopamine", "catecholamine"], ["polystyrene", "PS"], ["adsorption", "binding"]],
+        require_all_relevance_groups=True,
+    )
+    articles = [
+        Article(id=1, pmid="1", title="Dopamine sensor", abstract="Adsorption on titanium."),
+        Article(
+            id=2,
+            pmid="2",
+            title="Adsorption of dopamine on polystyrene",
+            abstract="Binding of catecholamines was measured in water.",
+        ),
+        Article(id=3, pmid="3", title="Polystyrene in sepsis", abstract="No neurotransmitter was studied."),
+    ]
+
+    ranked = PubMedService._rank_by_relevance(articles, request)
+
+    assert [article.pmid for article in ranked] == ["2"]
+    assert ranked[0].research_meta["score"] == 1.0
+    assert ranked[0].research_meta["relevance"]["all_groups_present"] is True
+
+
+def test_oa_override_preserves_default_when_omitted() -> None:
+    assert PubMedSearchRequest(query="x").resolved_oa_only(True) is True
+    assert PubMedSearchRequest(query="x", oa_only=False).resolved_oa_only(True) is False
+    assert PubMedSearchRequest(query="x", oa_only=True).resolved_oa_only(False) is True
+
+
+def test_strict_relevance_requires_local_cooccurrence_and_honors_exclusions() -> None:
+    request = PubMedSearchRequest(
+        query="broad query",
+        relevance_groups=[["dopamine"], ["polystyrene"], ["adsorption"]],
+        require_all_relevance_groups=True,
+        require_relevance_cooccurrence=True,
+        relevance_exclude_terms=["polydopamine", "sensor"],
+    )
+    articles = [
+        Article(
+            id=1,
+            pmid="1",
+            title="Unrelated combined study",
+            abstract="Dopamine was measured in neurons. Polystyrene adsorbed a pesticide.",
+        ),
+        Article(
+            id=2,
+            pmid="2",
+            title="Adsorption of dopamine on polystyrene",
+            abstract="Direct aqueous interaction was measured.",
+        ),
+        Article(
+            id=3,
+            pmid="3",
+            title="Polydopamine sensor",
+            abstract="Dopamine adsorption on polystyrene was discussed.",
+        ),
+    ]
+
+    ranked = PubMedService._rank_by_relevance(articles, request)
+
+    assert [article.pmid for article in ranked] == ["2"]
+    assert ranked[0].research_meta["relevance"]["cooccurrence_passage"] == ranked[0].title
     assert build_pubmed_query("serotonin receptor AND free full text[sb]", None, None, oa_only=True) == (
         "serotonin receptor AND free full text[sb]"
     )
@@ -160,6 +227,10 @@ def test_pubmed_service_prefers_openalex_when_available() -> None:
                                     "source": {
                                         "display_name": "Nature Communications",
                                     },
+                                },
+                                "best_oa_location": {
+                                    "pdf_url": "https://example.org/one.pdf",
+                                    "landing_page_url": "https://repository.example.org/one",
                                 },
                                 "authorships": [
                                     {"author": {"display_name": "Jane Doe"}},
@@ -225,6 +296,8 @@ def test_pubmed_service_prefers_openalex_when_available() -> None:
         assert result.articles[0].citation_count == 55
         assert result.articles[0].pmid == "10101"
         assert result.articles[0].doi == "10.1000/openalex-one"
+        assert result.articles[0].oa_pdf_url == "https://example.org/one.pdf"
+        assert result.articles[0].landing_page_url == "https://example.org/one"
         assert result.articles[0].mesh_terms == ["Computational Drug Discovery Methods"]
         assert result.articles[0].keywords == ["Virtual Screening", "Protein-Ligand Docking"]
         assert result.articles[0].related_articles == ["W123", "W456"]
@@ -378,11 +451,17 @@ def test_pubmed_service_supports_pmc_search() -> None:
             download_root=Settings().download_root,
         )
 
+        fetch_calls = 0
+
         def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal fetch_calls
             if request.url.path.endswith("/esearch.fcgi"):
                 assert request.url.params["db"] == "pmc"
                 return httpx.Response(200, json={"esearchresult": {"idlist": ["12345"]}})
             if request.url.path.endswith("/efetch.fcgi"):
+                fetch_calls += 1
+                if fetch_calls == 1:
+                    return httpx.Response(429, json={"error": "rate limited"})
                 return httpx.Response(
                     200,
                     text=(
@@ -390,11 +469,11 @@ def test_pubmed_service_supports_pmc_search() -> None:
                         "<article>"
                         "<front><journal-meta><journal-title-group><journal-title>PMC Journal</journal-title></journal-title-group></journal-meta>"
                         "<article-meta>"
-                        "<article-id pub-id-type='pmc'>PMC12345</article-id>"
+                        "<article-id pub-id-type='pmcid'>PMC12345</article-id>"
                         "<article-id pub-id-type='doi'>10.1000/pmc</article-id>"
-                        "<article-title>PMC Search Article</article-title>"
+                        "<article-title>PMC <italic>Search</italic> Article</article-title>"
                         "<pub-date><year>2023</year></pub-date>"
-                        "<abstract><p>PMC abstract.</p></abstract>"
+                        "<abstract><p>PMC <bold>full</bold> abstract.</p></abstract>"
                         "</article-meta></front>"
                         "</article>"
                         "</pmc-articleset>"
@@ -422,6 +501,10 @@ def test_pubmed_service_supports_pmc_search() -> None:
         assert result.articles[0].source_record_id == "PMC12345"
         assert result.articles[0].pmc_id == "PMC12345"
         assert result.articles[0].doi == "10.1000/pmc"
+        assert result.articles[0].title == "PMC Search Article"
+        assert result.articles[0].abstract == "PMC full abstract."
+        assert result.articles[0].landing_page_url.endswith("/PMC12345/")
+        assert fetch_calls == 2
 
     asyncio.run(runner())
 
@@ -662,6 +745,13 @@ def test_pubmed_service_uses_core_year_query_to_fill_recent_results() -> None:
         assert result.articles[0].year == "2024"
 
     asyncio.run(runner())
+
+
+def test_arxiv_query_builder_does_not_treat_substrings_as_boolean_operators() -> None:
+    assert ArxivSearchAdapter._build_arxiv_query("molecular dynamics polymer adsorption") == (
+        "all:molecular AND all:dynamics AND all:polymer AND all:adsorption"
+    )
+    assert ArxivSearchAdapter._build_arxiv_query("ti:dopamine AND abs:polymer") == "ti:dopamine AND abs:polymer"
 
 
 def test_pubmed_service_supports_arxiv_search() -> None:

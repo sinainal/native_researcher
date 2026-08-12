@@ -158,6 +158,38 @@ def test_mcp_lists_research_tools() -> None:
     ]
 
 
+def test_initialize_includes_cross_tool_instructions() -> None:
+    response = make_server().handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert response is not None
+    instructions = response["result"]["instructions"]
+    assert "native_sources" in instructions
+    assert "unscreened" in instructions
+
+
+def test_trace_recursively_redacts_secrets(tmp_path, monkeypatch) -> None:
+    trace_path = tmp_path / "mcp.jsonl"
+    monkeypatch.setattr(mcp_server, "TRACE_PATH", str(trace_path))
+
+    mcp_server._trace(
+        "request",
+        {
+            "params": {
+                "arguments": {
+                    "api_key": "top-secret",
+                    "nested": {"access_token": "also-secret"},
+                    "topic": "dopamine adsorption",
+                }
+            }
+        },
+    )
+
+    payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    arguments = payload["payload"]["params"]["arguments"]
+    assert arguments["api_key"] == "***"
+    assert arguments["nested"]["access_token"] == "***"
+    assert arguments["topic"] == "dopamine adsorption"
+
+
 def test_questions_generate_criteria_and_pdf_questions() -> None:
     payload = tool_payload(call_tool(make_server(), "native_questions", {"topic": "dopamine receptor docking"}))
     assert payload["facts"]["screening_criteria"]
@@ -180,6 +212,30 @@ def test_search_passes_source_and_compacts_articles() -> None:
     )
     assert server.client.last_search_payload["preferred_source"] == "pubmed"
     assert payload["facts"]["articles"][0]["title"] == "A useful paper"
+
+
+def test_search_passes_broad_discovery_and_relevance_options() -> None:
+    server = make_server()
+    groups = [["dopamine", "catecholamine"], ["polystyrene"], ["adsorption", "binding"]]
+    tool_payload(
+        call_tool(
+            server,
+            "native_search",
+            {
+                "query": "dopamine polystyrene adsorption",
+                "oa_only": False,
+                "relevance_groups": groups,
+                "require_all_relevance_groups": True,
+                "require_relevance_cooccurrence": True,
+                "relevance_exclude_terms": ["polydopamine", "sensor"],
+            },
+        )
+    )
+    assert server.client.last_search_payload["oa_only"] is False
+    assert server.client.last_search_payload["relevance_groups"] == groups
+    assert server.client.last_search_payload["require_all_relevance_groups"] is True
+    assert server.client.last_search_payload["require_relevance_cooccurrence"] is True
+    assert server.client.last_search_payload["relevance_exclude_terms"] == ["polydopamine", "sensor"]
 
 
 def test_plan_extracts_executable_plan() -> None:
